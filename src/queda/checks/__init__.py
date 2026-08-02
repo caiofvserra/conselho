@@ -5,13 +5,13 @@ import logging
 
 from ..findings import Finding
 from . import (casos, contratos, diarias, empenhos, finalistica, forense,
-               fornecedores, opacidade, pessoal, rede)
+               fornecedores, opacidade, orcamento, pessoal, rede)
 
 log = logging.getLogger("queda.checks")
 
 # ordem = ordem das abas no relatório
-MODULOS = [finalistica, opacidade, diarias, pessoal, casos, empenhos,
-           contratos, rede, forense, fornecedores]
+MODULOS = [finalistica, orcamento, opacidade, diarias, pessoal, casos,
+           empenhos, contratos, rede, forense, fornecedores]
 
 
 def run_all(staged) -> list[Finding]:

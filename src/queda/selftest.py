@@ -176,13 +176,33 @@ def _staged() -> dict[str, pd.DataFrame]:
         {"BENEFICIARIO": "ASSOCIACAO DOS ENGENHEIROS X", "VALOR_TOTAL": 90000.0}
         for _ in range(4)])
 
+    # VALOR_ORCADO propositalmente subestimado nas diárias: é o padrão que a
+    # frente de orçamento tem de flagrar (dotação figurativa, execução muito
+    # acima) e que não aparece olhando só a despesa.
+    _ORCADO_PCT = {"Vencimentos e Salários": 1.05, "Diárias no País": 0.35,
+                   "Cargos em Comissão": 1.02}
     comparativo = pd.DataFrame([
         {"_ano": a, "NOME": nome, "ANALITICA": True,
-         "REALIZADO_EXERCICIO": base * (1.06 ** (a - 2013))}
+         "REALIZADO_EXERCICIO": base * (1.06 ** (a - 2013)),
+         "VALOR_ORCADO": base * (1.06 ** (a - 2013)) * _ORCADO_PCT[nome]}
         for a in range(2013, 2026)
         for nome, base in (("Vencimentos e Salários", 40e6),
                            ("Diárias no País", 2e6),
                            ("Cargos em Comissão", 6e6))])
+
+    receita = pd.DataFrame([
+        {"_ano": a, "NOME": "Anuidades", "ANALITICA": True,
+         "REALIZADO_EXERCICIO": 120e6 * (1.05 ** (a - 2013))}
+        for a in range(2013, 2026)])
+
+    balanco = pd.DataFrame([
+        {"_ano": a, "DOTACOES": 130e6 * (1.05 ** (a - 2013)),
+         "DOTACOES_ATUALIZADAS": 138e6 * (1.05 ** (a - 2013)),
+         "RECEITAS_REALIZADAS": 120e6 * (1.05 ** (a - 2013)),
+         "DESPESAS_EMPENHADAS": 125e6 * (1.05 ** (a - 2013)),
+         "DESPESAS_LIQUIDADAS": 118e6 * (1.05 ** (a - 2013)),
+         "DESPESAS_PAGAS": 115e6 * (1.05 ** (a - 2013))}
+        for a in range(2013, 2026)])
 
     # Fonte preferencial da frente "para onde vai o dinheiro": traz o CENTRO DE
     # CUSTO, única evidência do eixo FUNÇÃO (para que unidade se gastou).
@@ -220,6 +240,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "pagamentos": _pagamentos(), "empenhos": empenhos, "contratos": contratos,
         "aditivos": aditivos, "licitacoes": pd.DataFrame(), "convenios": convenios,
         "comparativo_despesa": comparativo, "despesas_centro_custo": centro_custo,
+        "comparativo_receita": receita, "balanco_orcamentario": balanco,
         "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
@@ -253,6 +274,11 @@ ESPERADOS = [
     "finalistica-matriz",              # natureza × função (dois eixos)
     "finalistica-verbas-politicas",    # diárias/jetons na direção e no plenário
     "finalistica-centros-custo",
+    # orçamento
+    "orcamento-execucao",
+    "orcamento-estouro-conta",         # conta que estoura a dotação todo ano
+    "orcamento-verbas-vs-dotacao",     # diárias executadas acima do aprovado
+    "orcamento-retorno-da-anuidade",   # quanto da receita volta como fiscalização
     # opacidade
     "opacidade-agregadores",           # "DIVERSOS FUNCIONARIOS"
     "opacidade-decomposicao-conta",    # o que há dentro do agregado
