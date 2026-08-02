@@ -11,6 +11,7 @@ import logging
 import pandas as pd
 
 from . import clients, config
+from .http import RateLimited
 from .utils import (classificar_pessoa, coluna, norm_nome, parse_data,
                     parse_valor, so_digitos)
 
@@ -512,7 +513,20 @@ def build_staged(desde: int | None, ate: int, *,
                         "ano_min": None, "ano_max": None, "anos_cobertos": 0,
                         "anos_faltando": "", "retomado": True})
                     continue
-            staged[nome] = executar()
+            try:
+                staged[nome] = executar()
+            except RateLimited:
+                # bloqueio por ritmo é sinal de parar tudo: insistir nas
+                # etapas seguintes só piora
+                raise
+            except Exception as e:
+                # Uma fonte fora do ar não pode derrubar a coleta inteira. O
+                # PNCP devolveu 503 na última etapa e matou uma rodada em que
+                # todo o resto já tinha vindo.
+                log.warning("etapa %s falhou (%s: %s) — seguindo com as demais",
+                            nome, type(e).__name__, e)
+                staged[nome] = _salvar(nome, pd.DataFrame())
+                _DIAGNOSTICO[-1]["erro"] = f"{type(e).__name__}: {e}"[:300]
     finally:
         # Grava o inventário mesmo se a coleta abortar no meio: sem isso, uma
         # queda no meio do caminho deixaria o operador sem saber o que já veio.

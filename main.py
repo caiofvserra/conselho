@@ -65,8 +65,9 @@ def main():
             return 0
         print("\n❌ modelo local indisponível. Para instalar:\n"
               "   curl -fsSL https://ollama.com/install.sh | sh\n"
-              "   ollama serve &\n"
-              f"   ollama pull {llm.MODELO_PADRAO}\n\n"
+              f"   ollama pull {llm.MODELO_PADRAO}\n"
+              f"   (o serviço é iniciado por este comando; log em "
+              f"{llm.LOG_SERVIDOR})\n\n"
               "O relatório roda completo sem isto — só ficam de fora o resumo "
               "executivo, a leitura das atas e o refino da taxonomia.",
               file=sys.stderr)

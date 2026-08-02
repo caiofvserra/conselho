@@ -105,13 +105,61 @@ def disponivel(*, revalidar: bool = False) -> bool:
     return _estado["ok"]
 
 
-def preparar(modelo: str = MODELO_PADRAO) -> bool:
-    """Baixa o modelo no Ollama local, se ainda não estiver lá.
+LOG_SERVIDOR = "/tmp/ollama-queda.log"
+
+
+def subir_servidor(espera: int = 90) -> bool:
+    """Sobe `ollama serve` em segundo plano e espera até responder.
+
+    Existe porque o modo óbvio falha em silêncio: subir o processo mandando
+    a saída para /dev/null e dormir alguns segundos não diz nada quando o
+    servidor morre no arranque, e o erro só aparece como "não está rodando".
+    Aqui a saída vai para um arquivo e, se não subir, o log é mostrado.
+    """
+    import shutil
+    import subprocess
+    import time
+
+    if _tags() is not None:
+        return True
+    if not shutil.which("ollama"):
+        log.error("binário `ollama` não encontrado no PATH. Instale com:\n"
+                  "  curl -fsSL https://ollama.com/install.sh | sh")
+        return False
+
+    log.info("subindo `ollama serve` (log em %s)...", LOG_SERVIDOR)
+    with open(LOG_SERVIDOR, "wb") as saida:
+        subprocess.Popen(["ollama", "serve"], stdout=saida, stderr=saida,
+                         start_new_session=True)
+    for _ in range(espera):
+        time.sleep(1)
+        if _tags() is not None:
+            log.info("Ollama no ar em %s", OLLAMA_HOST)
+            _estado.pop("ok", None)
+            return True
+    try:
+        with open(LOG_SERVIDOR) as f:
+            cauda = "".join(f.readlines()[-15:]).strip()
+    except OSError:
+        cauda = "(sem log)"
+    log.error("Ollama não subiu em %ds. Fim do log:\n%s", espera, cauda)
+    if "OLLAMA_MODELS" in os.environ and "drive" in os.environ["OLLAMA_MODELS"].lower():
+        log.error("OLLAMA_MODELS aponta para o Google Drive (%s). O Drive é um "
+                  "sistema de arquivos FUSE e não suporta as operações que o "
+                  "Ollama usa no diretório de modelos — deixe-o em disco "
+                  "local (ex.: /content/ollama).", os.environ["OLLAMA_MODELS"])
+    return False
+
+
+def preparar(modelo: str = MODELO_PADRAO, *, subir: bool = True) -> bool:
+    """Sobe o servidor se preciso e baixa o modelo, se ainda não estiver lá.
 
     Devolve True quando o modelo está disponível ao fim. O download é de
     alguns GB e só acontece uma vez por máquina.
     """
     tags = _tags()
+    if tags is None and subir and subir_servidor():
+        tags = _tags()
     if tags is None:
         log.error("Ollama não está rodando em %s. Instale e suba o serviço:\n"
                   "  curl -fsSL https://ollama.com/install.sh | sh\n"

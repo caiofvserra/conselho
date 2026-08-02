@@ -70,6 +70,23 @@ def run(staged) -> list[Finding]:
     if diag.empty:
         return achados
 
+    # ---- etapas que falharam com erro (fonte fora do ar, formato mudou)
+    if "erro" in diag.columns:
+        falhas = diag[diag["erro"].notna() & (diag["erro"].astype(str) != "")]
+        if not falhas.empty:
+            achados.append(Finding(
+                id="diagnostico-etapas-com-erro", frente=FRENTE, gravidade="alta",
+                titulo=f"{len(falhas)} etapa(s) da coleta falharam com erro",
+                descricao=(
+                    "Estas fontes não foram coletadas por erro de rede ou do "
+                    "servidor — não por ausência de dado. A coleta seguiu com "
+                    "as demais em vez de abortar, mas o que estas fontes "
+                    "alimentam está fora deste relatório. Erro de servidor "
+                    "(5xx) costuma ser transitório: rodar de novo com "
+                    "`--retomar` tenta só o que faltou."),
+                evidencia=falhas[["dataset", "linhas", "erro"]],
+            ))
+
     vazios = diag[diag["linhas"] == 0]["dataset"].tolist()
     faltando = [(d, *CRITICOS[d]) for d in vazios if d in CRITICOS]
     graves = [f for f in faltando if f[2] == "alta"]
