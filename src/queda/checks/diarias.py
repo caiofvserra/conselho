@@ -128,6 +128,80 @@ def run(staged) -> list[Finding]:
                            "anos indicados, e confrontar com as atas de presença.",
         ))
 
+    # ------------------------------------------------ 3b. cadência: mês e dia
+    if "DATA" in ind:
+        d = ind.dropna(subset=["DATA"]).copy()
+        d["_mes"] = pd.to_datetime(d["DATA"], errors="coerce").dt.to_period("M")
+        d["_dia"] = pd.to_datetime(d["DATA"], errors="coerce").dt.date
+
+        por_mes = (d.groupby(["FAVORECIDO_NORM", "_mes"])
+                   .agg(pagamentos=("VALOR", "size"), total=("VALOR", "sum"))
+                   .reset_index())
+        acima_mes = por_mes[por_mes["pagamentos"] > config.MAX_JETONS_MES]
+        if not acima_mes.empty:
+            acima_mes = acima_mes.copy()
+            acima_mes["_ano"] = acima_mes["_mes"].dt.year
+            acima_mes["_mes"] = acima_mes["_mes"].astype(str)
+            s = (acima_mes.groupby("_ano")["FAVORECIDO_NORM"].nunique()
+                 .to_frame("pessoas acima do limite mensal"))
+            achados.append(Finding(
+                id="diarias-limite-mensal", frente=FRENTE, gravidade="alta",
+                titulo=(f"{acima_mes['FAVORECIDO_NORM'].nunique()} pessoa(s) "
+                        f"receberam mais de {config.MAX_JETONS_MES} verbas num "
+                        "único mês"),
+                descricao=(
+                    "O jeton remunera a presença em sessão e a resolução do Confea "
+                    f"limita as sessões remuneráveis por mês (parâmetro em uso: "
+                    f"{config.MAX_JETONS_MES}). Passar disso significa uma de duas "
+                    "coisas: houve mais sessões do que o normativo permite "
+                    "remunerar, ou a verba está pagando outra coisa com o nome de "
+                    "jeton. Nos dois casos o pagamento precisa de justificativa "
+                    "individual. **Confirme o limite na resolução vigente em cada "
+                    "exercício** antes de tratar como irregularidade."),
+                evidencia=acima_mes.sort_values("pagamentos", ascending=False).head(300),
+                serie=s, grafico="bar", unidade="un",
+                tabela_anual=acima_mes.sort_values(["_ano", "pagamentos"],
+                                                   ascending=[True, False]).head(300),
+                base_legal=BASE_LEGAL,
+                como_verificar="Confrontar com as atas das sessões do mês: cada "
+                               "jeton deve corresponder a uma presença registrada.",
+            ))
+
+        por_dia = (d.groupby(["FAVORECIDO_NORM", "_dia"])
+                   .agg(pagamentos=("VALOR", "size"), total=("VALOR", "sum"),
+                        contas=("CONTA_EMPENHO", "nunique")
+                        if "CONTA_EMPENHO" in d else ("VALOR", "size"))
+                   .reset_index())
+        acumulo = por_dia[por_dia["pagamentos"] > config.MAX_JETONS_DIA]
+        if not acumulo.empty:
+            acumulo = acumulo.copy()
+            acumulo["_ano"] = pd.to_datetime(acumulo["_dia"]).dt.year
+            s = acumulo.groupby("_ano")["total"].sum().to_frame(
+                "valor acumulado no mesmo dia")
+            achados.append(Finding(
+                id="diarias-acumulacao-diaria", frente=FRENTE, gravidade="alta",
+                titulo=(f"{len(acumulo)} caso(s) de mais de uma verba paga à mesma "
+                        "pessoa no mesmo dia"),
+                descricao=(
+                    "Diária, jeton, quilometragem e verba de representação "
+                    "indenizam fatos distintos, mas acumulá-los no mesmo dia "
+                    "costuma ser vedado: quem recebe diária de viagem não pode "
+                    "receber, pelo mesmo dia, jeton de sessão presencial — as duas "
+                    "coisas não acontecem ao mesmo tempo. A coluna `contas` mostra "
+                    "quantas rubricas diferentes foram acionadas no dia; mais de "
+                    "uma é o caso a apurar primeiro."),
+                evidencia=acumulo.sort_values("total", ascending=False).head(300),
+                serie=s, grafico="bar",
+                tabela_anual=acumulo.sort_values(["_ano", "total"],
+                                                 ascending=[True, False]).head(300),
+                base_legal=BASE_LEGAL,
+                como_verificar="Pedir, para as datas listadas, o relatório de "
+                               "viagem e a ata da sessão: se a pessoa estava em "
+                               "deslocamento, não presidiu sessão presencial.",
+                metricas={"casos": int(len(acumulo)),
+                          "valor": round(float(acumulo["total"].sum()), 2)},
+            ))
+
     # ------------------------------------------------ 4. concentração anual
     if not rank.empty:
         conc = []

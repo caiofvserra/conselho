@@ -29,19 +29,39 @@ def _pagamentos() -> pd.DataFrame:
     rows = []
     # diárias sistemáticas para conselheiro/comissionado, 2013-2025
     for ano in range(2013, 2026):
-        for nome, cpf, n in ((_CONSELHEIRO, "***456789**", 130),
-                             (_COMISSIONADO, "***111222**", 60),
-                             (_EFETIVO, "***333444**", 5)):
+        # `por_mes` concentra os pagamentos do conselheiro em poucos meses: é o
+        # padrão de jeton acima do limite mensal que a frente tem de flagrar.
+        for nome, cpf, n, por_mes in ((_CONSELHEIRO, "***456789**", 130, 14),
+                                      (_COMISSIONADO, "***111222**", 60, 5),
+                                      (_EFETIVO, "***333444**", 5, 1)):
             for i in range(n):
+                mes = (i // por_mes) % 12 + 1
                 rows.append({
                     "_ano": ano, "NOME_RAZAO_SOCIAL": nome, "CPF_CNPJ": cpf,
                     "CONTA_EMPENHO": "Diárias no País",
                     "HISTORICO": f"Pagamento de diária evento {i}",
                     "VALOR": round(random.uniform(400, 1200), 2),
                     "VALOR_LIQUIDO": 0,
-                    "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/{(i % 12) + 1:02d}/{ano}",
+                    "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/{mes:02d}/{ano}",
                     "NUMERO_EMPENHO": i, "NUMERO_PAGAMENTO": i,
                 })
+    # acumulação no mesmo dia: diária de viagem e jeton de sessão presencial
+    # pelo mesmo dia — as duas coisas não acontecem ao mesmo tempo
+    for ano in range(2013, 2026):
+        for mes in (4, 9):
+            rows.append({
+                "_ano": ano, "NOME_RAZAO_SOCIAL": _CONSELHEIRO,
+                "CPF_CNPJ": "***456789**", "CONTA_EMPENHO": "Jetons a Conselheiros",
+                "HISTORICO": "sessao plenaria", "VALOR": 1500.0, "VALOR_LIQUIDO": 0,
+                "DATA_PAGAMENTO": f"15/{mes:02d}/{ano}",
+                "NUMERO_EMPENHO": 11000, "NUMERO_PAGAMENTO": 11000})
+            rows.append({
+                "_ano": ano, "NOME_RAZAO_SOCIAL": _CONSELHEIRO,
+                "CPF_CNPJ": "***456789**", "CONTA_EMPENHO": "Diárias no País",
+                "HISTORICO": "diaria de viagem", "VALOR": 900.0, "VALOR_LIQUIDO": 0,
+                "DATA_PAGAMENTO": f"15/{mes:02d}/{ano}",
+                "NUMERO_EMPENHO": 11500, "NUMERO_PAGAMENTO": 11500})
+
     # fracionamento: 5 pagamentos de 15k em 60 dias ao mesmo fornecedor
     for i in range(5):
         rows.append({"_ano": 2024, "NOME_RAZAO_SOCIAL": _FORN_FRACIONA,
@@ -273,6 +293,8 @@ ESPERADOS = [
     "diarias-volume-anual",            # >100 pagamentos de verba/ano
     "diarias-endpoint-vazio",          # endpoint vazio com gasto nos pagamentos
     "diarias-top-beneficiarios-ano",   # ranking ANUAL, não do período todo
+    "diarias-limite-mensal",           # mais de 12 verbas num mês
+    "diarias-acumulacao-diaria",       # duas verbas no mesmo dia
     # pessoal e finalidade
     "pessoal-renda-invisivel",         # indenização >30% do salário
     "pessoal-serie-historica",
