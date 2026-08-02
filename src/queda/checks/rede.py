@@ -16,6 +16,9 @@ from .common import df, fichas_cnpj, qsa_nomes
 
 FRENTE = "Rede de influência"
 
+# Acima disso o QSA é de banco/estatal/S-A aberta: sócios em comum não indicam nada.
+MAX_SOCIOS_QSA = 12
+
 
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
@@ -68,7 +71,13 @@ def run(staged) -> list[Finding]:
     homonimos = []
     for cnpj, ficha in fichas.items():
         razao = ficha.get("razao_social") or ficha.get("nome_fantasia") or cnpj
-        for socio in qsa_nomes(ficha):
+        socios = qsa_nomes(ficha)
+        # Bancos, estatais e S/A de capital aberto têm dezenas de diretores no
+        # QSA; incluí-los produzia falso positivo em massa na primeira rodada
+        # (o quadro do Banco do Brasil "compartilhava" sócios com tudo).
+        if len(socios) > MAX_SOCIOS_QSA:
+            continue
+        for socio in socios:
             socio_map.setdefault(socio, []).append(cnpj)
             if socio in pessoas_conselho:
                 homonimos.append({"socio": socio, "cnpj_fornecedor": cnpj,
@@ -93,18 +102,32 @@ def run(staged) -> list[Finding]:
             evidencia=pd.DataFrame(homonimos),
         ))
 
-    socios_repetidos = {s: cs for s, cs in socio_map.items() if len(set(cs)) > 1}
+    # Filiais da mesma empresa compartilham CNPJ-raiz (8 primeiros dígitos) e
+    # obviamente têm os mesmos sócios — não são "duas empresas".
+    def _raizes(cnpjs) -> set[str]:
+        return {c[:8] for c in cnpjs}
+
+    socios_repetidos = {s: cs for s, cs in socio_map.items()
+                        if len(_raizes(cs)) > 1}
     if socios_repetidos:
-        ev = pd.DataFrame([{"socio": s, "cnpjs": ", ".join(sorted(set(cs))),
-                            "n_empresas": len(set(cs))}
+        ev = pd.DataFrame([{"socio": s,
+                            "cnpjs": ", ".join(sorted(set(cs))),
+                            "n_grupos_economicos": len(_raizes(cs))}
                            for s, cs in socios_repetidos.items()]).sort_values(
-            "n_empresas", ascending=False)
+            "n_grupos_economicos", ascending=False)
         achados.append(Finding(
             id="rede-socios-compartilhados", frente=FRENTE, gravidade="media",
-            titulo=f"{len(ev)} sócio(s) presentes em mais de um fornecedor do órgão",
-            descricao="Empresas 'concorrentes' com sócios em comum minam a competição "
-                      "em licitações (indício de conluio/empresas de fachada).",
+            titulo=f"{len(ev)} sócio(s) presentes em grupos econômicos distintos "
+                   "que fornecem ao órgão",
+            descricao=("Empresas formalmente 'concorrentes' com sócio em comum minam "
+                       "a competição na licitação (indício de conluio ou de empresa "
+                       "de fachada). Já descontados dois falsos positivos: filiais "
+                       "do mesmo CNPJ-raiz e quadros societários com mais de "
+                       f"{MAX_SOCIOS_QSA} sócios (bancos e S/A de capital aberto)."),
             evidencia=ev,
+            como_verificar="Conferir no Portal da Transparência e na Jucesp se os "
+                           "homônimos são a mesma pessoa (mesmo CPF) e se as "
+                           "empresas disputaram a mesma licitação.",
         ))
 
     # -------------------------------------------------- convênios recorrentes

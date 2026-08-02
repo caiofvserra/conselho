@@ -80,6 +80,7 @@ MAX_DIARIAS_ANO = 100            # nº de diárias/ano por pessoa acima disso vi
 LIMITE_DISPENSA = 50_000.0       # piso p/ análise de fracionamento (Lei 14.133 serviços)
 JANELA_FRACIONAMENTO_DIAS = 90
 ADITIVO_LIMITE_PCT = 25.0        # % acumulado de aditivos sobre o contrato original
+PISO_CONTRATO_ADITIVO = 50_000.0 # contratos abaixo disso distorcem o % de aditivo
 PISO_ANALISE_FORNECEDOR = 50_000.0   # só consulta CNPJ de quem recebeu acima disso
 MAX_CONSULTAS_CNPJ = 150
 IDADE_MINIMA_EMPRESA_DIAS = 180  # empresa criada há menos que isso antes do 1º contrato

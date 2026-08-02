@@ -58,6 +58,59 @@ def _pagamentos() -> pd.DataFrame:
                      "CONTA_EMPENHO": "Serviços de Terceiros PJ", "HISTORICO": "contrato",
                      "VALOR": v, "VALOR_LIQUIDO": v, "DATA_PAGAMENTO": "10/05/2023",
                      "NUMERO_EMPENHO": 1000, "NUMERO_PAGAMENTO": 1000})
+
+    # --- rótulo agregador que esconde o beneficiário (o "DIVERSOS FUNCIONARIOS")
+    for ano in range(2013, 2026):
+        for conta, v in (("Vencimentos e Salários", 4_000_000.0),
+                         ("Diárias no País", 300_000.0),
+                         ("Vale-Refeição", 500_000.0)):
+            rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": "DIVERSOS FUNCIONARIOS",
+                         "CPF_CNPJ": "", "CONTA_EMPENHO": conta,
+                         "HISTORICO": "folha", "VALOR": v, "VALOR_LIQUIDO": v,
+                         "DATA_PAGAMENTO": f"20/06/{ano}",
+                         "NUMERO_EMPENHO": 5000, "NUMERO_PAGAMENTO": 5000})
+
+    # --- assinaturas forenses ---------------------------------------------
+    # (a) valores uniformes: violam Benford
+    for i in range(700):
+        rows.append({"_ano": 2024, "NOME_RAZAO_SOCIAL": f"FORNECEDOR UNIF {i % 40}",
+                     "CPF_CNPJ": f"{10000000000000 + i}",
+                     "CONTA_EMPENHO": "Material de Consumo", "HISTORICO": "compra",
+                     "VALOR": round(random.uniform(300, 999), 2), "VALOR_LIQUIDO": 0,
+                     "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/{(i % 12) + 1:02d}/2024",
+                     "NUMERO_EMPENHO": 2000 + i, "NUMERO_PAGAMENTO": 2000 + i})
+    # (b) represamento logo abaixo do limite de dispensa
+    for i in range(40):
+        rows.append({"_ano": 2023, "NOME_RAZAO_SOCIAL": f"BORDA LTDA {i % 8}",
+                     "CPF_CNPJ": f"{20000000000000 + i}",
+                     "CONTA_EMPENHO": "Serviços de Terceiros PJ",
+                     "HISTORICO": "servico", "VALOR": 47000.0 + i * 50,
+                     "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/07/2023",
+                     "NUMERO_EMPENHO": 3000 + i, "NUMERO_PAGAMENTO": 3000 + i})
+    # (c) corrida de dezembro
+    for i in range(120):
+        rows.append({"_ano": 2022, "NOME_RAZAO_SOCIAL": f"FIM DE ANO SA {i % 10}",
+                     "CPF_CNPJ": f"{30000000000000 + i}",
+                     "CONTA_EMPENHO": "Serviços de Terceiros PJ",
+                     "HISTORICO": "empenho de dezembro", "VALOR": 90000.0,
+                     "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/12/2022",
+                     "NUMERO_EMPENHO": 4000 + i, "NUMERO_PAGAMENTO": 4000 + i})
+    # (d) estornos
+    for i in range(6):
+        rows.append({"_ano": 2024, "NOME_RAZAO_SOCIAL": "GAMA SERVICOS LTDA",
+                     "CPF_CNPJ": "55666777000188",
+                     "CONTA_EMPENHO": "Serviços de Terceiros PJ",
+                     "HISTORICO": "estorno", "VALOR": -25000.0, "VALOR_LIQUIDO": 0,
+                     "DATA_PAGAMENTO": f"{i + 1:02d}/09/2024",
+                     "NUMERO_EMPENHO": 6000 + i, "NUMERO_PAGAMENTO": 6000 + i})
+    # (e) mesmo favorecido + mesmo valor, repetido em janela curta
+    for i in range(4):
+        rows.append({"_ano": 2024, "NOME_RAZAO_SOCIAL": "REPETE LTDA",
+                     "CPF_CNPJ": "66777888000199",
+                     "CONTA_EMPENHO": "Serviços de Terceiros PJ",
+                     "HISTORICO": "parcela", "VALOR": 33333.33, "VALOR_LIQUIDO": 0,
+                     "DATA_PAGAMENTO": f"{i * 7 + 1:02d}/04/2024",
+                     "NUMERO_EMPENHO": 7000 + i, "NUMERO_PAGAMENTO": 7000 + i})
     df = pd.DataFrame(rows)
     df["DATA"] = pd.to_datetime(df["DATA_PAGAMENTO"], dayfirst=True, errors="coerce")
     df["PF"] = df["CPF_CNPJ"].map(eh_pf)
@@ -147,16 +200,34 @@ _FICHAS_FIXTURE = {
 }
 
 ESPERADOS = [
-    "diarias-volume-anual",            # >100 diárias/ano
+    # diárias e verbas
+    "diarias-serie-anual",
+    "diarias-volume-anual",            # >100 pagamentos de verba/ano
     "diarias-endpoint-vazio",          # endpoint vazio com gasto nos pagamentos
+    "diarias-top-beneficiarios-ano",   # ranking ANUAL, não do período todo
+    # pessoal e finalidade
     "pessoal-renda-invisivel",         # indenização >30% do salário
     "pessoal-serie-historica",
+    "finalistica-panorama",            # meio × fim
+    "finalistica-categorias",
+    # opacidade
+    "opacidade-agregadores",           # "DIVERSOS FUNCIONARIOS"
+    "opacidade-decomposicao-conta",    # o que há dentro do agregado
+    # execução
     "empenhos-fracionamento",
     "empenhos-pago-maior-que-empenhado",
-    "contratos-aditivos-limite",       # 40% de aditivo
+    "contratos-aditivos-limite",
+    # rede
     "rede-fornecedores-compartilhados",
     "rede-socio-homonimo",             # sócia = comissionada
-    "rede-socios-compartilhados",      # Pedro em 2 empresas
+    "rede-socios-compartilhados",      # grupos econômicos distintos
+    # forense estatística
+    "forense-benford",
+    "forense-bunching-dispensa",
+    "forense-dezembro",
+    "forense-estornos",
+    "forense-valores-repetidos",
+    # fornecedores
     "fornecedores-situacao-irregular", # DELTA baixada
     "fornecedores-empresa-recente",    # OMEGA aberta em 2023-03, pagamento 2023-05
 ]

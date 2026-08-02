@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .. import analytics as A
 from .. import config
 from ..findings import Finding
-from ..utils import norm_nome
+from ..utils import fmt_brl
 from .common import df
 
 FRENTE = "Contratos e licitações"
@@ -20,22 +21,69 @@ def run(staged) -> list[Finding]:
 
     # -------------------------------------------------- aditivos acima do limite
     if not ctr.empty and not adt.empty and "NUMERO_CONTRATO" in adt:
-        soma_adt = adt.groupby("NUMERO_CONTRATO")["VALOR"].sum().rename("total_aditivos")
+        # Aditivo de valor zero é prorrogação de prazo, não acréscimo — misturar
+        # os dois inflava o achado na primeira rodada.
+        adt_valor = adt[adt["VALOR"] > 0]
+        adt_prazo = adt[adt["VALOR"] <= 0]
+        soma_adt = (adt_valor.groupby("NUMERO_CONTRATO")["VALOR"]
+                    .agg(total_aditivos="sum", n_aditivos="size"))
         base = ctr.set_index("NUMERO_CONTRATO").join(soma_adt).reset_index()
         base["total_aditivos"] = base["total_aditivos"].fillna(0)
+        base["n_aditivos"] = base["n_aditivos"].fillna(0).astype(int)
         base["pct_aditivo"] = (100 * base["total_aditivos"] /
                                base["VALOR"].replace(0, pd.NA)).fillna(0).round(1)
-        estourados = base[base["pct_aditivo"] > config.ADITIVO_LIMITE_PCT]
+
+        # Contratos de valor irrisório fazem o percentual explodir sem que isso
+        # signifique irregularidade relevante — separados como ruído de base.
+        relevantes = base[base["VALOR"] >= config.PISO_CONTRATO_ADITIVO]
+        estourados = relevantes[relevantes["pct_aditivo"] > config.ADITIVO_LIMITE_PCT]
         if not estourados.empty:
+            acrescimo = float(estourados["total_aditivos"].sum())
+            cols = [c for c in ("NUMERO_CONTRATO", "CONTRATADA", "VALOR",
+                                "total_aditivos", "n_aditivos", "pct_aditivo",
+                                "DATA_INICIO_VIGENCIA") if c in estourados]
+            serie = pd.DataFrame()
+            if "INI" in estourados:
+                serie = A.serie_anual(
+                    estourados.assign(_ano=estourados["INI"].dt.year),
+                    "total_aditivos").rename(
+                        columns={"total_aditivos": "acréscimo por aditivo"})
             achados.append(Finding(
                 id="contratos-aditivos-limite", frente=FRENTE, gravidade="alta",
-                titulo=f"{len(estourados)} contrato(s) com aditivos acima de "
-                       f"{config.ADITIVO_LIMITE_PCT:.0f}% do valor original",
-                descricao="Acréscimo acumulado além do limite legal (25% p/ obras e "
-                          "serviços — Lei 8.666 art. 65 / Lei 14.133 art. 125).",
-                evidencia=estourados[["NUMERO_CONTRATO", "CONTRATADA", "VALOR",
-                                      "total_aditivos", "pct_aditivo"]]
-                .sort_values("pct_aditivo", ascending=False),
+                titulo=f"{len(estourados)} contrato(s) com acréscimo por aditivo "
+                       f"acima de {config.ADITIVO_LIMITE_PCT:.0f}% — "
+                       f"{fmt_brl(acrescimo)} somados",
+                descricao=(
+                    "Acréscimo acumulado de VALOR (aditivos de prazo puro foram "
+                    "excluídos) sobre contratos de pelo menos "
+                    f"{fmt_brl(config.PISO_CONTRATO_ADITIVO)}. Percentuais muito "
+                    "acima de 100% podem indicar também erro de cadastro no "
+                    "portal (aditivo lançado com o valor total do contrato em vez "
+                    "do incremento) — conferir o termo aditivo antes de concluir."),
+                evidencia=estourados[cols].sort_values("pct_aditivo", ascending=False),
+                serie=serie, grafico="bar",
+                base_legal="Lei 8.666/1993, art. 65, §1º e Lei 14.133/2021, "
+                           "art. 125 — acréscimo limitado a 25% (50% para reforma "
+                           "de edifício ou equipamento).",
+                como_verificar="Solicitar os termos aditivos dos contratos listados "
+                               "e verificar se o valor lançado é incremento ou "
+                               "valor global revisado, e qual a justificativa técnica.",
+                metricas={"acrescimo_total": round(acrescimo, 2),
+                          "contratos_ignorados_valor_irrisorio":
+                              int(len(base) - len(relevantes))},
+            ))
+        if not adt_prazo.empty:
+            achados.append(Finding(
+                id="contratos-prorrogacoes", frente=FRENTE, gravidade="info",
+                titulo=f"{len(adt_prazo)} aditivo(s) sem acréscimo de valor "
+                       "(prorrogação de prazo)",
+                descricao="Separados do achado anterior. Prorrogações sucessivas do "
+                          "mesmo contrato indicam serviço contínuo renovado em vez "
+                          "de nova licitação — legítimo até o limite legal de "
+                          "prazo, mas vale acompanhar a contagem.",
+                evidencia=(adt_prazo.groupby("NUMERO_CONTRATO").size()
+                           .sort_values(ascending=False)
+                           .to_frame("prorrogacoes").reset_index().head(50)),
             ))
 
     # -------------------------------------------------- pagamento após vigência
