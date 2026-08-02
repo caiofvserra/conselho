@@ -2,6 +2,9 @@ requests>=2.31
 pandas>=2.0
 
 # Opcionais — a ferramenta roda sem eles, com métrica mais grosseira ou etapa
-# desligada. Já presentes no Google Colab, exceto o SDK da Anthropic.
-# networkx>=3.1     # intermediação exata na rede (sem ele: grau de ligação)
-# anthropic>=0.40   # classificação por LLM e sumário executivo
+# desligada. networkx já vem no Google Colab.
+# networkx>=3.1   # intermediação exata na rede (sem ele: grau de ligação)
+#
+# A camada de IA NÃO é um pacote Python: é o Ollama rodando um modelo local.
+#   curl -fsSL https://ollama.com/install.sh | sh && ollama serve &
+#   python main.py llm

@@ -37,26 +37,49 @@ python main.py selftest                      # valida o pipeline sem rede (fixtu
   ([link direto](https://colab.research.google.com/github/caiofvserra/queda/blob/claude/crea-sp-audit-tool-m9nw7t/notebooks/queda_colab.ipynb)) —
   recomendado, ver privacidade abaixo.
 
-### Camada opcional de IA
+### Camada opcional de IA — modelo **local**, via Ollama
 
-Nada do que o relatório afirma depende de LLM: todo número sai de regra
-determinística. O modelo entra só onde regra nenhuma serve.
+Nada do que o relatório afirma depende do modelo: todo número sai de regra
+determinística. Ele entra só onde regra nenhuma serve — ler prosa e enquadrar
+texto ambíguo.
+
+O modelo roda **na sua máquina**. Nenhum dado do conselho — favorecido, valor,
+deliberação — trafega para servidor de terceiro, o que é a mesma exigência que
+rege as consultas às APIs do Crea. Sem chave, sem custo por token.
 
 ```bash
-pip install anthropic
-export QUEDA_ANTHROPIC_API_KEY=sk-ant-...
-python main.py all            # ou `--sem-llm` para desligar mesmo com a chave
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &
+python main.py llm        # baixa o modelo e confere se está pronto
+python main.py all        # ou `--sem-llm` para rodar sem a camada de IA
 ```
 
-| Onde | O que o LLM faz | O que ele **não** faz |
+| Onde | O que o modelo faz | O que ele **não** faz |
 |---|---|---|
 | Resíduo da taxonomia | enquadra as contas que o regex não classificou, priorizadas por R$ | não recalcula valor; a origem fica registrada no achado de cobertura |
 | Atas dos colegiados | lê a prosa da deliberação e extrai decisão, beneficiário e valor mencionado | não infere o que não está escrito, não julga legalidade |
 | Resumo executivo | redige sobre os achados já calculados | não vê dado bruto nem produz número novo |
 
-Todas as respostas são cacheadas em disco; rodadas seguintes não repetem
-chamadas. `networkx` (opcional) dá a medida exata de intermediação na rede —
-sem ele, a métrica cai para o grau de ligação.
+Modelos (variável `QUEDA_LLM_MODELO`):
+
+| Modelo | Tamanho | Onde roda |
+|---|---|---|
+| `llama3.2:3b` | ~2,0 GB | CPU; qualidade menor |
+| `qwen2.5:7b-instruct` | ~4,7 GB | **padrão** — GPU T4 do Colab gratuito |
+| `gemma2:9b` | ~5,4 GB | GPU T4 |
+| `qwen2.5:14b-instruct` | ~9 GB | GPU maior; melhor resultado |
+
+Modelo pequeno erra mais que modelo grande, e o desenho conta com isso: o
+esquema JSON é imposto pelo próprio Ollama, a temperatura é zero, os lotes são
+curtos, a resposta só é aceita se cair numa categoria existente e itens de
+baixa confiança são descartados. Tudo é cacheado em disco — rodadas seguintes
+não repetem geração.
+
+Outras variáveis: `QUEDA_OLLAMA_HOST` (padrão `http://localhost:11434`),
+`QUEDA_LLM_LOTE`, `QUEDA_SEM_LLM=1`.
+
+`networkx` (opcional, `pip install networkx`) dá a medida exata de
+intermediação na rede — sem ele, a métrica cai para o grau de ligação.
 
 ## Frentes de análise
 
@@ -98,7 +121,7 @@ sem ele, a métrica cai para o grau de ligação.
    pessoa não são concorrentes), nós de maior intermediação, convênios com
    teste de ciclo eleitoral e detecção de rateio por valor redondo idêntico.
 10. **Deliberações dos colegiados** — decisões com efeito financeiro extraídas
-    das atas por LLM e cruzadas com os pagamentos.
+    das atas pelo modelo local e cruzadas com os pagamentos.
 11. **Forense estatística** — Benford de 1 e 2 dígitos (limiares de Nigrini
     próprios de cada teste), represamento abaixo do limite de dispensa do ano,
     valores redondos, pares favorecido+valor repetidos, sazonalidade de
@@ -118,6 +141,8 @@ janelas, anos eleitorais) são parâmetros em `src/queda/config.py`.
 
 - Somente GETs anônimos a APIs públicas: sem login, token, cookie ou qualquer
   identificador; User-Agent genérico de navegador; ~1 requisição/segundo.
+- A camada de IA é **local** (Ollama): os dados coletados não são enviados a
+  nenhum serviço de terceiro para serem lidos ou classificados.
 - Rodando no Colab, o tráfego parte de IPs do Google — não da sua conexão.
 - `data/` e `output/` são **gitignored**: nada de dados ou relatórios vai para
   o GitHub. Se anonimato importa, mantenha este repositório **privado** — a

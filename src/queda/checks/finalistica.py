@@ -254,12 +254,13 @@ def run(staged) -> list[Finding]:
             descricao=(
                 "Contas cujo nome não permitiu enquadramento automático — a "
                 "medida de confiabilidade de toda esta frente. "
-                + (f"O LLM resolveu {info_llm.get('rubricas', 0)} rubrica(s) "
-                   f"deste resíduo ({fmt_brl(info_llm['valor_reclassificado'])}); "
-                   "o que restou está abaixo."
+                + (f"O modelo local resolveu {info_llm.get('rubricas', 0)} "
+                   f"rubrica(s) deste resíduo "
+                   f"({fmt_brl(info_llm['valor_reclassificado'])}); o que "
+                   "restou está abaixo."
                    if info_llm.get("reclassificadas") else
-                   "Rodar com `QUEDA_ANTHROPIC_API_KEY` definida aciona a "
-                   "classificação por LLM e reduz este resíduo.")
+                   "Rodar `python main.py llm` prepara o modelo local (Ollama) "
+                   "e reduz este resíduo.")
                 + " A lista também serve para refinar as regras determinísticas."),
             evidencia=T.maiores_nao_classificados(
                 base["rotulo"], base["categoria"], base["valor"]),

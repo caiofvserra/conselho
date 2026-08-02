@@ -7,6 +7,11 @@ Uso:
   python main.py report                                      # regenera o HTML
   python main.py all      [--desde AAAA|auto] [--ate AAAA]   # tudo
   python main.py selftest                                    # pipeline com fixtures, sem rede
+  python main.py llm                                         # prepara o modelo local (Ollama)
+
+A camada de IA é opcional e roda 100% local via Ollama — nenhum dado do
+conselho sai da máquina. Sem ela, o relatório sai completo, sem o resumo
+executivo, sem a leitura das atas e sem o refino da taxonomia.
 """
 from __future__ import annotations
 
@@ -24,7 +29,8 @@ from queda import config  # noqa: E402
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("cmd", choices=["fetch", "analyze", "report", "all", "selftest"])
+    p.add_argument("cmd", choices=["fetch", "analyze", "report", "all",
+                                   "selftest", "llm"])
     p.add_argument("--desde", default="auto",
                    help="ano inicial, ou 'auto' para sondar retroativamente (padrão)")
     p.add_argument("--ate", type=int, default=config.ANO_ATUAL)
@@ -45,6 +51,22 @@ def main():
     if args.cmd == "selftest":
         from queda import selftest
         return selftest.run()
+
+    if args.cmd == "llm":
+        from queda import llm
+        print(f"Ollama em {llm.OLLAMA_HOST}, modelo {llm.MODELO_PADRAO}")
+        if llm.preparar():
+            print("✅ modelo local pronto — `python main.py all` já usa a "
+                  "camada de IA")
+            return 0
+        print("\n❌ modelo local indisponível. Para instalar:\n"
+              "   curl -fsSL https://ollama.com/install.sh | sh\n"
+              "   ollama serve &\n"
+              f"   ollama pull {llm.MODELO_PADRAO}\n\n"
+              "O relatório roda completo sem isto — só ficam de fora o resumo "
+              "executivo, a leitura das atas e o refino da taxonomia.",
+              file=sys.stderr)
+        return 1
 
     from queda.http import RateLimited
     desde = None if args.desde == "auto" else int(args.desde)
@@ -69,22 +91,22 @@ def main():
 
     achados = run_all(staged)
 
-    # Resumo executivo por LLM: opcional e não bloqueante. O modelo NÃO calcula
-    # nada nem vê dado bruto — só redige sobre os números que os checks
-    # determinísticos já produziram. Sem QUEDA_ANTHROPIC_API_KEY, o relatório
-    # sai igual, sem a seção.
+    # Resumo executivo pelo modelo LOCAL: opcional e não bloqueante. Ele NÃO
+    # calcula nada nem vê dado bruto — só redige sobre os números que os checks
+    # determinísticos já produziram. Sem Ollama no ar, o relatório sai igual,
+    # sem a seção.
     resumo_llm = ""
     if not args.sem_llm:
         from queda import llm
         if llm.disponivel():
-            log.info("gerando resumo executivo com %s", llm.MODELO_PADRAO)
+            log.info("gerando resumo executivo com %s (local)", llm.MODELO_PADRAO)
             resumo_llm = llm.resumo_executivo([
                 {"id": f.id, "frente": f.frente, "gravidade": f.gravidade,
                  "titulo": f.titulo, "metricas": f.metricas}
-                for f in achados if f.gravidade in ("alta", "media")][:60])
+                for f in achados if f.gravidade in ("alta", "media")][:40])
         else:
-            log.info("resumo executivo por LLM desligado "
-                     "(defina QUEDA_ANTHROPIC_API_KEY e instale `anthropic`)")
+            log.info("camada de IA desligada — rode `python main.py llm` para "
+                     "preparar o modelo local")
 
     report.gerar(achados, staged, resumo_llm=resumo_llm)
     altas = [f for f in achados if f.gravidade == "alta"]

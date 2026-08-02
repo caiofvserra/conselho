@@ -208,11 +208,12 @@ def refinar_residuo(rotulos: pd.Series, categorias: pd.Series,
     A regra determinística resolve a massa; o que sobra são nomes de conta
     genéricos ou idiossincráticos, em que um classificador de linguagem se sai
     melhor que regex. Três salvaguardas: só as contas que concentram valor vão
-    (o custo é limitado e o benefício é onde o dinheiro está), a resposta só é
-    aceita nas categorias existentes, e a origem de cada classificação fica
-    registrada — nada do que o LLM decidir se confunde com regra.
+    (num modelo local o custo é tempo de GPU, e o benefício está onde o
+    dinheiro está), a resposta só é aceita nas categorias existentes, e a
+    origem de cada classificação fica registrada — nada do que o modelo
+    decidir se confunde com regra.
 
-    Sem `QUEDA_ANTHROPIC_API_KEY` devolve as categorias intactas.
+    Sem Ollama no ar devolve as categorias intactas.
     """
     from . import llm
 

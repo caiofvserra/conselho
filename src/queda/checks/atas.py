@@ -1,15 +1,15 @@
-"""Frente — Deliberações dos colegiados (leitura por LLM).
+"""Frente — Deliberações dos colegiados (leitura por modelo local).
 
 As atas são a única fonte que liga o dinheiro a uma DECISÃO: quem propôs, quem
 aprovou, com que justificativa. Mas vêm como texto corrido, e é por isso que
 ninguém as cruza com a despesa.
 
-Aqui o LLM faz o único trabalho que uma regra não faz — ler prosa e extrair
+Aqui o modelo faz o único trabalho que uma regra não faz — ler prosa e extrair
 estrutura — e nada além disso: não calcula valor, não julga legalidade, não
 decide gravidade. O que ele devolve (tipo da decisão, beneficiário, valor
 mencionado) volta para o mundo determinístico e é cruzado com os pagamentos
-por nome normalizado. Sem `QUEDA_ANTHROPIC_API_KEY` a frente sai um aviso e
-nada mais — nenhum número deste relatório depende dela.
+por nome normalizado. Sem Ollama no ar a frente sai um aviso e nada mais —
+nenhum número deste relatório depende dela.
 """
 from __future__ import annotations
 
@@ -35,13 +35,15 @@ def run(staged) -> list[Finding]:
     if not llm.disponivel():
         achados.append(Finding(
             id="atas-llm-desligado", frente=FRENTE, gravidade="info",
-            titulo=f"{len(atas)} ata(s) coletadas, mas a leitura por LLM está "
-                   "desligada",
+            titulo=f"{len(atas)} ata(s) coletadas, mas a leitura por modelo de "
+                   "linguagem está desligada",
             descricao=(
                 "As deliberações são texto corrido: sem um leitor de linguagem "
                 "não há como extrair quem decidiu o quê e cruzar com a despesa. "
-                "Defina `QUEDA_ANTHROPIC_API_KEY` (e instale `anthropic`) para "
-                "ligar esta frente. O restante do relatório não depende dela."),
+                "Rode `python main.py llm` para preparar o modelo local "
+                "(Ollama) e ligar esta frente — não é preciso chave nem enviar "
+                "dado a serviço nenhum. O restante do relatório não depende "
+                "dela."),
             evidencia=(atas.groupby("_ano").size().to_frame("atas").reset_index()
                        if "_ano" in atas else pd.DataFrame()),
         ))
