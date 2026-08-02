@@ -18,26 +18,32 @@ import pandas as pd
 from .. import analytics as A
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import fmt_brl
+from ..utils import coluna, fmt_brl
 from .common import df
 
 FRENTE = "Para onde vai o dinheiro"
 
 
+COLS = ["_ano", "valor", "categoria", "funcao", "unidade", "rotulo"]
+
+
 def _base_despesa(staged) -> tuple[pd.DataFrame, str]:
-    """Devolve (DataFrame com colunas _ano, valor, categoria, rotulo), fonte."""
+    """Devolve (DataFrame com _ano, valor, categoria, funcao, unidade, rotulo), fonte.
+
+    `categoria` é o eixo NATUREZA (o que se comprou) e `funcao` é o eixo FUNÇÃO
+    (para que unidade se comprou) — medidos separadamente, ver taxonomia.py.
+    """
     cc = df(staged, "despesas_centro_custo")
     if not cc.empty and "VALOR_TOTAL" in cc:
         d = cc.copy()
         d["valor"] = pd.to_numeric(d["VALOR_TOTAL"], errors="coerce").fillna(0)
         if "ANALITICO" in d:                       # evita somar totalizadores
             d = d[d["ANALITICO"].astype(bool)]
-        d["categoria"] = T.classificar_series(
-            d.get("NOME_CONTA", pd.Series("", index=d.index)),
-            d.get("NOME_CENTRO_CUSTO", pd.Series("", index=d.index)))
-        d["rotulo"] = (d.get("NOME_CENTRO_CUSTO", "").fillna("") + " / " +
-                       d.get("NOME_CONTA", "").fillna(""))
-        return d[["_ano", "valor", "categoria", "rotulo"]], "centro de custo"
+        d["unidade"] = coluna(d, "NOME_CENTRO_CUSTO").fillna("").astype(str)
+        d["categoria"] = T.classificar_series(coluna(d, "NOME_CONTA"), d["unidade"])
+        d["funcao"] = T.classificar_funcao_series(d["unidade"], d["categoria"])
+        d["rotulo"] = d["unidade"] + " / " + coluna(d, "NOME_CONTA").fillna("")
+        return d[COLS], "centro de custo"
 
     comp = df(staged, "comparativo_despesa")
     if not comp.empty:
@@ -48,19 +54,22 @@ def _base_despesa(staged) -> tuple[pd.DataFrame, str]:
             if "ANALITICA" in d:
                 d = d[d["ANALITICA"].astype(bool)]
             d["valor"] = pd.to_numeric(d[valor_col], errors="coerce").fillna(0)
-            d["categoria"] = T.classificar_series(
-                d.get("NOME", pd.Series("", index=d.index)))
-            d["rotulo"] = d.get("NOME", "")
-            return d[["_ano", "valor", "categoria", "rotulo"]], "conta contábil"
+            d["categoria"] = T.classificar_series(coluna(d, "NOME"))
+            # sem centro de custo esta fonte não mede função: só o sinal fraco
+            d["unidade"] = ""
+            d["funcao"] = T.classificar_funcao_series(d["unidade"], d["categoria"])
+            d["rotulo"] = coluna(d, "NOME")
+            return d[COLS], "conta contábil"
 
     pg = df(staged, "pagamentos")
     if not pg.empty and "VALOR" in pg:
         d = pg.copy()
         d["valor"] = d["VALOR"]
-        d["categoria"] = T.classificar_series(
-            d.get("CONTA_EMPENHO", pd.Series("", index=d.index)))
-        d["rotulo"] = d.get("CONTA_EMPENHO", "")
-        return d[["_ano", "valor", "categoria", "rotulo"]], "pagamentos"
+        d["categoria"] = T.classificar_series(coluna(d, "CONTA_EMPENHO"))
+        d["unidade"] = coluna(d, "CENTRO_CUSTO").fillna("").astype(str)
+        d["funcao"] = T.classificar_funcao_series(d["unidade"], d["categoria"])
+        d["rotulo"] = coluna(d, "CONTA_EMPENHO")
+        return d[COLS], "pagamentos"
 
     return pd.DataFrame(), "indisponível"
 
@@ -164,6 +173,72 @@ def run(staged) -> list[Finding]:
                       "total_verbas": round(float(verbas.sum()), 2),
                       "total_fiscalizacao": round(float(fiscal.sum()), 2)},
         ))
+
+    # ------------------------------------------------ 4b. matriz natureza × função
+    mede_funcao = float(base.loc[base["funcao"] != "NAO_IDENTIFICADA",
+                                 "valor"].sum())
+    if mede_funcao > 0:
+        m = T.matriz(base["categoria"], base["funcao"], base["valor"])
+        serie_funcao = A.serie_anual(base, "valor", by="funcao")
+        serie_funcao = serie_funcao.rename(columns=T.FUNCOES)
+        total_f = float(base["valor"].sum())
+        pct_fiscal = 100 * float(
+            base.loc[base["funcao"] == "FISCALIZACAO", "valor"].sum()) / total_f
+        pct_direcao = 100 * float(
+            base.loc[base["funcao"] == "DIRECAO_SUPERIOR", "valor"].sum()) / total_f
+        achados.append(Finding(
+            id="finalistica-matriz", frente=FRENTE,
+            gravidade="alta" if pct_direcao > pct_fiscal else "info",
+            titulo=(f"Fiscalização levou {pct_fiscal:.1f}% da despesa; direção "
+                    f"superior levou {pct_direcao:.1f}%"),
+            descricao=(
+                "Matriz de dois eixos: **natureza** (o que se comprou — salário, "
+                "diária, aluguel, obra) nas linhas e **função** (para que unidade "
+                "— fiscalização, atendimento, direção superior, administração) nas "
+                "colunas. Um salário de agente fiscal e um salário de assessor de "
+                "gabinete têm a mesma natureza e funções opostas; só o cruzamento "
+                "distingue 'gasta muito com pessoal' de 'gasta muito com pessoal "
+                "que não fiscaliza'. A coluna de função vem do centro de custo — "
+                "quando ele falta, a função é inferida da conta e o resíduo cai "
+                "em 'não identificada'."),
+            evidencia=m.reset_index().rename(columns={"index": "natureza"}),
+            serie=serie_funcao, grafico="area_stacked",
+            tabela_anual=serie_funcao.reset_index(),
+            base_legal="Lei 5.194/1966, art. 34 (fiscalizar o exercício "
+                       "profissional é a competência primária do Crea); Lei "
+                       "4.320/1964, art. 15 (despesa por elemento).",
+            metricas={"pct_fiscalizacao": round(pct_fiscal, 2),
+                      "pct_direcao_superior": round(pct_direcao, 2),
+                      "pct_funcao_identificada": round(100 * mede_funcao / total_f, 1)},
+        ))
+
+        # verbas pessoais que saíram de unidades políticas/direção
+        verbas_pol = base[(base["categoria"] == "VERBAS_PESSOAIS") &
+                          (base["funcao"].isin(["POLITICO", "DIRECAO_SUPERIOR"]))]
+        if not verbas_pol.empty:
+            s = A.serie_anual(verbas_pol, "valor", by="funcao").rename(
+                columns=T.FUNCOES)
+            total_vp = float(verbas_pol["valor"].sum())
+            achados.append(Finding(
+                id="finalistica-verbas-politicas", frente=FRENTE, gravidade="alta",
+                titulo=f"{fmt_brl(total_vp)} em diárias, km e jetons alocados a "
+                       "órgãos políticos e à direção superior",
+                descricao=(
+                    "Verba indenizatória paga dentro das unidades de decisão — "
+                    "plenário, câmaras, inspetorias, presidência e diretoria. É a "
+                    "interseção mais sensível dos dois eixos: quem autoriza a "
+                    "despesa é do mesmo colegiado que a recebe, e a verba não "
+                    "aparece no contracheque publicado."),
+                evidencia=(verbas_pol.groupby(["_ano", "unidade"])["valor"]
+                           .sum().reset_index()
+                           .sort_values("valor", ascending=False).head(100)),
+                serie=s, grafico="bar_stacked", tabela_anual=s.reset_index(),
+                base_legal="CF, art. 37, caput (impessoalidade e moralidade); "
+                           "Lei 4.320/1964, art. 63 (liquidação: comprovação do "
+                           "serviço prestado).",
+                como_verificar="Pedir as portarias de concessão e os relatórios de "
+                               "viagem das unidades listadas.",
+            ))
 
     # ------------------------------------------------ 5. qualidade da classificação
     cob = T.cobertura(base["categoria"], base["valor"])

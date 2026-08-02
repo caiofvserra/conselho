@@ -85,7 +85,48 @@ REGEX_JURIDICO = r"advocat|advog|honor[áa]r|judicial|senten[çc]a|precat[óo]r|
 
 TETO_DIARIA_UNITARIA = 900.0     # R$: diária unitária acima disso vira achado
 MAX_DIARIAS_ANO = 100            # nº de diárias/ano por pessoa acima disso vira achado
-LIMITE_DISPENSA = 50_000.0       # piso p/ análise de fracionamento (Lei 14.133 serviços)
+
+# Jetons (verba de presença de conselheiro): o teto é normativo do Confea e
+# muda por resolução. Estes são os parâmetros usados como referência — ambos
+# devem ser conferidos contra a resolução vigente no exercício analisado.
+MAX_JETONS_MES = 12              # nº de sessões remuneráveis por mês
+MAX_JETONS_DIA = 1               # mais de um jeton no mesmo dia = acumulação
+
+# Limite de dispensa de licitação por EXERCÍCIO, para compras e serviços comuns.
+# Comparar um pagamento de 2014 com o limite de hoje subestima gravemente o
+# fracionamento: em 2014 o limite era R$ 8.000, não R$ 50.000.
+#   até 18/06/2018 ..... Lei 8.666/1993, art. 24, II ............ R$  8.000,00
+#   a partir de 2018 ... Decreto 9.412/2018 .................... R$ 17.600,00
+#   a partir de 2021 ... Lei 14.133/2021, art. 75, II .......... R$ 50.000,00
+#   a partir de 2023 ... Decreto 11.317/2022 .................. R$ 59.906,02
+# Exercícios posteriores são atualizados por decreto anual: enquanto o valor
+# não for confirmado, mantém-se o último conhecido (o relatório publica qual
+# limite foi aplicado em cada ano, para que a conferência seja possível).
+LIMITES_DISPENSA = {
+    2010: 8_000.0, 2011: 8_000.0, 2012: 8_000.0, 2013: 8_000.0,
+    2014: 8_000.0, 2015: 8_000.0, 2016: 8_000.0, 2017: 8_000.0,
+    2018: 17_600.0, 2019: 17_600.0, 2020: 17_600.0,
+    2021: 50_000.0, 2022: 50_000.0,
+    2023: 59_906.02,
+}
+LIMITE_DISPENSA = 50_000.0       # fallback e piso de outras análises
+
+
+def limite_dispensa(ano) -> float:
+    """Limite de dispensa vigente no exercício (R$). Anos posteriores ao
+    último confirmado herdam o último valor conhecido."""
+    try:
+        a = int(ano)
+    except (TypeError, ValueError):
+        return LIMITE_DISPENSA
+    if a in LIMITES_DISPENSA:
+        return LIMITES_DISPENSA[a]
+    conhecidos = sorted(LIMITES_DISPENSA)
+    if a < conhecidos[0]:
+        return LIMITES_DISPENSA[conhecidos[0]]
+    return LIMITES_DISPENSA[conhecidos[-1]]
+
+
 JANELA_FRACIONAMENTO_DIAS = 90
 ADITIVO_LIMITE_PCT = 25.0        # % acumulado de aditivos sobre o contrato original
 PISO_CONTRATO_ADITIVO = 50_000.0 # contratos abaixo disso distorcem o % de aditivo

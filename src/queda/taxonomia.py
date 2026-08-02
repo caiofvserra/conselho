@@ -1,8 +1,22 @@
-"""Taxonomia de finalidade da despesa.
+"""Taxonomia da despesa em DOIS EIXOS independentes.
 
 Responde à pergunta central: **quanto foi para remuneração, diárias e custeio
 administrativo (despesa-meio) e quanto foi para fiscalização, atendimento e
 ações finalísticas (despesa-fim)?**
+
+Os dois eixos são medidos separadamente porque respondem a perguntas
+diferentes e colapsá-los num rótulo só destrói informação:
+
+* **NATUREZA** (`classificar_texto`) — *o que* se comprou: salário, diária,
+  aluguel, obra, publicidade. Vem do nome da CONTA CONTÁBIL.
+* **FUNÇÃO** (`classificar_funcao`) — *para que* se comprou: fiscalização,
+  atendimento ao profissional, direção superior, administração. Vem do nome do
+  CENTRO DE CUSTO / unidade.
+
+Um salário pode ser de agente fiscal (natureza REMUNERACAO, função
+FISCALIZACAO) ou de assessor da presidência (REMUNERACAO / DIRECAO_SUPERIOR).
+A matriz cruzada é o que separa "gasta muito com pessoal" de "gasta muito com
+pessoal que não fiscaliza".
 
 A classificação roda sobre os VALORES DISTINTOS de nome de conta / centro de
 custo (poucos milhares), nunca linha a linha, e o resultado é reaproveitado.
@@ -182,6 +196,113 @@ def classificar_series(*textos: pd.Series) -> pd.Series:
 
 def macro(categoria: pd.Series) -> pd.Series:
     return categoria.map(MACRO).fillna("Não classificado")
+
+
+# ================================================================= EIXO B
+# FUNÇÃO — para que serve a unidade que gastou. Lido do centro de custo.
+FUNCOES = {
+    "FISCALIZACAO": "Fiscalização do exercício profissional",
+    "ATENDIMENTO": "Atendimento e registro profissional",
+    "POLITICO": "Órgãos políticos (plenário, câmaras, inspetorias)",
+    "DIRECAO_SUPERIOR": "Direção superior (presidência, diretoria, gabinete)",
+    "ADMINISTRACAO": "Administração e apoio (meio)",
+    "NAO_IDENTIFICADA": "Função não identificada",
+}
+
+# Ordem de precedência. Direção superior vem antes de administração porque
+# "Gabinete da Presidência" casaria com regras genéricas de administração; e
+# os órgãos políticos vêm antes porque "Câmara Especializada de Engenharia
+# Civil" contém "engenharia", que aparece em várias unidades técnicas.
+REGRAS_FUNCAO: list[tuple[str, str]] = [
+    ("FISCALIZACAO",
+     r"\bfiscaliza|\bfiscal(is|izacao)?\b|\bvistoria|agente(s)? fiscal|"
+     r"auto(s)? de infra|\bdenuncia|\bperiferia de fiscal|"
+     r"unidade(s)? de fiscaliza|\bufis\b|coordenadoria de fiscaliza"),
+
+    ("ATENDIMENTO",
+     r"\batendimento\b|\bregistro\b|\bacervo\b|\bart\b|\bcat\b|"
+     r"anotacao de responsabilidade|carteira profissional|\bprotocolo\b|"
+     r"posto(s)? de (atendimento|servico)|\bugi\b|unidade(s)? de gestao integrada|"
+     r"central de relacionamento|\bcadastro\b|\bcertidao|\bcertidoes"),
+
+    ("POLITICO",
+     r"\bplenario\b|\bplenaria\b|camara(s)? especializada|\bcolegiado|"
+     r"\bconselheiro|\bconselho diretor|\binspetoria|\bcomissao\b|"
+     r"\bentidade(s)? de classe|\bcoordenadoria de camara|\bjuntas?\b|"
+     r"\bmandatario|\brepresentacao institucional"),
+
+    ("DIRECAO_SUPERIOR",
+     r"\bpresidencia\b|\bpresidente\b|\bgabinete\b|\bdiretoria\b|\bdiretor\b|"
+     r"\bsuperintendencia\b|\bsuperintendente\b|\bchefia de gabinete|"
+     r"\bassessoria (da |de )?(presidencia|diretoria|superintendencia)|"
+     r"\balta administracao|\bvice-?presidencia"),
+
+    ("ADMINISTRACAO",
+     r"\badministrativ|\brecursos humanos|\brh\b|\bpessoal\b|\bfinanceir|"
+     r"\bcontabil|\borcament|\bjuridic|\bprocuradoria\b|\bcompras\b|"
+     r"\blicitac|\bcontratos\b|\bpatrimonio\b|\balmoxarifado\b|"
+     r"\btecnologia da informacao|\binformatica\b|\bti\b|\bsistemas\b|"
+     r"\bcomunicacao\b|\bmarketing\b|\bouvidoria\b|\bauditoria\b|"
+     r"\bcontroladoria\b|\bcorregedoria\b|\bmanutencao\b|\bservicos gerais|"
+     r"\bsede\b|\bpredio\b|\btransporte\b|\bfrota\b|\bplanejamento\b|"
+     r"\bgeral\b|\bapoio\b|\bsuporte\b"),
+]
+
+_FUNCAO_COMPILADAS = [(cat, re.compile(rx)) for cat, rx in REGRAS_FUNCAO]
+
+# Função é atributo da UNIDADE, não da compra; mas quando não há centro de
+# custo, a natureza da conta ainda carrega um sinal fraco de função. Este mapa
+# só é usado como último recurso e o resultado é marcado como inferido.
+_NATUREZA_PARA_FUNCAO = {
+    "FISCALIZACAO": "FISCALIZACAO",
+    "ATENDIMENTO": "ATENDIMENTO",
+    "INSTITUCIONAL": "POLITICO",
+    "PUBLICIDADE": "ADMINISTRACAO",
+    "SERVICOS_PROFISSIONAIS": "ADMINISTRACAO",
+    "CUSTEIO_ADMIN": "ADMINISTRACAO",
+}
+
+
+def classificar_funcao(texto: str) -> str:
+    """Função da unidade que gastou, a partir do nome do centro de custo."""
+    t = normalizar(texto)
+    if not t:
+        return "NAO_IDENTIFICADA"
+    for cat, rx in _FUNCAO_COMPILADAS:
+        if rx.search(t):
+            return cat
+    return "NAO_IDENTIFICADA"
+
+
+def classificar_funcao_series(centro_custo: pd.Series,
+                              natureza: pd.Series | None = None) -> pd.Series:
+    """Função linha a linha, com fallback fraco pela natureza da despesa."""
+    s = centro_custo.fillna("").astype(str)
+    mapa = {v: classificar_funcao(v) for v in s.unique()}
+    resultado = s.map(mapa)
+    if natureza is not None:
+        pendentes = resultado == "NAO_IDENTIFICADA"
+        if pendentes.any():
+            inferido = natureza[pendentes].map(_NATUREZA_PARA_FUNCAO)
+            resultado.loc[pendentes] = inferido.fillna("NAO_IDENTIFICADA")
+    return resultado
+
+
+def matriz(natureza: pd.Series, funcao: pd.Series,
+           valores: pd.Series) -> pd.DataFrame:
+    """Matriz natureza × função em R$ — o cruzamento que separa
+    'gasta com pessoal' de 'gasta com pessoal que não fiscaliza'."""
+    d = pd.DataFrame({"natureza": natureza, "funcao": funcao, "valor": valores})
+    if d.empty:
+        return pd.DataFrame()
+    m = d.pivot_table(index="natureza", columns="funcao", values="valor",
+                      aggfunc="sum", fill_value=0.0)
+    ordem_f = [f for f in FUNCOES if f in m.columns]
+    ordem_n = [n for n in GRUPOS if n in m.index]
+    m = m.reindex(index=ordem_n, columns=ordem_f, fill_value=0.0)
+    m.index = [GRUPOS.get(i, i) for i in m.index]
+    m.columns = [FUNCOES.get(c, c) for c in m.columns]
+    return m.round(2)
 
 
 def cobertura(categorias: pd.Series, valores: pd.Series) -> dict:

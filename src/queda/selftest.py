@@ -184,6 +184,22 @@ def _staged() -> dict[str, pd.DataFrame]:
                            ("Diárias no País", 2e6),
                            ("Cargos em Comissão", 6e6))])
 
+    # Fonte preferencial da frente "para onde vai o dinheiro": traz o CENTRO DE
+    # CUSTO, única evidência do eixo FUNÇÃO (para que unidade se gastou).
+    centro_custo = pd.DataFrame([
+        {"_ano": a, "NOME_CENTRO_CUSTO": cc, "NOME_CONTA": conta,
+         "ANALITICO": True, "VALOR_TOTAL": base * (1.06 ** (a - 2013))}
+        for a in range(2013, 2026)
+        for cc, conta, base in (
+            ("Gabinete da Presidência", "Diárias no País", 3.0e6),
+            ("Câmaras Especializadas", "Jetons a Conselheiros", 4.0e6),
+            ("Departamento de Fiscalização", "Vencimentos e Salários", 9.0e6),
+            ("Departamento de Fiscalização", "Diárias no País", 1.2e6),
+            ("Superintendência Administrativa", "Vencimentos e Salários", 22.0e6),
+            ("Gerência de Tecnologia da Informação", "Serviços de Terceiros PJ", 8.0e6),
+            ("UGI Campinas - Atendimento", "Material de Consumo", 1.5e6),
+        )])
+
     pncp = pd.DataFrame([
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo", "orgao_nome": "CREA-SP",
          "fornecedor_ni": _CNPJ_REDE, "fornecedor_nome": _FORN_REDE,
@@ -203,7 +219,8 @@ def _staged() -> dict[str, pd.DataFrame]:
     return {
         "pagamentos": _pagamentos(), "empenhos": empenhos, "contratos": contratos,
         "aditivos": aditivos, "licitacoes": pd.DataFrame(), "convenios": convenios,
-        "comparativo_despesa": comparativo, "quadro_pessoal": quadro,
+        "comparativo_despesa": comparativo, "despesas_centro_custo": centro_custo,
+        "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
     }
@@ -233,6 +250,9 @@ ESPERADOS = [
     "pessoal-serie-historica",
     "finalistica-panorama",            # meio × fim
     "finalistica-categorias",
+    "finalistica-matriz",              # natureza × função (dois eixos)
+    "finalistica-verbas-politicas",    # diárias/jetons na direção e no plenário
+    "finalistica-centros-custo",
     # opacidade
     "opacidade-agregadores",           # "DIVERSOS FUNCIONARIOS"
     "opacidade-decomposicao-conta",    # o que há dentro do agregado
