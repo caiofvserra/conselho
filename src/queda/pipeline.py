@@ -447,30 +447,81 @@ def stage_pncp(desde, ate):
 
 
 # ---------------------------------------------------------------- entrada
-def build_staged(desde: int | None, ate: int) -> dict[str, pd.DataFrame]:
-    """Executa toda a coleta. desde=None ativa sondagem retroativa."""
-    staged = {
-        "empenhos": stage_empenhos(desde, ate),
-        "pagamentos": stage_pagamentos(desde, ate),
-        "contratos": stage_contratos(desde, ate),
-        "aditivos": stage_aditivos(desde, ate),
-        "licitacoes": stage_licitacoes(desde, ate),
-        "convenios": stage_convenios(desde, ate),
-        "comparativo_despesa": stage_comparativo_despesa(desde, ate),
-        "despesas_centro_custo": stage_despesas_centro_custo(desde, ate),
-        "demonstrativo": stage_demonstrativo(desde, ate),
-        "plano_contas": stage_plano_contas(ate),
-        "processos_itens": stage_processos_compras(desde, ate),
-        "atas": stage_atas(desde, ate),
-        "comparativo_receita": stage_orcamento(desde, ate),
-        "quadro_pessoal": stage_quadro_pessoal(),
-        "mandatarios": stage_mandatarios(),
-        "indenizacoes_endpoint": stage_indenizacoes(desde, ate),
-        "pncp_contratos": stage_pncp(desde, ate),
-    }
-    resumo = {k: len(v) for k, v in staged.items()}
-    with open(config.STAGED_DIR / "_resumo.json", "w") as f:
-        json.dump(resumo, f, indent=2, ensure_ascii=False)
+def _ja_coletado(nome: str) -> pd.DataFrame | None:
+    """DataFrame já staged com linhas, ou None se falta ou veio vazio.
+
+    Vazio conta como NÃO coletado de propósito: dataset zerado é quase sempre
+    resultado de 403 por rajada, e 403 nunca é cacheado — repetir a etapa é
+    exatamente o que se quer.
+    """
+    caminho = config.STAGED_DIR / f"{nome}.csv"
+    if not caminho.exists():
+        return None
+    try:
+        df = pd.read_csv(caminho, low_memory=False)
+    except (pd.errors.EmptyDataError, ValueError, OSError):
+        return None
+    if df.empty or list(df.columns) == ["_vazio"]:
+        return None
+    for col in ("DATA", "INI", "FIM"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+def build_staged(desde: int | None, ate: int, *,
+                 retomar: bool = False) -> dict[str, pd.DataFrame]:
+    """Executa toda a coleta. desde=None ativa sondagem retroativa.
+
+    `retomar=True` pula as etapas que já têm dado em disco — é o que torna
+    barata a volta depois de uma queda de sessão. Com os diretórios apontados
+    para o Google Drive, a coleta continua de onde parou em vez de recomeçar.
+    """
+    etapas = [
+        ("empenhos", lambda: stage_empenhos(desde, ate)),
+        ("pagamentos", lambda: stage_pagamentos(desde, ate)),
+        ("contratos", lambda: stage_contratos(desde, ate)),
+        ("aditivos", lambda: stage_aditivos(desde, ate)),
+        ("licitacoes", lambda: stage_licitacoes(desde, ate)),
+        ("convenios", lambda: stage_convenios(desde, ate)),
+        ("comparativo_despesa", lambda: stage_comparativo_despesa(desde, ate)),
+        ("despesas_centro_custo", lambda: stage_despesas_centro_custo(desde, ate)),
+        ("demonstrativo", lambda: stage_demonstrativo(desde, ate)),
+        ("plano_contas", lambda: stage_plano_contas(ate)),
+        ("processos_itens", lambda: stage_processos_compras(desde, ate)),
+        ("atas", lambda: stage_atas(desde, ate)),
+        ("comparativo_receita", lambda: stage_orcamento(desde, ate)),
+        ("quadro_pessoal", stage_quadro_pessoal),
+        ("mandatarios", stage_mandatarios),
+        ("indenizacoes_endpoint", lambda: stage_indenizacoes(desde, ate)),
+        ("pncp_contratos", lambda: stage_pncp(desde, ate)),
+    ]
+
+    staged: dict[str, pd.DataFrame] = {}
+    try:
+        for nome, executar in etapas:
+            if retomar:
+                pronto = _ja_coletado(nome)
+                if pronto is not None:
+                    log.info("retomando: %s já em disco (%d linhas) — pulando",
+                             nome, len(pronto))
+                    staged[nome] = pronto
+                    _DIAGNOSTICO.append({
+                        "dataset": nome, "linhas": int(len(pronto)),
+                        "colunas": int(pronto.shape[1]),
+                        "ano_min": None, "ano_max": None, "anos_cobertos": 0,
+                        "anos_faltando": "", "retomado": True})
+                    continue
+            staged[nome] = executar()
+    finally:
+        # Grava o inventário mesmo se a coleta abortar no meio: sem isso, uma
+        # queda no meio do caminho deixaria o operador sem saber o que já veio.
+        config.STAGED_DIR.mkdir(parents=True, exist_ok=True)
+        with open(config.STAGED_DIR / "_resumo.json", "w") as f:
+            json.dump({k: len(v) for k, v in staged.items()}, f,
+                      indent=2, ensure_ascii=False)
+        salvar_diagnostico()
+
     staged["_coleta_diagnostico"] = salvar_diagnostico()
     return staged
 

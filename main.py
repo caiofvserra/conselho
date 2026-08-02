@@ -34,8 +34,11 @@ def _parse_args():
     p.add_argument("--desde", default="auto",
                    help="ano inicial, ou 'auto' para sondar retroativamente (padrão)")
     p.add_argument("--ate", type=int, default=config.ANO_ATUAL)
+    p.add_argument("--retomar", action="store_true",
+                   help="pular as etapas que já têm dado em disco (use depois "
+                        "de uma queda de sessão)")
     p.add_argument("--sem-llm", action="store_true",
-                   help="não usar a API da Anthropic mesmo com chave definida")
+                   help="rodar sem a camada de IA mesmo com o modelo local no ar")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -45,6 +48,7 @@ def main():
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     log = logging.getLogger("queda")
+    log.info("%s", config.onde_estao_os_dados())
     from queda import pipeline, report
     from queda.checks import run_all
 
@@ -72,11 +76,12 @@ def main():
     desde = None if args.desde == "auto" else int(args.desde)
     if args.cmd in ("fetch", "all"):
         try:
-            staged = pipeline.build_staged(desde, args.ate)
+            staged = pipeline.build_staged(desde, args.ate, retomar=args.retomar)
         except RateLimited as e:
-            print(f"\n⏳ {e}\n\nO progresso já baixado ficou em cache (data/raw). "
-                  "Basta rodar a MESMA célula/comando de novo — ele retoma sem "
-                  "repetir o que já veio. Se insistir, aumente THROTTLE_SECONDS em "
+            print(f"\n⏳ {e}\n\nO progresso já baixado ficou em "
+                  f"{config.RAW_DIR}. Rode a MESMA célula/comando de novo com "
+                  "`--retomar` — ele pula as etapas já concluídas e continua de "
+                  "onde parou. Se insistir, aumente THROTTLE_SECONDS em "
                   "src/queda/config.py.", file=sys.stderr)
             return 2
     else:

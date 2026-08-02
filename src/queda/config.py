@@ -5,12 +5,29 @@ import os
 from pathlib import Path
 
 ROOT = Path(os.environ.get("QUEDA_ROOT", Path(__file__).resolve().parents[2]))
-DATA_DIR = ROOT / "data"
+
+# Dados e saída são separáveis do código, e é isso que salva a coleta quando a
+# sessão do Colab cai: o clone do repositório é descartável (leva segundos para
+# refazer), mas `data/raw` guarda horas de coleta com throttle e `data/cache`
+# guarda o que o modelo local já classificou. Apontando QUEDA_DATA_DIR para uma
+# pasta do Google Drive, a reconexão RETOMA em vez de recomeçar.
+#
+#   QUEDA_DATA_DIR=/content/drive/MyDrive/queda/data
+#   QUEDA_OUTPUT_DIR=/content/drive/MyDrive/queda/output
+DATA_DIR = Path(os.environ.get("QUEDA_DATA_DIR") or (ROOT / "data"))
 RAW_DIR = DATA_DIR / "raw"
 STAGED_DIR = DATA_DIR / "staged"
 CACHE_DIR = DATA_DIR / "cache"
-OUTPUT_DIR = ROOT / "output"
-ASSETS_DIR = ROOT / "assets"
+OUTPUT_DIR = Path(os.environ.get("QUEDA_OUTPUT_DIR") or (ROOT / "output"))
+ASSETS_DIR = ROOT / "assets"          # vendorizado no repo, nunca no Drive
+
+
+def onde_estao_os_dados() -> str:
+    """Uma linha dizendo se a coleta sobrevive a uma queda de sessão."""
+    persistente = "drive" in str(DATA_DIR).lower()
+    return (f"dados: {DATA_DIR}  |  saída: {OUTPUT_DIR}"
+            + ("  (Drive: sobrevive à reconexão)" if persistente else
+               "  (efêmero: some se a sessão cair)"))
 
 # ---------------------------------------------------------------- fontes
 IMPLANTA_BASE = "https://crea-sp.implanta.net.br/portalTransparencia/api/v1.0"

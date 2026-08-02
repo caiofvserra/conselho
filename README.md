@@ -31,11 +31,30 @@ python main.py selftest                      # valida o pipeline sem rede (fixtu
 - Saída: `output/report.html` (dashboard autocontido) + `output/csv/*.csv`
   (evidência bruta de cada achado).
 - Cache de rede em `data/raw/` — reexecuções não repetem chamadas. Se a coleta
-  parar com aviso de rate-limit, rode o mesmo comando de novo: ele retoma de
-  onde parou.
+  parar (rate-limit, queda de sessão), rode de novo com `--retomar`: ele pula
+  as etapas já concluídas e continua de onde parou.
 - **Google Colab**: abra `notebooks/queda_colab.ipynb`
   ([link direto](https://colab.research.google.com/github/caiofvserra/queda/blob/claude/crea-sp-audit-tool-m9nw7t/notebooks/queda_colab.ipynb)) —
   recomendado, ver privacidade abaixo.
+
+### Sobreviver à queda de sessão (Colab)
+
+O Colab desconecta e apaga o disco. O clone do repositório é descartável, mas
+`data/raw` guarda horas de coleta com throttle e `data/cache` guarda o que o
+modelo local já leu — esses vão para o Google Drive:
+
+```bash
+export QUEDA_DATA_DIR=/content/drive/MyDrive/queda/data
+export QUEDA_OUTPUT_DIR=/content/drive/MyDrive/queda/output
+export OLLAMA_MODELS=/content/drive/MyDrive/queda/ollama   # não rebaixa 4,7 GB
+python main.py all --desde auto --ate 2026 --retomar
+```
+
+A célula 1 do notebook faz isso. Reconectando, rode a mesma célula de coleta:
+`--retomar` pula cada etapa que já tem dado em disco. Etapa que veio **vazia**
+é tentada de novo de propósito — dataset zerado quase sempre é bloqueio por
+rajada (403), e 403 nunca é cacheado. O inventário da coleta é gravado mesmo
+quando a rodada aborta no meio, então dá para ver o que já veio.
 
 ### Camada opcional de IA — modelo **local**, via Ollama
 
