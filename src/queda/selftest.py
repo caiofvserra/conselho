@@ -12,7 +12,7 @@ import pandas as pd
 
 from . import config, report
 from .checks import common, run_all
-from .utils import eh_pf, norm_nome
+from .utils import classificar_pessoa, norm_nome, so_digitos
 
 random.seed(42)
 
@@ -70,6 +70,24 @@ def _pagamentos() -> pd.DataFrame:
                          "DATA_PAGAMENTO": f"20/06/{ano}",
                          "NUMERO_EMPENHO": 5000, "NUMERO_PAGAMENTO": 5000})
 
+    # --- entidade associativa que leva o nome do próprio conselho
+    for ano in range(2018, 2026):
+        rows.append({"_ano": ano,
+                     "NOME_RAZAO_SOCIAL": "ASSOCIACAO DOS PROCURADORES DO CREA-SP",
+                     "CPF_CNPJ": "28097358000101",
+                     "CONTA_EMPENHO": "Serviços Advocatícios",
+                     "HISTORICO": "assessoria juridica", "VALOR": 5_000_000.0,
+                     "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"15/03/{ano}",
+                     "NUMERO_EMPENHO": 8000 + ano, "NUMERO_PAGAMENTO": 8000 + ano})
+    # --- obra da nova sede
+    for ano in range(2022, 2026):
+        rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": "CONSTRUTORA NOVA SEDE LTDA",
+                     "CPF_CNPJ": "77888999000122",
+                     "CONTA_EMPENHO": "Obras e Instalações",
+                     "HISTORICO": "medicao obra nova sede", "VALOR": 12_000_000.0,
+                     "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"10/08/{ano}",
+                     "NUMERO_EMPENHO": 9000 + ano, "NUMERO_PAGAMENTO": 9000 + ano})
+
     # --- assinaturas forenses ---------------------------------------------
     # (a) valores uniformes: violam Benford
     for i in range(700):
@@ -113,8 +131,13 @@ def _pagamentos() -> pd.DataFrame:
                      "NUMERO_EMPENHO": 7000 + i, "NUMERO_PAGAMENTO": 7000 + i})
     df = pd.DataFrame(rows)
     df["DATA"] = pd.to_datetime(df["DATA_PAGAMENTO"], dayfirst=True, errors="coerce")
-    df["PF"] = df["CPF_CNPJ"].map(eh_pf)
+    # espelha exatamente o que o pipeline de produção grava
+    df["TIPO_PESSOA"] = [classificar_pessoa(d, n) for d, n
+                         in zip(df["CPF_CNPJ"], df["NOME_RAZAO_SOCIAL"])]
+    df["PF"] = df["TIPO_PESSOA"] == "PF"
+    df["PJ"] = df["TIPO_PESSOA"] == "PJ"
     df["FAVORECIDO_NORM"] = df["NOME_RAZAO_SOCIAL"].map(norm_nome)
+    df["FAVORECIDO_CNPJ"] = df["CPF_CNPJ"].map(so_digitos)
     return df
 
 
@@ -221,6 +244,9 @@ ESPERADOS = [
     "rede-fornecedores-compartilhados",
     "rede-socio-homonimo",             # sócia = comissionada
     "rede-socios-compartilhados",      # grupos econômicos distintos
+    # casos concentrados
+    "casos-entidade-da-casa",
+    "casos-obras",
     # forense estatística
     "forense-benford",
     "forense-bunching-dispensa",
