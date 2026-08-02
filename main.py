@@ -43,9 +43,17 @@ def main():
         from queda import selftest
         return selftest.run()
 
+    from queda.http import RateLimited
     desde = None if args.desde == "auto" else int(args.desde)
     if args.cmd in ("fetch", "all"):
-        staged = pipeline.build_staged(desde, args.ate)
+        try:
+            staged = pipeline.build_staged(desde, args.ate)
+        except RateLimited as e:
+            print(f"\n⏳ {e}\n\nO progresso já baixado ficou em cache (data/raw). "
+                  "Basta rodar a MESMA célula/comando de novo — ele retoma sem "
+                  "repetir o que já veio. Se insistir, aumente THROTTLE_SECONDS em "
+                  "src/queda/config.py.", file=sys.stderr)
+            return 2
     else:
         staged = pipeline.load_staged()
         if not staged:

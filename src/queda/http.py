@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -19,6 +20,10 @@ import requests
 from . import config
 
 log = logging.getLogger("queda.http")
+
+
+class RateLimited(RuntimeError):
+    """O host bloqueou por rate-limit (403/429) mesmo após os backoffs."""
 
 _session: requests.Session | None = None
 _last_hit: dict[str, float] = {}
@@ -72,36 +77,65 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
             payload = json.load(f)
         return payload["data"]
 
+    def _store(data):
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache, "w") as f:
+            json.dump({"url": url, "params": params, "data": data}, f, ensure_ascii=False)
+        return data
+
     last_err: Exception | None = None
-    for attempt in range(config.RETRIES):
+    net_attempt = 0
+    rate_attempt = 0
+    max_iter = config.RETRIES + config.RATE_LIMIT_RETRIES + 2
+    for _ in range(max_iter):
         _throttle(url)
         try:
             r = session().get(url, params=params, timeout=config.TIMEOUT)
         except requests.RequestException as e:
             last_err = e
-            time.sleep(2 ** attempt)
+            net_attempt += 1
+            if net_attempt > config.RETRIES:
+                break
+            time.sleep(2 ** net_attempt)
             continue
+
         if r.status_code == 404:
-            data = None
-        elif r.status_code in ok_empty_status:
-            data = []
-        elif r.status_code >= 500 or r.status_code == 429:
+            return _store(None)                      # ausência genuína: cacheável
+        if r.status_code in ok_empty_status:
+            return _store([])
+        if r.status_code in config.RATE_LIMIT_STATUS:
+            rate_attempt += 1
+            if rate_attempt > config.RATE_LIMIT_RETRIES:
+                raise RateLimited(
+                    f"HTTP {r.status_code} persistente em {url} — o servidor está "
+                    "limitando o ritmo. Reexecute a mesma célula: o cache retoma de "
+                    "onde parou e só o que faltou é rebaixado.")
+            retry_after = r.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                wait = int(retry_after)
+            else:
+                wait = min(config.RATE_LIMIT_BACKOFF_BASE * (2 ** (rate_attempt - 1)),
+                           config.RATE_LIMIT_BACKOFF_MAX)
+            wait += random.uniform(0, 3)             # jitter
+            log.warning("HTTP %s (rate-limit) em %s — aguardando %.0fs (tentativa %d/%d)",
+                        r.status_code, url, wait, rate_attempt, config.RATE_LIMIT_RETRIES)
+            time.sleep(wait)
+            continue                                 # NÃO cacheia bloqueio
+        if r.status_code >= 500:
+            net_attempt += 1
+            if net_attempt > config.RETRIES:
+                break
             last_err = RuntimeError(f"HTTP {r.status_code} em {url}")
-            time.sleep(2 ** attempt * 2)
+            time.sleep(2 ** net_attempt * 2)
             continue
-        elif r.status_code >= 400:
+        if r.status_code >= 400:                     # 400/401/... determinístico
             log.warning("HTTP %s em %s params=%s", r.status_code, url, params)
-            data = None
-        else:
-            try:
-                data = r.json()
-            except ValueError:
-                data = None
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache, "w") as f:
-            json.dump({"url": url, "params": params, "data": data}, f, ensure_ascii=False)
-        return data
-    raise RuntimeError(f"Falha após {config.RETRIES} tentativas: {url}") from last_err
+            return None                              # não cacheia (permite correção)
+        try:
+            return _store(r.json())
+        except ValueError:
+            return _store(None)
+    raise RuntimeError(f"Falha após retries: {url}") from last_err
 
 
 def memo(name: str, fn):

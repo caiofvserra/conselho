@@ -57,9 +57,15 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
-THROTTLE_SECONDS = 1.0   # intervalo mínimo entre requisições por host
+THROTTLE_SECONDS = 2.5   # intervalo mínimo entre requisições por host (evita WAF)
 TIMEOUT = 60
-RETRIES = 3
+RETRIES = 3              # tentativas para erro de rede / 5xx
+# 403/429 = rate-limit por rajada (o servidor serve, mas bloqueia após muitas
+# chamadas seguidas). Espera crescente, respeitando Retry-After; nunca cacheado.
+RATE_LIMIT_STATUS = (403, 429)
+RATE_LIMIT_RETRIES = 5
+RATE_LIMIT_BACKOFF_BASE = 20   # segundos: 20, 40, 80, 160, 180 (teto abaixo)
+RATE_LIMIT_BACKOFF_MAX = 180
 
 # ---------------------------------------------------------------- thresholds
 # Termos que identificam indenizações/diárias/km em contas e históricos
