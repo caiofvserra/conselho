@@ -117,14 +117,19 @@ def _pagamentos() -> pd.DataFrame:
                      "VALOR": round(random.uniform(300, 999), 2), "VALOR_LIQUIDO": 0,
                      "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/{(i % 12) + 1:02d}/2024",
                      "NUMERO_EMPENHO": 2000 + i, "NUMERO_PAGAMENTO": 2000 + i})
-    # (b) represamento logo abaixo do limite de dispensa
-    for i in range(40):
-        rows.append({"_ano": 2023, "NOME_RAZAO_SOCIAL": f"BORDA LTDA {i % 8}",
-                     "CPF_CNPJ": f"{20000000000000 + i}",
-                     "CONTA_EMPENHO": "Serviços de Terceiros PJ",
-                     "HISTORICO": "servico", "VALOR": 47000.0 + i * 50,
-                     "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/07/2023",
-                     "NUMERO_EMPENHO": 3000 + i, "NUMERO_PAGAMENTO": 3000 + i})
+    # (b) represamento logo abaixo do limite de dispensa VIGENTE NO ANO —
+    # em 2015 o teto era R$ 8.000 e em 2023, R$ 59.906,02. Testar os dois
+    # exercícios contra o mesmo limite procuraria a fronteira errada.
+    for ano, teto, base in ((2015, 8_000.0, 7_300.0), (2023, 59_906.02, 56_000.0)):
+        for i in range(40):
+            rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": f"BORDA LTDA {i % 8}",
+                         "CPF_CNPJ": f"{20000000000000 + i}",
+                         "CONTA_EMPENHO": "Serviços de Terceiros PJ",
+                         "HISTORICO": "servico",
+                         "VALOR": round(base + i * (teto - base) / 45, 2),
+                         "VALOR_LIQUIDO": 0,
+                         "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/07/{ano}",
+                         "NUMERO_EMPENHO": 3000 + i, "NUMERO_PAGAMENTO": 3000 + i})
     # (c) corrida de dezembro
     for i in range(120):
         rows.append({"_ano": 2022, "NOME_RAZAO_SOCIAL": f"FIM DE ANO SA {i % 10}",
@@ -328,6 +333,7 @@ ESPERADOS = [
     "casos-obras",
     # forense estatística
     "forense-benford",
+    "forense-benford-2d",              # 90 categorias: valor "arredondado"
     "forense-bunching-dispensa",
     "forense-dezembro",
     "forense-estornos",

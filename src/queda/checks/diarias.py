@@ -53,6 +53,7 @@ def run(staged) -> list[Finding]:
         cagr = A.cagr(tot_ano)
         real = A.variacao_real(tot_ano)
         cagr_real = A.cagr(real)
+        nominais = A.anos_sem_deflator(tot_ano.index)
         achados.append(Finding(
             id="diarias-serie-anual", frente=FRENTE,
             gravidade="alta" if (cagr == cagr and cagr > 0.10) else "info",
@@ -65,13 +66,19 @@ def run(staged) -> list[Finding]:
                 "jeton e ajuda de custo, com o favorecido classificado por "
                 "cruzamento de nome com o rol de mandatários e o quadro de "
                 "pessoal. Valores nominais no gráfico; o CAGR real desconta o "
-                "IPCA, isolando crescimento verdadeiro de correção monetária."),
+                "IPCA pelo índice MÉDIO do ano (despesa é fluxo distribuído ao "
+                "longo do exercício — deflacionar pelo acumulado dez/dez "
+                "superestima a inflação sofrida). "
+                + (f"Sem IPCA publicado para {', '.join(str(a) for a in nominais)}"
+                   ", esse(s) exercício(s) ficam fora do cálculo real."
+                   if nominais else "")),
             evidencia=serie.reset_index(),
             serie=serie, grafico="bar_stacked",
             base_legal=BASE_LEGAL,
             metricas={"total_periodo": round(total, 2),
                       "cagr_nominal": None if cagr != cagr else round(cagr, 4),
                       "cagr_real": None if cagr_real != cagr_real else round(cagr_real, 4),
+                      "anos_sem_deflator": nominais,
                       "por_ano": {int(a): round(float(v), 2) for a, v in tot_ano.items()}},
         ))
 

@@ -28,6 +28,8 @@ def _parse_args():
     p.add_argument("--desde", default="auto",
                    help="ano inicial, ou 'auto' para sondar retroativamente (padrão)")
     p.add_argument("--ate", type=int, default=config.ANO_ATUAL)
+    p.add_argument("--sem-llm", action="store_true",
+                   help="não usar a API da Anthropic mesmo com chave definida")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -36,6 +38,7 @@ def main():
     args = _parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    log = logging.getLogger("queda")
     from queda import pipeline, report
     from queda.checks import run_all
 
@@ -65,7 +68,25 @@ def main():
         return 0
 
     achados = run_all(staged)
-    report.gerar(achados, staged)
+
+    # Resumo executivo por LLM: opcional e não bloqueante. O modelo NÃO calcula
+    # nada nem vê dado bruto — só redige sobre os números que os checks
+    # determinísticos já produziram. Sem QUEDA_ANTHROPIC_API_KEY, o relatório
+    # sai igual, sem a seção.
+    resumo_llm = ""
+    if not args.sem_llm:
+        from queda import llm
+        if llm.disponivel():
+            log.info("gerando resumo executivo com %s", llm.MODELO_PADRAO)
+            resumo_llm = llm.resumo_executivo([
+                {"id": f.id, "frente": f.frente, "gravidade": f.gravidade,
+                 "titulo": f.titulo, "metricas": f.metricas}
+                for f in achados if f.gravidade in ("alta", "media")][:60])
+        else:
+            log.info("resumo executivo por LLM desligado "
+                     "(defina QUEDA_ANTHROPIC_API_KEY e instale `anthropic`)")
+
+    report.gerar(achados, staged, resumo_llm=resumo_llm)
     altas = [f for f in achados if f.gravidade == "alta"]
     print(f"\n{len(achados)} achados ({len(altas)} de gravidade alta)")
     for f in altas:

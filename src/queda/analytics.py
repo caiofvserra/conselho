@@ -17,11 +17,13 @@ from .http import get_json, memo
 
 log = logging.getLogger("queda.analytics")
 
-# IPCA anual (% ao ano, IBGE). Usado só como fallback quando a API do BCB não
-# estiver acessível. Anos ausentes recebem fator 1,0 e o relatório avisa.
+# IPCA acumulado no ano (% dez/dez, IBGE). Usado só como fallback quando a API
+# do BCB não estiver acessível. Ano ausente aqui e no BCB recebe fator 1,0 e o
+# relatório marca a série como NOMINAL naquele ano — nunca finge deflação.
 IPCA_FALLBACK = {
-    2013: 5.91, 2014: 6.41, 2015: 10.67, 2016: 6.29, 2017: 2.95, 2018: 3.75,
-    2019: 4.31, 2020: 4.52, 2021: 10.06, 2022: 5.79, 2023: 4.62, 2024: 4.83,
+    2010: 5.91, 2011: 6.50, 2012: 5.84, 2013: 5.91, 2014: 6.41, 2015: 10.67,
+    2016: 6.29, 2017: 2.95, 2018: 3.75, 2019: 4.31, 2020: 4.52, 2021: 10.06,
+    2022: 5.79, 2023: 4.62, 2024: 4.83,
 }
 
 
@@ -69,15 +71,81 @@ def cagr(serie: pd.Series) -> float:
 
 
 def variacao_real(serie: pd.Series, base_ano: int | None = None) -> pd.Series:
-    """Série deflacionada pelo IPCA para o ano-base (padrão: último ano)."""
+    """Série deflacionada pelo IPCA para o ano-base (padrão: último ano).
+
+    Anos sem IPCA publicado saem da série real em vez de entrarem com fator
+    1,0: misturar um ano a preços correntes com os demais a preços do ano-base
+    inventa uma queda real que não existe e contamina o CAGR.
+    """
     if serie.empty:
         return serie
     fatores = fatores_ipca(base_ano or int(serie.index[-1]))
-    return serie * pd.Series({a: fatores.get(int(a), 1.0) for a in serie.index})
+    if not fatores:
+        return serie.iloc[0:0]
+    validos = [a for a in serie.index if int(a) in fatores]
+    if len(validos) < len(serie):
+        log.info("deflação: %d ano(s) sem IPCA ficaram fora da série real",
+                 len(serie) - len(validos))
+    s = serie.loc[validos]
+    return s * pd.Series({a: fatores[int(a)] for a in validos})
+
+
+def _ipca_indice_medio() -> dict[int, float]:
+    """Índice MÉDIO ANUAL do IPCA (base arbitrária, só a razão importa).
+
+    Despesa é fluxo: o gasto de um exercício ocorre distribuído ao longo do
+    ano, não em 31/12. Deflacionar pelo acumulado dez/dez superestima a
+    inflação sofrida por esse fluxo — o índice correto é a média dos índices
+    mensais do ano. Com IPCA de 10% num ano, a diferença entre os dois
+    critérios chega a ~5 pontos, o bastante para inverter o sinal de um CAGR
+    real.
+
+    Tenta a série mensal do BCB (433) para calcular a média de verdade; sem
+    ela, aproxima a média pela média geométrica dos índices de fim de ano.
+    """
+    def buscar():
+        url = ("https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
+               "?formato=json&dataInicial=01/01/2009")
+        data = get_json(url)
+        if not isinstance(data, list) or not data:
+            return None
+        df = pd.DataFrame(data)
+        df["ano"] = df["data"].str[-4:].astype(int)
+        df["v"] = df["valor"].astype(str).str.replace(",", ".").astype(float)
+        df = df.sort_values("data", key=lambda s: s.str[-4:] + s.str[3:5])
+        nivel = (1 + df["v"] / 100).cumprod()
+        return {int(a): float(nivel[g.index].mean())
+                for a, g in df.groupby("ano")}
+
+    try:
+        vindo = memo("ipca_indice_medio_433", buscar)
+    except Exception as e:                                   # pragma: no cover
+        log.warning("IPCA: BCB indisponível (%s) — usando tabela embutida", e)
+        vindo = None
+    if vindo:
+        return {int(k): float(v) for k, v in vindo.items()}
+
+    # Fallback: índice de fim de ano a partir das taxas anuais; a média do ano
+    # é aproximada pela média geométrica entre o fim do ano anterior e o dele.
+    anos = sorted(IPCA_FALLBACK)
+    fim: dict[int, float] = {}
+    nivel = 1.0
+    for a in anos:
+        anterior = nivel
+        nivel *= 1 + IPCA_FALLBACK[a] / 100
+        fim[a] = nivel
+        fim[f"ini{a}"] = anterior                            # type: ignore[index]
+    return {a: math.sqrt(fim[f"ini{a}"] * fim[a]) for a in anos}  # type: ignore[index]
+
+
+def anos_sem_deflator(anos) -> list[int]:
+    """Anos para os quais não há IPCA — a série ali é NOMINAL, não real."""
+    indice = _ipca_indice_medio()
+    return sorted({int(a) for a in anos if int(a) not in indice})
 
 
 def _ipca_anual() -> dict[int, float]:
-    """% anual do IPCA. Tenta o BCB (série 433, mensal); cai no fallback."""
+    """% anual do IPCA (dez/dez). Mantido para exibição, não para deflação."""
     def buscar():
         url = ("https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
                "?formato=json&dataInicial=01/01/2009")
@@ -102,15 +170,17 @@ def _ipca_anual() -> dict[int, float]:
 
 
 def fatores_ipca(base_ano: int) -> dict[int, float]:
-    """Fator multiplicativo que traz cada ano a preços de `base_ano`."""
-    ipca = _ipca_anual()
-    anos = sorted(set(list(ipca) + [base_ano]))
-    indice: dict[int, float] = {}
-    acumulado = 1.0
-    for a in anos:
-        indice[a] = acumulado
-        acumulado *= 1 + ipca.get(a, 0.0) / 100
-    base = indice.get(base_ano, 1.0)
+    """Fator multiplicativo que traz cada ano a preços médios de `base_ano`.
+
+    Razão entre índices MÉDIOS anuais — o critério correto para deflacionar
+    fluxo de despesa (ver `_ipca_indice_medio`).
+    """
+    indice = _ipca_indice_medio()
+    if not indice:
+        return {}
+    base = indice.get(base_ano)
+    if base is None:                       # ano-base sem IPCA: usa o último
+        base = indice[max(indice)]
     return {a: (base / v if v else 1.0) for a, v in indice.items()}
 
 
@@ -145,6 +215,43 @@ def benford_primeiro_digito(valores: pd.Series) -> dict:
         "observado": {int(d): round(float(obs[d]), 4) for d in range(1, 10)},
         "esperado": {int(d): round(float(esp[d]), 4) for d in range(1, 10)},
         "maior_desvio_digito": int((obs - esp).abs().idxmax()),
+    }
+
+
+def benford_dois_digitos(valores: pd.Series) -> dict:
+    """Conformidade com Benford nos DOIS primeiros dígitos (10–99).
+
+    Muito mais sensível que o teste de 1 dígito: 90 categorias em vez de 9,
+    e é onde aparecem as assinaturas de valor "arredondado para caber" —
+    concentração em 10, 15, 20, 25, 50. Os limiares de Nigrini são PRÓPRIOS
+    deste teste (0,0012 / 0,0018 / 0,0022); reaproveitar os de 1 dígito
+    reprovaria qualquer base.
+    """
+    v = pd.to_numeric(valores, errors="coerce").dropna().abs()
+    v = v[v >= 10]
+    if len(v) < 1000:
+        return {"n": int(len(v)), "aplicavel": False,
+                "motivo": "amostra menor que 1.000 registros"}
+    d2 = v.map(lambda x: int(str(int(x))[:2]))
+    obs = d2.value_counts(normalize=True).reindex(range(10, 100), fill_value=0.0)
+    esp = pd.Series({d: math.log10(1 + 1 / d) for d in range(10, 100)})
+    mad = float((obs - esp).abs().mean())
+    if mad < 0.0012:
+        conform = "conforme"
+    elif mad < 0.0018:
+        conform = "aceitavel"
+    elif mad < 0.0022:
+        conform = "marginal"
+    else:
+        conform = "nao_conforme"
+    desvio = (obs - esp).sort_values(ascending=False)
+    return {
+        "n": int(len(v)), "aplicavel": True, "mad": round(mad, 6),
+        "conformidade": conform,
+        "observado": {int(d): round(float(obs[d]), 5) for d in obs.index},
+        "esperado": {int(d): round(float(esp[d]), 5) for d in esp.index},
+        "maiores_excessos": {int(d): round(float(desvio[d]), 5)
+                             for d in desvio.head(8).index},
     }
 
 
