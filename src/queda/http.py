@@ -66,11 +66,19 @@ def _throttle(url: str) -> None:
 
 
 def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
-             ok_empty_status: tuple[int, ...] = (204,)):
+             ok_empty_status: tuple[int, ...] = (204,),
+             rate_limit_retries: int | None = None):
     """GET com cache. Retorna o JSON, [] para respostas vazias, None para 404.
 
     Levanta exceção só depois de esgotar os retries em erros 5xx/rede.
+
+    `rate_limit_retries=0` faz o 403/429 ser tratado como resposta final —
+    "este host/caminho não nos serve" — em vez de bloqueio temporário. É o que
+    se quer ao SONDAR: um host que recusa não vai passar a aceitar depois de
+    três minutos de espera, e insistir custa minutos por candidato.
     """
+    limite = (config.RATE_LIMIT_RETRIES if rate_limit_retries is None
+              else rate_limit_retries)
     cache = _cache_path(url, params)
     if use_cache and cache.exists():
         try:
@@ -100,7 +108,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
     last_err: Exception | None = None
     net_attempt = 0
     rate_attempt = 0
-    max_iter = config.RETRIES + config.RATE_LIMIT_RETRIES + 2
+    max_iter = config.RETRIES + limite + 2
     for _ in range(max_iter):
         _throttle(url)
         try:
@@ -118,8 +126,12 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
         if r.status_code in ok_empty_status:
             return _store([], r.status_code)
         if r.status_code in config.RATE_LIMIT_STATUS:
+            if limite <= 0:
+                log.info("HTTP %s em %s — sondagem: host/caminho tratado como "
+                         "indisponível, sem espera", r.status_code, url)
+                return None                  # não cacheado: pode ser temporário
             rate_attempt += 1
-            if rate_attempt > config.RATE_LIMIT_RETRIES:
+            if rate_attempt > limite:
                 raise RateLimited(
                     f"HTTP {r.status_code} persistente em {url} — o servidor está "
                     "limitando o ritmo. Reexecute a mesma célula: o cache retoma de "

@@ -38,13 +38,28 @@ DIARIAS_PROBE = [
 
 
 def implanta_probe_diarias(ano: int) -> dict[str, list]:
+    """Sonda caminhos de diárias que o swagger define sem publicar endpoint.
+
+    Caminho que não existe é descartado para SEMPRE nesta execução: sem isso,
+    os mesmos caminhos inexistentes eram tentados uma vez por exercício.
+    """
     found: dict[str, list] = {}
     for ep in DIARIAS_PROBE:
-        data = get_json(f"{config.IMPLANTA_BASE}/{ep}",
-                        {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"})
+        if ep in _PROBE_MORTOS:
+            continue
+        data = get_json(
+            f"{config.IMPLANTA_BASE}/{ep}",
+            {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
+            rate_limit_retries=1)
         if data:
             found[ep] = data
+        elif data is None:
+            # 404/400/403 na sondagem: o caminho não serve
+            _PROBE_MORTOS.add(ep)
     return found
+
+
+_PROBE_MORTOS: set[str] = set()
 
 
 def implanta_datas(endpoint: str, ano: int):
@@ -91,18 +106,37 @@ def achatar_plano_contas(rows: list, nivel: int = 0, pai: str = "") -> list[dict
 def _discover_dados_abertos() -> str | None:
     for base in config.DADOS_ABERTOS_CANDIDATES:
         try:
-            data = get_json(f"{base}/api/DadosAbertos/mandatarios", use_cache=False)
+            # rate_limit_retries=0: sondagem não espera. Um host que devolve
+            # 403 em todas as tentativas não está limitando ritmo — está
+            # barrando (WAF/bot protection). Insistir custava ~8 min por
+            # candidato e não mudava o resultado.
+            data = get_json(f"{base}/api/DadosAbertos/mandatarios",
+                            use_cache=False, rate_limit_retries=0)
         except RuntimeError:
             continue
         if isinstance(data, dict) and data.get("result") is not None:
             log.info("Dados Abertos: host descoberto em %s", base)
             return base
-    log.warning("Dados Abertos: nenhum host candidato respondeu")
+    log.warning(
+        "Dados Abertos: nenhum host candidato respondeu. As frentes que "
+        "dependem de quadro de pessoal, mandatários e indenizações ficam "
+        "desligadas — e o relatório registra isso como achado de "
+        "transparência, porque a indisponibilidade da API é ela própria "
+        "descumprimento da LAI.")
     return None
 
 
+# A descoberta roda UMA vez por execução, inclusive quando FALHA. Sem isto,
+# cada chamada a dados_abertos() refazia a varredura inteira dos candidatos —
+# e stage_indenizacoes chama uma vez por exercício, o que multiplicava a
+# espera por doze.
+_BASE_SONDADA: dict[str, str | None] = {}
+
+
 def dados_abertos_base() -> str | None:
-    return memo("dados_abertos_base", _discover_dados_abertos)
+    if "base" not in _BASE_SONDADA:
+        _BASE_SONDADA["base"] = memo("dados_abertos_base", _discover_dados_abertos)
+    return _BASE_SONDADA["base"]
 
 
 def dados_abertos(endpoint: str, params: dict | None = None) -> list:
