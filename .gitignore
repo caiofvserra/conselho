@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Dados baixados das APIs e relatórios gerados — nunca commitar
+data/
+output/
