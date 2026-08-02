@@ -6,14 +6,15 @@ import logging
 from ..findings import Finding
 import traceback
 
-from . import (casos, contratos, diagnostico, diarias, empenhos, finalistica,
-               forense, fornecedores, opacidade, orcamento, pessoal, rede)
+from . import (atas, casos, contratos, diagnostico, diarias, empenhos,
+               finalistica, forense, fornecedores, opacidade, orcamento,
+               pessoal, rede)
 
 log = logging.getLogger("queda.checks")
 
 # ordem = ordem das abas no relatório
 MODULOS = [finalistica, orcamento, opacidade, diarias, pessoal, casos,
-           empenhos, contratos, rede, forense, fornecedores, diagnostico]
+           empenhos, contratos, rede, atas, forense, fornecedores, diagnostico]
 
 
 def run_all(staged) -> list[Finding]:

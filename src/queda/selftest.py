@@ -252,6 +252,14 @@ def _staged() -> dict[str, pd.DataFrame]:
             ("UGI Campinas - Atendimento", "Material de Consumo", 1.5e6),
         )])
 
+    atas = pd.DataFrame([
+        {"_ano": a, "NUMERO": f"{a}/0{i}", "COLEGIADO": "Plenário",
+         "DATA_INICIO": f"1{i}/0{i}/{a}",
+         "DELIBERACOES": ("Aprovado, por unanimidade, o repasse à Associação "
+                          "dos Engenheiros X, no valor de R$ 90.000,00, "
+                          "conforme plano de trabalho apresentado.")}
+        for a in (2022, 2023, 2024) for i in (3, 8)])
+
     pncp = pd.DataFrame([
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo", "orgao_nome": "CREA-SP",
          "fornecedor_ni": _CNPJ_REDE, "fornecedor_nome": _FORN_REDE,
@@ -273,7 +281,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "aditivos": aditivos, "licitacoes": pd.DataFrame(), "convenios": convenios,
         "comparativo_despesa": comparativo, "despesas_centro_custo": centro_custo,
         "comparativo_receita": receita, "balanco_orcamentario": balanco,
-        "quadro_pessoal": quadro,
+        "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
     }
@@ -328,6 +336,8 @@ ESPERADOS = [
     "rede-intermediadores",            # quem conecta quem recebe
     "rede-convenios-ciclo-eleitoral",  # repasse concentrado em ano de eleição
     "rede-convenios-valores",          # valor redondo idêntico = rateio
+    # atas (LLM opcional: sem chave, avisa em vez de silenciar)
+    "atas-llm-desligado",
     # casos concentrados
     "casos-entidade-da-casa",
     "casos-obras",

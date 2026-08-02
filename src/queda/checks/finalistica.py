@@ -80,6 +80,10 @@ def run(staged) -> list[Finding]:
     if base.empty:
         return achados
     base = base[base["valor"] > 0]
+    # o LLM (se houver chave) resolve o resíduo que o regex não enquadrou
+    base["categoria"], info_llm = T.refinar_residuo(
+        base["rotulo"], base["categoria"], base["valor"])
+    base["funcao"] = T.classificar_funcao_series(base["unidade"], base["categoria"])
     base["macro"] = T.macro(base["categoria"])
 
     # ------------------------------------------------ 1. panorama anual macro
@@ -248,13 +252,18 @@ def run(staged) -> list[Finding]:
             titulo=f"{cob['pct_nao_classificado']:.0f}% da despesa não pôde ser "
                    "classificada por finalidade",
             descricao=(
-                "Contas cujo nome não permitiu enquadramento automático. Rodar com "
-                "`QUEDA_ANTHROPIC_API_KEY` definida aciona a classificação por LLM "
-                "e reduz este resíduo; a lista abaixo também serve para refinar as "
-                "regras determinísticas."),
+                "Contas cujo nome não permitiu enquadramento automático — a "
+                "medida de confiabilidade de toda esta frente. "
+                + (f"O LLM resolveu {info_llm.get('rubricas', 0)} rubrica(s) "
+                   f"deste resíduo ({fmt_brl(info_llm['valor_reclassificado'])}); "
+                   "o que restou está abaixo."
+                   if info_llm.get("reclassificadas") else
+                   "Rodar com `QUEDA_ANTHROPIC_API_KEY` definida aciona a "
+                   "classificação por LLM e reduz este resíduo.")
+                + " A lista também serve para refinar as regras determinísticas."),
             evidencia=T.maiores_nao_classificados(
                 base["rotulo"], base["categoria"], base["valor"]),
-            metricas=cob,
+            metricas={**cob, "llm": info_llm},
         ))
 
     # ------------------------------------------------ 6. centros de custo

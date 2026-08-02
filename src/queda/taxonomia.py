@@ -201,6 +201,50 @@ def macro(categoria: pd.Series) -> pd.Series:
     return categoria.map(MACRO).fillna("Não classificado")
 
 
+def refinar_residuo(rotulos: pd.Series, categorias: pd.Series,
+                    valores: pd.Series, *, top: int = 250) -> tuple[pd.Series, dict]:
+    """Manda ao LLM só o resíduo `OUTROS`, priorizado por R$.
+
+    A regra determinística resolve a massa; o que sobra são nomes de conta
+    genéricos ou idiossincráticos, em que um classificador de linguagem se sai
+    melhor que regex. Três salvaguardas: só as contas que concentram valor vão
+    (o custo é limitado e o benefício é onde o dinheiro está), a resposta só é
+    aceita nas categorias existentes, e a origem de cada classificação fica
+    registrada — nada do que o LLM decidir se confunde com regra.
+
+    Sem `QUEDA_ANTHROPIC_API_KEY` devolve as categorias intactas.
+    """
+    from . import llm
+
+    info = {"llm_disponivel": llm.disponivel(), "reclassificadas": 0,
+            "valor_reclassificado": 0.0}
+    pendentes = categorias == "OUTROS"
+    if not pendentes.any() or not llm.disponivel():
+        return categorias, info
+
+    fila = (pd.DataFrame({"rotulo": rotulos[pendentes].fillna("").astype(str),
+                          "valor": valores[pendentes]})
+            .groupby("rotulo")["valor"].sum().sort_values(ascending=False))
+    fila = fila[fila.index.str.strip() != ""].head(top)
+    if fila.empty:
+        return categorias, info
+
+    mapa = {t: c for t, c in llm.classificar_rubricas(list(fila.index)).items()
+            if c in GRUPOS and c != "OUTROS"}
+    if not mapa:
+        return categorias, info
+
+    novo = categorias.copy()
+    alvo = pendentes & rotulos.fillna("").astype(str).isin(mapa)
+    novo.loc[alvo] = rotulos[alvo].map(mapa)
+    info["reclassificadas"] = int(alvo.sum())
+    info["valor_reclassificado"] = round(float(valores[alvo].sum()), 2)
+    info["rubricas"] = len(mapa)
+    log.info("LLM resolveu %d rubrica(s) do resíduo (%d linhas, R$ %.2f)",
+             len(mapa), info["reclassificadas"], info["valor_reclassificado"])
+    return novo, info
+
+
 # ================================================================= EIXO B
 # FUNÇÃO — para que serve a unidade que gastou. Lido do centro de custo.
 FUNCOES = {
