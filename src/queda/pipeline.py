@@ -114,6 +114,145 @@ def stage_comparativo_despesa(desde, ate):
     return _salvar("comparativo_despesa", df)
 
 
+def stage_despesas_centro_custo(desde, ate):
+    """Despesa por CENTRO DE CUSTO — base para separar despesa-meio de
+    despesa-fim (fiscalização, câmaras, atendimento vs administração)."""
+    rows = _anos_com_sondagem(
+        lambda a: clients.implanta_ano("DespesasCentroCusto", a), ate, desde)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        meses = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
+                 "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+        for m in meses:
+            c = f"VALOR_{m}"
+            if c in df:
+                df[c] = df[c].map(parse_valor)
+        for c in ("VALOR_TOTAL", "ORCAMENTO", "SALDO"):
+            if c in df:
+                df[c] = df[c].map(parse_valor)
+    return _salvar("despesas_centro_custo", df)
+
+
+def stage_demonstrativo(desde, ate):
+    """Orçado × empenhado × liquidado × pago por conta/centro de custo."""
+    frames = []
+    piso = desde or config.ANO_PISO
+    vazios = 0
+    for ano in range(ate, piso - 1, -1):
+        rows = clients.implanta_ano("DemonstrativoEmpenhosPagamentos", ano)
+        achatado = clients.achatar_demonstrativo(rows)
+        if achatado:
+            vazios = 0
+            for r in achatado:
+                r["_ano"] = ano
+            frames.extend(achatado)
+        else:
+            vazios += 1
+            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
+                break
+    df = pd.DataFrame(frames)
+    if not df.empty:
+        for c in ("ORCADO", "EMPENHADOEXERCICIO", "LIQUIDADO_EXERCICIO",
+                  "PAGO_EXERCICIO", "SALDO_ORCAMENTARIO", "EMPENHA_PERIODO"):
+            if c in df:
+                df[c] = df[c].map(parse_valor)
+    return _salvar("demonstrativo", df)
+
+
+def stage_plano_contas(ate):
+    """Hierarquia oficial do plano de contas (para taxonomia correta)."""
+    frames = []
+    for ano in (ate, ate - 1, ate - 2):
+        rows = clients.implanta_exercicio("PlanoDeContas", ano)
+        achatado = clients.achatar_plano_contas(rows)
+        if achatado:
+            for r in achatado:
+                r["_ano"] = ano
+            frames.extend(achatado)
+            break
+    return _salvar("plano_contas", pd.DataFrame(frames))
+
+
+def stage_processos_compras(desde, ate):
+    """Processos de compra com ITENS (quantidade, valor unitário, melhor cotação)
+    — permite detectar sobrepreço e manipulação de cotação."""
+    processos, itens = [], []
+    piso = desde or config.ANO_PISO
+    vazios = 0
+    for ano in range(ate, piso - 1, -1):
+        rows = clients.implanta_ano("ProcessosComprasServicos", ano)
+        if not rows:
+            vazios += 1
+            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
+                break
+            continue
+        vazios = 0
+        for p in rows:
+            num = p.get("NUMERO_PROCESSO")
+            processos.append({
+                "_ano": ano, "NUMERO_PROCESSO": num,
+                "SITUACAO_ATUAL": p.get("SITUACAO_ATUAL"),
+                "DATA_CADASTRO": p.get("DATA_CADASTRO"),
+                "UNIDADE_REQUISITANTE": p.get("UNIDADE_REQUISITANTE"),
+                "VALOR_TOTAL_PROCESSO": parse_valor(p.get("VALOR_TOTAL_PROCESSO")),
+                "OBJETO": p.get("OBJETO"), "JUSTIFICATIVA": p.get("JUSTIFICATIVA"),
+                "N_ITENS": len(p.get("ITENS") or []),
+            })
+            for it in p.get("ITENS") or []:
+                itens.append({
+                    "_ano": ano, "NUMERO_PROCESSO": num,
+                    "NUMERO_LOTE": it.get("NUMERO_LOTE"),
+                    "NOME_ITEM": it.get("NOME_ITEM"),
+                    "QUANTIDADE": parse_valor(it.get("QUANTIDADE")),
+                    "VALOR_UNITARIO": parse_valor(it.get("VALOR_UNITARIO")),
+                    "EMPRESA_MELHOR_COTACAO": it.get("EMPRESA_MELHOR_COTACAO"),
+                    "VALOR_MELHOR_COTACAO": parse_valor(it.get("VALOR_MELHOR_COTACAO")),
+                })
+    _salvar("processos_compras", pd.DataFrame(processos))
+    return _salvar("processos_itens", pd.DataFrame(itens))
+
+
+def stage_atas(desde, ate):
+    """Atas de colegiado: deliberações (texto) + participantes."""
+    rows = []
+    piso = desde or config.ANO_PISO
+    vazios = 0
+    for ano in range(ate, piso - 1, -1):
+        got = clients.implanta_datas("AtasColegiados", ano)
+        if got:
+            vazios = 0
+            for r in got:
+                r["_ano"] = ano
+            rows.extend(got)
+        else:
+            vazios += 1
+            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
+                break
+    return _salvar("atas", pd.DataFrame(rows))
+
+
+def stage_orcamento(desde, ate):
+    """Balanço orçamentário e comparativo de receita (denominadores)."""
+    orc = _anos_com_sondagem(
+        lambda a: clients.implanta_ano("BalancoOrcamentario", a), ate, desde)
+    dfo = pd.DataFrame(orc)
+    if not dfo.empty:
+        for c in ("DOTACOES", "DOTACOES_ATUALIZADAS", "RECEITAS_REALIZADAS",
+                  "DESPESAS_EMPENHADAS", "DESPESAS_LIQUIDADAS", "DESPESAS_PAGAS"):
+            if c in dfo:
+                dfo[c] = dfo[c].map(parse_valor)
+    _salvar("balanco_orcamentario", dfo)
+
+    rec = _anos_com_sondagem(
+        lambda a: clients.implanta_ano("ComparativoReceita", a), ate, desde)
+    dfr = pd.DataFrame(rec)
+    if not dfr.empty:
+        for c in ("VALOR_ORCADO", "REALIZADO_EXERCICIO", "TOTAL_EXERCICIO"):
+            if c in dfr:
+                dfr[c] = dfr[c].map(parse_valor)
+    return _salvar("comparativo_receita", dfr)
+
+
 def stage_quadro_pessoal():
     """Quadro de pessoal: tenta Dados Abertos e cai para Implanta QuadrosPessoas."""
     rows = clients.dados_abertos("quadro-colaboradores")
@@ -241,6 +380,12 @@ def build_staged(desde: int | None, ate: int) -> dict[str, pd.DataFrame]:
         "licitacoes": stage_licitacoes(desde, ate),
         "convenios": stage_convenios(desde, ate),
         "comparativo_despesa": stage_comparativo_despesa(desde, ate),
+        "despesas_centro_custo": stage_despesas_centro_custo(desde, ate),
+        "demonstrativo": stage_demonstrativo(desde, ate),
+        "plano_contas": stage_plano_contas(ate),
+        "processos_itens": stage_processos_compras(desde, ate),
+        "atas": stage_atas(desde, ate),
+        "comparativo_receita": stage_orcamento(desde, ate),
         "quadro_pessoal": stage_quadro_pessoal(),
         "mandatarios": stage_mandatarios(),
         "indenizacoes_endpoint": stage_indenizacoes(desde, ate),

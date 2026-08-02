@@ -4,11 +4,14 @@ from __future__ import annotations
 import logging
 
 from ..findings import Finding
-from . import contratos, diarias, empenhos, fornecedores, pessoal, rede
+from . import (contratos, diarias, empenhos, finalistica, fornecedores,
+               opacidade, pessoal, rede)
 
 log = logging.getLogger("queda.checks")
 
-MODULOS = [diarias, pessoal, empenhos, contratos, rede, fornecedores]
+# ordem = ordem das abas no relatório
+MODULOS = [finalistica, opacidade, diarias, pessoal, empenhos, contratos,
+           rede, fornecedores]
 
 
 def run_all(staged) -> list[Finding]:

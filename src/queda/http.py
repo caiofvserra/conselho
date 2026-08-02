@@ -73,14 +73,28 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
     """
     cache = _cache_path(url, params)
     if use_cache and cache.exists():
-        with open(cache) as f:
-            payload = json.load(f)
-        return payload["data"]
+        try:
+            with open(cache) as f:
+                payload = json.load(f)
+        except (ValueError, OSError):
+            payload = None
+        if payload is not None:
+            # Entradas gravadas por versões antigas não têm "status" e podem ter
+            # cacheado um bloqueio (403) como se fosse ausência de dados. Só
+            # confiamos no cache quando ele guarda conteúdo, ou quando a ausência
+            # foi confirmada por um 404 explícito.
+            data = payload.get("data")
+            status = payload.get("status")
+            confiavel = data not in (None, []) or status == 404
+            if confiavel:
+                return data
+            log.debug("cache descartado (data vazia, status=%s): %s", status, url)
 
-    def _store(data):
+    def _store(data, status):
         cache.parent.mkdir(parents=True, exist_ok=True)
         with open(cache, "w") as f:
-            json.dump({"url": url, "params": params, "data": data}, f, ensure_ascii=False)
+            json.dump({"url": url, "params": params, "status": status, "data": data},
+                      f, ensure_ascii=False)
         return data
 
     last_err: Exception | None = None
@@ -100,9 +114,9 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
             continue
 
         if r.status_code == 404:
-            return _store(None)                      # ausência genuína: cacheável
+            return _store(None, 404)                 # ausência genuína: cacheável
         if r.status_code in ok_empty_status:
-            return _store([])
+            return _store([], r.status_code)
         if r.status_code in config.RATE_LIMIT_STATUS:
             rate_attempt += 1
             if rate_attempt > config.RATE_LIMIT_RETRIES:
@@ -132,19 +146,30 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
             log.warning("HTTP %s em %s params=%s", r.status_code, url, params)
             return None                              # não cacheia (permite correção)
         try:
-            return _store(r.json())
+            return _store(r.json(), r.status_code)
         except ValueError:
-            return _store(None)
+            return _store(None, r.status_code)
     raise RuntimeError(f"Falha após retries: {url}") from last_err
 
 
 def memo(name: str, fn):
-    """Cache simples de valores derivados (ex.: host descoberto, CNPJs)."""
+    """Cache de valores derivados (host descoberto, CNPJs).
+
+    Resultados nulos NÃO são persistidos: uma descoberta que falhou por
+    bloqueio temporário não pode envenenar as execuções seguintes.
+    """
     path = config.CACHE_DIR / f"{name}.json"
     if path.exists():
-        with open(path) as f:
-            return json.load(f)
+        try:
+            with open(path) as f:
+                value = json.load(f)
+            if value is not None:
+                return value
+        except (ValueError, OSError):
+            pass
     value = fn()
+    if value is None:
+        return None
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(value, f, ensure_ascii=False)

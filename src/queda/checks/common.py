@@ -4,6 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .. import clients, config
+from .. import taxonomia as T
 from ..utils import norm_nome, so_digitos
 
 
@@ -12,19 +13,48 @@ def df(staged: dict, nome: str) -> pd.DataFrame:
     return d if isinstance(d, pd.DataFrame) else pd.DataFrame()
 
 
-def pagamentos_indenizacao(staged) -> pd.DataFrame:
-    """Pagamentos classificados como diária/indenização/km pelo texto da conta
-    ou do histórico — fonte primária, já que os endpoints dedicados costumam
-    estar vazios."""
+def pagamentos_indenizacao(staged, *, apenas_pessoa_fisica: bool = True) -> pd.DataFrame:
+    """Pagamentos de diária / quilometragem / indenização a pessoas.
+
+    A classificação usa **apenas o nome da conta contábil** (`CONTA_EMPENHO`),
+    nunca o histórico nem o nome do favorecido. Essa é a correção do falso
+    positivo da primeira rodada: o histórico costuma repetir a razão social, e
+    empresas como "CS BRASIL TRANSPORTES DE PASSAGEIROS" ou operadoras de
+    telecom entravam no filtro por casarem 'passag'/'link' no texto livre.
+
+    Por padrão devolve só pessoas físicas — diária e quilometragem são verbas
+    de pessoa física. Passe `apenas_pessoa_fisica=False` para incluir PJ
+    (agências de viagem, locadoras), que é despesa de custeio, não verba.
+    """
     pg = df(staged, "pagamentos")
-    if pg.empty:
-        return pg
-    texto = (pg.get("CONTA_EMPENHO", "").fillna("").astype(str) + " " +
-             pg.get("HISTORICO", "").fillna("").astype(str))
-    mask = texto.str.contains(config.REGEX_INDENIZACAO, case=False, regex=True)
+    if pg.empty or "VALOR" not in pg.columns:
+        return pd.DataFrame()
+
+    conta = pg.get("CONTA_EMPENHO")
+    if conta is None:
+        conta = pg.get("NOME_CONTA", pd.Series("", index=pg.index))
+    conta = conta.fillna("").astype(str)
+
+    # classifica os valores DISTINTOS de conta (poucas centenas), não linha a linha
+    mapa = {v: T.classificar_texto(v) for v in conta.unique()}
+    categoria = conta.map(mapa)
+    mask = categoria == "VERBAS_PESSOAIS"
+
     out = pg[mask].copy()
-    out["_texto_match"] = texto[mask]
+    out["_conta_match"] = conta[mask]
+    if apenas_pessoa_fisica and "PF" in out.columns:
+        out = out[out["PF"].astype(bool)]
     return out
+
+
+def pagamentos_viagem_pj(staged) -> pd.DataFrame:
+    """Contrapartida: gasto de viagem pago a PESSOA JURÍDICA (agências, cias
+    aéreas, locadoras). É custeio administrativo — separado das verbas a
+    pessoas para não inflar o número de 'diárias'."""
+    todos = pagamentos_indenizacao(staged, apenas_pessoa_fisica=False)
+    if todos.empty or "PF" not in todos.columns:
+        return pd.DataFrame()
+    return todos[~todos["PF"].astype(bool)]
 
 
 def classificar_beneficiario(nomes_norm: pd.Series, staged) -> pd.Series:

@@ -47,6 +47,46 @@ def implanta_probe_diarias(ano: int) -> dict[str, list]:
     return found
 
 
+def implanta_datas(endpoint: str, ano: int):
+    """Endpoints que usam dataInicio/dataTermino no formato DD/MM/AAAA."""
+    return implanta(endpoint, {"dataInicio": f"01/01/{ano}",
+                               "dataTermino": f"31/12/{ano}"})
+
+
+def implanta_exercicio(endpoint: str, ano: int):
+    """Endpoints que usam o parâmetro `exercicio`."""
+    return implanta(endpoint, {"exercicio": ano})
+
+
+def achatar_demonstrativo(rows: list, nivel: int = 0, pai: str = "") -> list[dict]:
+    """DemonstrativoEmpenhosPagamentos vem em árvore (campo DETALHES). Achata
+    preservando o caminho hierárquico, para permitir agregação por conta."""
+    out: list[dict] = []
+    for r in rows or []:
+        filhos = r.get("DETALHES") or []
+        linha = {k: v for k, v in r.items() if k != "DETALHES"}
+        linha["_nivel"] = nivel
+        linha["_pai"] = pai
+        linha["_folha"] = not filhos
+        out.append(linha)
+        if filhos:
+            caminho = f"{pai}>{r.get('NOME') or r.get('CODIGO') or ''}".strip(">")
+            out.extend(achatar_demonstrativo(filhos, nivel + 1, caminho))
+    return out
+
+
+def achatar_plano_contas(rows: list, nivel: int = 0, pai: str = "") -> list[dict]:
+    """PlanoDeContas vem em árvore (campo Analiticas)."""
+    out: list[dict] = []
+    for r in rows or []:
+        filhos = r.get("Analiticas") or []
+        out.append({"codigo": r.get("Codigo"), "nome": r.get("Nome"),
+                    "nivel": nivel, "pai": pai, "folha": not filhos})
+        if filhos:
+            out.extend(achatar_plano_contas(filhos, nivel + 1, r.get("Codigo") or ""))
+    return out
+
+
 # ================================================================ Dados Abertos
 def _discover_dados_abertos() -> str | None:
     for base in config.DADOS_ABERTOS_CANDIDATES:

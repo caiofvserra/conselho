@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .. import analytics as A
 from .. import config
 from ..findings import Finding
 from ..utils import fmt_brl
@@ -47,15 +48,37 @@ def run(staged) -> list[Finding]:
                 evidencia=conc,
                 metricas={"anos_criticos": criticos["ano"].tolist() if not criticos.empty else []},
             ))
-            top_geral = (pj.groupby("FAVORECIDO_NORM")["VALOR"].sum()
-                         .sort_values(ascending=False).head(25).reset_index())
+            rank = A.ranking_anual(pj, "FAVORECIDO_NORM", "VALOR", top=10)
+            serie_top = pd.DataFrame()
+            if not rank.empty:
+                lideres = (rank.groupby("FAVORECIDO_NORM")["total"].sum()
+                           .nlargest(6).index.tolist())
+                serie_top = A.serie_anual(
+                    pj[pj["FAVORECIDO_NORM"].isin(lideres)], "VALOR",
+                    by="FAVORECIDO_NORM")
             achados.append(Finding(
                 id="empenhos-top-fornecedores", frente=FRENTE, gravidade="info",
-                titulo="Maiores fornecedores por valor pago (todo o período)",
-                descricao="Ranking de pessoas jurídicas por total recebido.",
-                evidencia=top_geral,
-                metricas={"top": top_geral.head(12).to_dict("records")},
+                titulo="Maiores fornecedores por ano",
+                descricao="Top 10 de cada exercício. O gráfico acompanha os seis "
+                          "maiores do período — mostra quando cada fornecedor "
+                          "entrou, cresceu ou saiu.",
+                evidencia=rank, tabela_anual=rank,
+                serie=serie_top, grafico="bar_stacked",
             ))
+            fixos = (rank.groupby("FAVORECIDO_NORM")["_ano"].nunique()
+                     .sort_values(ascending=False))
+            fixos = fixos[fixos >= max(int(0.7 * pj["_ano"].nunique()), 3)]
+            if not fixos.empty:
+                achados.append(Finding(
+                    id="empenhos-fornecedores-cativos", frente=FRENTE,
+                    gravidade="media",
+                    titulo=f"{len(fixos)} fornecedor(es) permanecem no top-10 em "
+                           "70% ou mais dos exercícios",
+                    descricao="Permanência prolongada no topo, num órgão que deve "
+                              "licitar periodicamente, sugere renovação sucessiva "
+                              "de contrato ou baixa competição real.",
+                    evidencia=fixos.to_frame("anos_no_top10").reset_index(),
+                ))
 
     # -------------------------------------------------- fracionamento
     if not pg.empty and {"FAVORECIDO_NORM", "DATA", "VALOR"} <= set(pg.columns):
