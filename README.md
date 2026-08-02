@@ -30,33 +30,89 @@ python main.py selftest                      # valida o pipeline sem rede (fixtu
   exercícios pré-2016 para a série histórica de diárias e pessoal).
 - Saída: `output/report.html` (dashboard autocontido) + `output/csv/*.csv`
   (evidência bruta de cada achado).
-- Cache de rede em `data/raw/` — reexecuções não repetem chamadas.
-- **Google Colab**: abra `notebooks/queda_colab.ipynb` (recomendado — ver
-  privacidade abaixo).
+- Cache de rede em `data/raw/` — reexecuções não repetem chamadas. Se a coleta
+  parar com aviso de rate-limit, rode o mesmo comando de novo: ele retoma de
+  onde parou.
+- **Google Colab**: abra `notebooks/queda_colab.ipynb`
+  ([link direto](https://colab.research.google.com/github/caiofvserra/queda/blob/claude/crea-sp-audit-tool-m9nw7t/notebooks/queda_colab.ipynb)) —
+  recomendado, ver privacidade abaixo.
+
+### Camada opcional de IA
+
+Nada do que o relatório afirma depende de LLM: todo número sai de regra
+determinística. O modelo entra só onde regra nenhuma serve.
+
+```bash
+pip install anthropic
+export QUEDA_ANTHROPIC_API_KEY=sk-ant-...
+python main.py all            # ou `--sem-llm` para desligar mesmo com a chave
+```
+
+| Onde | O que o LLM faz | O que ele **não** faz |
+|---|---|---|
+| Resíduo da taxonomia | enquadra as contas que o regex não classificou, priorizadas por R$ | não recalcula valor; a origem fica registrada no achado de cobertura |
+| Atas dos colegiados | lê a prosa da deliberação e extrai decisão, beneficiário e valor mencionado | não infere o que não está escrito, não julga legalidade |
+| Resumo executivo | redige sobre os achados já calculados | não vê dado bruto nem produz número novo |
+
+Todas as respostas são cacheadas em disco; rodadas seguintes não repetem
+chamadas. `networkx` (opcional) dá a medida exata de intermediação na rede —
+sem ele, a métrica cai para o grau de ligação.
 
 ## Frentes de análise
 
-1. **Diárias e indenizações** — extraídas dos *pagamentos* (filtro textual de
-   conta/histórico), já que os endpoints dedicados costumam vir vazios — o que,
-   por si só, vira achado de transparência. Série anual por categoria de
-   beneficiário (conselheiro/comissionado/efetivo), top beneficiários,
-   volume anual implausível, concentração, PJ recebendo indenização.
-2. **Custo real por categoria** — salário nominal do quadro + "renda invisível"
-   (indenizações por pessoa); série histórica por conta contábil; razão
-   indenizações de comissionados+conselheiros ÷ folha de efetivos.
-3. **Empenhos e pagamentos** — concentração por fornecedor (HHI), padrão de
-   fracionamento de despesa, anulações em massa, pago > empenhado.
-4. **Contratos e licitações** — aditivos acima do limite legal, pagamento após
-   vigência, contratação direta, cross-check Implanta × PNCP.
-5. **Rede de influência** — fornecedores compartilhados entre Crea-SP e
-   Confea/Mútua/outros CREAs, sócios (QSA) homônimos de conselheiros e
-   funcionários, sócios em comum entre "concorrentes", convênios recorrentes,
-   repasses a entidades do sistema. Grafo interativo no dashboard.
-6. **Fornecedores** — situação cadastral não-ativa na Receita, empresa criada
-   às vésperas do primeiro pagamento.
+1. **Para onde vai o dinheiro** — taxonomia de dois eixos: a **natureza** (o
+   que se comprou: salário, diária, aluguel, obra) vem da conta contábil e a
+   **função** (para que unidade: fiscalização, atendimento, direção superior,
+   órgãos políticos, administração) vem do centro de custo. A matriz cruzada
+   separa "gasta muito com pessoal" de "gasta muito com pessoal que não
+   fiscaliza", e isola as verbas indenizatórias pagas dentro das unidades que
+   as autorizam.
+2. **Orçamento** — orçado → empenhado → liquidado → pago por exercício; contas
+   que estouram a dotação ano após ano (subestimação na peça orçamentária, não
+   imprevisto); diárias executadas acima do aprovado; e quanto de cada real
+   arrecadado do profissional voltou como fiscalização.
+3. **Opacidade** — o que se esconde atrás de rótulos agregadores tipo "DIVERSOS
+   FUNCIONÁRIOS", decomposto pela conta contábil que vem na própria linha do
+   pagamento.
+4. **Diárias e verbas a pessoas** — classificadas **só** pela conta contábil
+   (nunca pelo histórico ou pelo nome do favorecido, que era a origem dos
+   falsos positivos). Série anual com CAGR real, ranking por exercício,
+   beneficiários persistentes, volume anual implausível, mais de 12 verbas num
+   mês, acumulação de verbas no mesmo dia, e viagem comprada de PJ isolada como
+   custeio.
+5. **Pessoal** — salário nominal do quadro + "renda invisível" (indenizações
+   por pessoa); série histórica por conta contábil.
+6. **Casos concentrados** — entidades associativas que levam o nome do próprio
+   conselho, obra/nova sede, contratos de valor excepcional, pessoa física
+   prestando serviço.
+7. **Empenhos e pagamentos** — concentração por fornecedor (HHI sobre o mercado
+   real, sem folha nem repasse legal), fracionamento aferido contra o limite de
+   dispensa **vigente em cada exercício**, anatomia das anulações (empenho
+   fantasma, corrida de dezembro, reempenho no ano seguinte), pago > empenhado.
+8. **Contratos e licitações** — aditivos de valor acima do limite legal
+   (separados dos de prazo), pagamento após vigência, contratação direta,
+   cross-check Implanta × PNCP.
+9. **Rede de influência** — fornecedores compartilhados com Confea/Mútua/outros
+   CREAs, sócios homônimos de conselheiros e funcionários, **grupos econômicos
+   de fato** (componente conexa fornecedor–sócio: empresas ligadas por uma
+   pessoa não são concorrentes), nós de maior intermediação, convênios com
+   teste de ciclo eleitoral e detecção de rateio por valor redondo idêntico.
+10. **Deliberações dos colegiados** — decisões com efeito financeiro extraídas
+    das atas por LLM e cruzadas com os pagamentos.
+11. **Forense estatística** — Benford de 1 e 2 dígitos (limiares de Nigrini
+    próprios de cada teste), represamento abaixo do limite de dispensa do ano,
+    valores redondos, pares favorecido+valor repetidos, sazonalidade de
+    dezembro, estornos.
+12. **Fornecedores** — situação cadastral não-ativa na Receita ponderada pela
+    distância até o último pagamento, empresa criada às vésperas do primeiro
+    pagamento.
+13. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
+    o que faltou, que exercícios ficaram fora e **qual análise está desligada
+    por falta de qual fonte**. Poucos achados numa frente cuja fonte veio vazia
+    não é sinal de regularidade.
 
-Thresholds (teto de diária, limite de dispensa, janelas, etc.) são parâmetros
-em `src/queda/config.py`.
+Thresholds (teto de diária, limites de dispensa por ano, jetons por mês,
+janelas, anos eleitorais) são parâmetros em `src/queda/config.py`.
 
 ## Privacidade do operador
 
@@ -77,3 +133,20 @@ em `src/queda/config.py`.
   as prestações de contas junto ao TCU.
 - PNCP só cobre contratações a partir de 2021 (Lei 14.133).
 - Processos judiciais (DataJud/CNJ) ficam fora do escopo automático atual.
+
+### Parâmetros que precisam de conferência antes de virar prova
+
+A ferramenta publica sempre qual parâmetro usou, justamente para que estes
+pontos possam ser conferidos. Todos vivem em `src/queda/config.py`:
+
+- **Limite de dispensa por exercício** (`LIMITES_DISPENSA`) — os valores até
+  2023 estão fixados; os exercícios seguintes são atualizados por decreto anual
+  e herdam o último valor conhecido até serem confirmados.
+- **Teto de jetons por mês** (`MAX_JETONS_MES`) — muda por resolução do Confea;
+  confira a vigente no exercício analisado.
+- **Anos de eleição do Crea** (`ANOS_ELEITORAIS_CREA`) — o teste de ciclo
+  eleitoral dos convênios é sensível a esta lista.
+- **CNPJ do órgão-alvo** (`ORGAO_ALVO_CNPJ_CANDIDATOS`) — as fontes públicas
+  divergem entre dois números, então nenhum é aceito no escuro: cada candidato
+  é conferido no PNCP (razão social + UF) e, se nenhum passar, o bloco PNCP vem
+  vazio em vez de vir com os contratos de outro conselho.
