@@ -41,7 +41,15 @@ CNPJ_APIS = [
 # outro estado. Por isso o CNPJ do órgão-alvo é fixado aqui (Receita Federal:
 # 60.985.017/0001-77, autarquia federal, ativa) e a busca por nome só é usada
 # como último recurso, com verificação de UF.
-ORGAO_ALVO_CNPJ = "60985017000177"
+#
+# São dois candidatos porque as fontes públicas divergem sobre qual é o CNPJ
+# da autarquia. Nenhum é aceito no escuro: `clients.pncp_resolver_orgao`
+# consulta cada um no PNCP e só aceita o que devolver razão social com os
+# termos distintivos ("SAO PAULO") e UF conferida. Um CNPJ errado aqui faria
+# toda a frente de contratos falar de outro conselho — foi o que aconteceu na
+# primeira rodada, quando a busca por razão social devolveu o Crea-PE.
+ORGAO_ALVO_CNPJ_CANDIDATOS = ["60985017000177", "60986174000114"]
+ORGAO_ALVO_CNPJ = ORGAO_ALVO_CNPJ_CANDIDATOS[0]
 ORGAO_ALVO_RAZAO = "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DE SAO PAULO"
 ORGAO_ALVO_UF = "SP"
 

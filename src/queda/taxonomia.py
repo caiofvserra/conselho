@@ -77,7 +77,9 @@ REGRAS: list[tuple[str, str]] = [
      r"\bdiaria(s)?\b|\bjeton|ajuda de custo|verba de representa|"
      r"indeniza\w* de transporte|auxilio deslocamento|"
      r"\bquilometragem\b|\bkm rodado|reembolso de despesa|reembolso de viagem|"
-     r"\bpassagen(s)?\b|\bhospedagem\b|\bpernoite\b|adiantamento de viagem"),
+     # plural em -ns: `passagen(s)?` casava "passagens" e NUNCA "passagem",
+     # deixando a conta no singular — a mais comum — fora da categoria.
+     r"\bpassage(m|ns)\b|\bhospedagem\b|\bpernoite\b|adiantamento de viagem"),
 
     # --- remuneração e encargos ---
     ("REMUNERACAO",
@@ -145,7 +147,8 @@ REGRAS: list[tuple[str, str]] = [
      r"\blimpeza\b|\bvigilancia\b|\bseguranca patrimonial|\bportaria\b|"
      r"\brecepcao\b|\bcopa\b|\bmanutencao\b|\bconservacao\b|\bseguro\b|"
      r"\bcombustivel|\bfrota\b|\bveiculo(s)? locad|\bpassagem aerea corporativa|"
-     r"\binformatica\b|\bti\b|\bdatacenter|\bhospedagem de (site|sistema)|"
+     r"\binformatica\b|\btecnologia da informacao\b|\bdatacenter|"
+     r"\bhospedagem de (site|sistema)|"
      r"\bsuprimento|\bgrafica\b|\bimpressao\b|\bxerox|\breprografia|"
      r"\bagua mineral|\bterceiriza|\bmao de obra|\bapoio administrativo|"
      r"\bservico(s)? de terceiro|\bpessoa juridica\b|\bdespesa(s)? diversa"),

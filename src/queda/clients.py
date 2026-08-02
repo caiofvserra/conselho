@@ -157,20 +157,53 @@ def _tokens_distintivos(alvo: str) -> set[str]:
     return {t for t in alvo.split() if t not in genericas and len(t) > 2}
 
 
+def _confere_orgao(cnpj: str, razao_esperada: str, uf: str | None) -> dict | None:
+    """Confirma que o CNPJ é MESMO do órgão-alvo, consultando o PNCP.
+
+    Um CNPJ digitado errado no config não pode passar em silêncio: todo o
+    bloco PNCP penderia de outro órgão. A razão social devolvida pelo PNCP
+    tem de conter os termos que distinguem o alvo dos homônimos do sistema
+    (é "SAO PAULO" que separa o Crea-SP dos outros 26), e a UF tem de bater.
+    """
+    dados = get_json(f"{config.PNCP_API}/v1/orgaos/{cnpj}")
+    if not isinstance(dados, dict) or not dados.get("cnpj"):
+        return None
+    nome = _norm(dados.get("razaoSocial") or "")
+    distintivos = _tokens_distintivos(_norm(razao_esperada))
+    if distintivos and not distintivos <= set(nome.split()):
+        log.warning("PNCP: CNPJ %s pertence a %r, que não casa com %r — "
+                    "descartado", cnpj, dados.get("razaoSocial"), razao_esperada)
+        return None
+    if uf and not _confere_uf(dados.get("cnpj"), uf):
+        log.warning("PNCP: CNPJ %s não confere a UF %s — descartado", cnpj, uf)
+        return None
+    return {"cnpj": dados["cnpj"],
+            "razaoSocial": dados.get("razaoSocial") or razao_esperada,
+            "_verificado": True}
+
+
 def pncp_resolver_orgao(razao_social: str, *, cnpj_fixo: str | None = None,
                         uf: str | None = None) -> dict | None:
     """Resolve o CNPJ de um órgão no PNCP.
 
-    `cnpj_fixo` curto-circuita a busca — usar sempre que o CNPJ for conhecido,
-    porque a busca textual do PNCP casa qualquer conselho do mesmo sistema.
+    `cnpj_fixo` aceita um CNPJ ou uma lista de candidatos: cada um é
+    CONFERIDO contra o PNCP (razão social + UF) e o primeiro que passar
+    vence. Nenhum candidato é aceito no escuro — um CNPJ errado no config
+    faria toda a frente de contratos falar de outro conselho. Se nenhum
+    confere, cai na busca textual, que também exige os termos distintivos.
     """
-    if cnpj_fixo:
-        cnpj = re.sub(r"\D", "", cnpj_fixo)
-        dados = get_json(f"{config.PNCP_API}/v1/orgaos/{cnpj}")
-        if isinstance(dados, dict) and dados.get("cnpj"):
-            return {"cnpj": dados["cnpj"],
-                    "razaoSocial": dados.get("razaoSocial") or razao_social}
-        return {"cnpj": cnpj, "razaoSocial": razao_social}
+    candidatos = ([cnpj_fixo] if isinstance(cnpj_fixo, str)
+                  else list(cnpj_fixo or []))
+    for bruto in candidatos:
+        cnpj = re.sub(r"\D", "", str(bruto))
+        if len(cnpj) != 14:
+            continue
+        ok = _confere_orgao(cnpj, razao_social, uf)
+        if ok:
+            return ok
+    if candidatos:
+        log.warning("PNCP: nenhum dos CNPJs configurados para %r foi confirmado "
+                    "— tentando busca por razão social", razao_social)
 
     def resolve():
         alvo = _norm(razao_social)

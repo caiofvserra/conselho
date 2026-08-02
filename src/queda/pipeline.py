@@ -18,9 +18,31 @@ log = logging.getLogger("queda.pipeline")
 
 
 # ---------------------------------------------------------------- helpers
+# Registro do que cada dataset trouxe. Um "0 linhas" no log some no scroll e
+# não chega ao relatório; sem ele, meia ferramenta pode estar desligada sem
+# que ninguém perceba (foi o caso de quadro_pessoal e mandatarios na primeira
+# rodada real). Vira uma frente própria no dashboard.
+_DIAGNOSTICO: list[dict] = []
+
+
 def _salvar(nome: str, df: pd.DataFrame) -> pd.DataFrame:
     config.STAGED_DIR.mkdir(parents=True, exist_ok=True)
     caminho = config.STAGED_DIR / f"{nome}.csv"
+    anos: list[int] = []
+    if df is not None and not df.empty and "_ano" in df.columns:
+        anos = sorted({int(a) for a in pd.to_numeric(df["_ano"], errors="coerce")
+                       .dropna().unique()})
+    _DIAGNOSTICO.append({
+        "dataset": nome,
+        "linhas": 0 if df is None or df.empty else int(len(df)),
+        "colunas": 0 if df is None or df.empty else int(df.shape[1]),
+        "ano_min": anos[0] if anos else None,
+        "ano_max": anos[-1] if anos else None,
+        "anos_cobertos": len(anos),
+        "anos_faltando": (", ".join(str(a) for a in
+                                    range(anos[0], anos[-1] + 1)
+                                    if a not in set(anos)) if anos else ""),
+    })
     if df is None or df.empty:
         # DataFrame sem colunas grava um CSV vazio que pd.read_csv rejeita com
         # EmptyDataError, quebrando `analyze` e `report` depois da coleta.
@@ -30,6 +52,16 @@ def _salvar(nome: str, df: pd.DataFrame) -> pd.DataFrame:
     df.to_csv(caminho, index=False)
     log.info("staged/%s.csv: %d linhas", nome, len(df))
     return df
+
+
+def salvar_diagnostico() -> pd.DataFrame:
+    """Grava o inventário da coleta. Chamado ao fim de `fetch`."""
+    d = pd.DataFrame(_DIAGNOSTICO)
+    if d.empty:
+        return d
+    config.STAGED_DIR.mkdir(parents=True, exist_ok=True)
+    d.to_csv(config.STAGED_DIR / "_coleta_diagnostico.csv", index=False)
+    return d
 
 
 def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None):
@@ -61,7 +93,19 @@ def stage_empenhos(desde, ate):
         df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
         df["VALOR_PAGO"] = coluna(df, "VALOR_PAGO", 0).map(parse_valor)
         df["VALOR_ANULADO"] = coluna(df, "VALOR_ANULADO", 0).map(parse_valor)
-        df["DATA"] = parse_data(coluna(df, "DATA_NOTA_FISCAL", None))
+        # A data do EMPENHO é a que importa: é ela que situa o ato no
+        # exercício e sustenta os testes de dezembro, anulação e restos a
+        # pagar. A data da nota fiscal é do fornecedor e pode ser de outro
+        # ano — usá-la como data do empenho deslocava a série inteira.
+        df["DATA"] = parse_data(coluna(df, "DATA_EMPENHO", None))
+        df["_origem_data"] = "DATA_EMPENHO"
+        falta = df["DATA"].isna()
+        for alternativa in ("DATA", "DATA_LIQUIDACAO", "DATA_NOTA_FISCAL"):
+            if not falta.any() or alternativa not in df.columns:
+                continue
+            df.loc[falta, "DATA"] = parse_data(df.loc[falta, alternativa])
+            df.loc[falta & df["DATA"].notna(), "_origem_data"] = alternativa
+            falta = df["DATA"].isna()
     return _salvar("empenhos", df)
 
 
@@ -345,9 +389,16 @@ def stage_pncp(desde, ate):
     ini = max(desde or 2021, 2021)   # PNCP só existe desde ago/2021
     orgaos = []
     alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO,
-                                       cnpj_fixo=config.ORGAO_ALVO_CNPJ)
+                                       cnpj_fixo=config.ORGAO_ALVO_CNPJ_CANDIDATOS,
+                                       uf=config.ORGAO_ALVO_UF)
     if alvo and alvo.get("cnpj"):
+        log.info("PNCP: órgão-alvo resolvido em %s (%s)%s", alvo["cnpj"],
+                 alvo.get("razaoSocial"),
+                 "" if alvo.get("_verificado") else " — NÃO verificado")
         orgaos.append({**alvo, "papel": "alvo"})
+    else:
+        log.warning("PNCP: órgão-alvo não resolvido — o bloco PNCP virá vazio "
+                    "em vez de trazer contratos de outro conselho")
     for razao in config.ORGAOS_RELACIONADOS_RAZAO:
         o = clients.pncp_resolver_orgao(razao)
         if o and o.get("cnpj") and o["cnpj"] != (alvo or {}).get("cnpj"):
@@ -420,6 +471,7 @@ def build_staged(desde: int | None, ate: int) -> dict[str, pd.DataFrame]:
     resumo = {k: len(v) for k, v in staged.items()}
     with open(config.STAGED_DIR / "_resumo.json", "w") as f:
         json.dump(resumo, f, indent=2, ensure_ascii=False)
+    staged["_coleta_diagnostico"] = salvar_diagnostico()
     return staged
 
 
