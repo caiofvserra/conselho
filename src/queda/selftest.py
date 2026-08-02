@@ -172,9 +172,16 @@ def _staged() -> dict[str, pd.DataFrame]:
 
     aditivos = pd.DataFrame([{"NUMERO_CONTRATO": "CT-01/2022", "VALOR": 200000.0}])
 
-    convenios = pd.DataFrame([
-        {"BENEFICIARIO": "ASSOCIACAO DOS ENGENHEIROS X", "VALOR_TOTAL": 90000.0}
-        for _ in range(4)])
+    # Valor redondo idêntico repetido entre beneficiárias distintas e volume
+    # concentrado em ano de eleição do Crea: as duas assinaturas que a frente
+    # de rede tem de separar de repasse legítimo.
+    convenios = pd.DataFrame(
+        [{"_ano": a, "BENEFICIARIO": "ASSOCIACAO DOS ENGENHEIROS X",
+          "VALOR_TOTAL": 90000.0}
+         for a in (2019, 2020, 2021, 2022, 2023, 2024)] +
+        [{"_ano": a, "BENEFICIARIO": f"SINDICATO DOS TECNICOS {i}",
+          "VALOR_TOTAL": 90000.0}
+         for a in (2020, 2023) for i in range(1, 6)])
 
     # VALOR_ORCADO propositalmente subestimado nas diárias: é o padrão que a
     # frente de orçamento tem de flagrar (dotação figurativa, execução muito
@@ -290,6 +297,10 @@ ESPERADOS = [
     "rede-fornecedores-compartilhados",
     "rede-socio-homonimo",             # sócia = comissionada
     "rede-socios-compartilhados",      # grupos econômicos distintos
+    "rede-grupos-economicos",          # componente conexa fornecedor–sócio
+    "rede-intermediadores",            # quem conecta quem recebe
+    "rede-convenios-ciclo-eleitoral",  # repasse concentrado em ano de eleição
+    "rede-convenios-valores",          # valor redondo idêntico = rateio
     # casos concentrados
     "casos-entidade-da-casa",
     "casos-obras",

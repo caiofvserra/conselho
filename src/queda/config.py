@@ -133,3 +133,10 @@ PISO_CONTRATO_ADITIVO = 50_000.0 # contratos abaixo disso distorcem o % de aditi
 PISO_ANALISE_FORNECEDOR = 50_000.0   # só consulta CNPJ de quem recebeu acima disso
 MAX_CONSULTAS_CNPJ = 150
 IDADE_MINIMA_EMPRESA_DIAS = 180  # empresa criada há menos que isso antes do 1º contrato
+
+# Anos de eleição para a presidência do Crea (mandato de 3 anos). Usados para
+# testar se repasses e convênios a entidades de classe — que indicam eleitores
+# do colégio eleitoral — se concentram em ano de eleição.
+# CONFIRA o calendário eleitoral do Confea/Crea antes de usar como prova: o
+# teste é sensível a esta lista.
+ANOS_ELEITORAIS_CREA = [2011, 2014, 2017, 2020, 2023, 2026]
