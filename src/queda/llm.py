@@ -192,7 +192,45 @@ def preparar(modelo: str = MODELO_PADRAO, *, subir: bool = True) -> bool:
         log.error("falha ao baixar %s: %s", modelo, e)
         return False
     _estado.pop("ok", None)
-    return disponivel(revalidar=True)
+    pronto = disponivel(revalidar=True)
+    if pronto:
+        log.info("processador: %s", onde_roda(modelo))
+    return pronto
+
+
+def onde_roda(modelo: str = MODELO_PADRAO) -> str:
+    """Diz se o modelo carrega em GPU ou em CPU — e o que isso custa.
+
+    O instalador do Ollama avisa "Unable to detect NVIDIA/AMD GPU" numa linha
+    perdida no meio do log e segue em CPU. A diferença é de uma ordem de
+    grandeza (~3 tokens/s contra ~35), então a informação precisa aparecer
+    ANTES de alguém esperar duas horas para descobrir.
+    """
+    # carrega o modelo com uma geração mínima; sem isso /api/ps vem vazio
+    try:
+        requests.post(f"{OLLAMA_HOST}/api/generate",
+                      json={"model": modelo, "prompt": "oi", "stream": False,
+                            "options": {"num_predict": 1}}, timeout=600)
+        r = requests.get(f"{OLLAMA_HOST}/api/ps", timeout=10)
+        r.raise_for_status()
+        carregados = r.json().get("models") or []
+    except Exception:
+        return "desconhecido"
+    if not carregados:
+        return "desconhecido"
+    m = carregados[0]
+    total = float(m.get("size") or 0)
+    vram = float(m.get("size_vram") or 0)
+    if total <= 0:
+        return "desconhecido"
+    pct = 100 * vram / total
+    if pct >= 90:
+        return f"GPU ({pct:.0f}% na VRAM) — rápido"
+    if pct <= 5:
+        return ("CPU — cerca de 10x mais lento. Se houver GPU na sessão, "
+                "instale `pciutils` e reinstale o Ollama; senão, prefira "
+                "um modelo menor (QUEDA_LLM_MODELO=llama3.2:3b)")
+    return f"parcial: {pct:.0f}% em GPU, o resto em CPU"
 
 
 # ---------------------------------------------------------------- geração

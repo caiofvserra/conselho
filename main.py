@@ -62,6 +62,7 @@ def main():
         if llm.preparar():
             print("✅ modelo local pronto — `python main.py all` já usa a "
                   "camada de IA")
+            print(f"   processador: {llm.onde_roda()}")
             return 0
         print("\n❌ modelo local indisponível. Para instalar:\n"
               "   curl -fsSL https://ollama.com/install.sh | sh\n"
