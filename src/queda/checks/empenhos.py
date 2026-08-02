@@ -7,7 +7,7 @@ from .. import analytics as A
 from .. import config
 from ..findings import Finding
 from ..utils import fmt_brl
-from .common import df
+from .common import df, fornecedores_mercado, transferencias_sistema
 
 FRENTE = "Empenhos e pagamentos"
 
@@ -24,7 +24,7 @@ def run(staged) -> list[Finding]:
 
     # -------------------------------------------------- concentração por credor
     if not pg.empty:
-        pj = pg[~pg.get("PF", False).astype(bool)]
+        pj = fornecedores_mercado(staged)
         if not pj.empty:
             por_credor = (pj.groupby(["_ano", "FAVORECIDO_NORM"])["VALOR"].sum()
                           .reset_index())
@@ -82,13 +82,19 @@ def run(staged) -> list[Finding]:
 
     # -------------------------------------------------- fracionamento
     if not pg.empty and {"FAVORECIDO_NORM", "DATA", "VALOR"} <= set(pg.columns):
-        pj = pg[~pg.get("PF", False).astype(bool)].dropna(subset=["DATA"]).copy()
-        pj = pj.sort_values("DATA")
+        pj = fornecedores_mercado(staged).dropna(subset=["DATA"]).copy()
+        # Fornecedor com contrato formal registrado executa parcelas mensais —
+        # isso não é fracionamento. Sem esse recorte, o achado listava jornais,
+        # rádios e prestadores de serviço contínuo (413 na primeira rodada).
+        ctr = df(staged, "contratos")
+        com_contrato = set(ctr.get("CONTRATADA_NORM", pd.Series(dtype=str)).dropna())
+        pj = pj[~pj["FAVORECIDO_NORM"].isin(com_contrato)].sort_values("DATA")
+
+        conta_col = "CONTA_EMPENHO" if "CONTA_EMPENHO" in pj.columns else None
         suspeitas = []
         janela = pd.Timedelta(days=config.JANELA_FRACIONAMENTO_DIAS)
-        for credor, g in pj.groupby("FAVORECIDO_NORM"):
-            if len(g) < 3:
-                continue
+        chaves = ["FAVORECIDO_NORM"] + ([conta_col] if conta_col else [])
+        for chave, g in pj.groupby(chaves):
             pequenos = g[g["VALOR"] < config.LIMITE_DISPENSA]
             if len(pequenos) < 3:
                 continue
@@ -98,26 +104,58 @@ def run(staged) -> list[Finding]:
             for j in range(len(datas)):
                 while datas[j] - datas[i] > janela:
                     i += 1
+                n = j - i + 1
                 soma = float(vals[i:j + 1].sum())
-                if j - i + 1 >= 3 and soma > config.LIMITE_DISPENSA:
+                if n >= 3 and soma > config.LIMITE_DISPENSA:
+                    dias = (datas[j] - datas[i]).days
+                    # cadência mensal regular = execução de contrato, não rajada
+                    if n <= 4 and dias >= 60:
+                        continue
+                    nomes = chave if isinstance(chave, tuple) else (chave,)
                     suspeitas.append({
-                        "fornecedor": credor, "inicio": datas[i].date(),
-                        "fim": datas[j].date(), "pagamentos": j - i + 1,
+                        "fornecedor": nomes[0],
+                        "conta": nomes[1] if len(nomes) > 1 else "",
+                        "inicio": datas[i].date(), "fim": datas[j].date(),
+                        "dias": dias, "pagamentos": n,
                         "soma_janela": round(soma, 2)})
                     break
         if suspeitas:
             ev = pd.DataFrame(suspeitas).sort_values("soma_janela", ascending=False)
             achados.append(Finding(
                 id="empenhos-fracionamento", frente=FRENTE, gravidade="alta",
-                titulo=f"{len(ev)} fornecedor(es) com padrão de possível fracionamento "
-                       "de despesa",
-                descricao=f"≥3 pagamentos individuais abaixo de "
-                          f"{fmt_brl(config.LIMITE_DISPENSA)} ao mesmo fornecedor em "
-                          f"até {config.JANELA_FRACIONAMENTO_DIAS} dias, somando acima "
-                          "do limite de dispensa — padrão clássico para escapar de "
-                          "licitação (vedado pela Lei 14.133/2021, art. 29).",
+                titulo=f"{len(ev)} caso(s) de possível fracionamento de despesa",
+                descricao=(
+                    f"≥3 pagamentos abaixo de {fmt_brl(config.LIMITE_DISPENSA)} ao "
+                    f"mesmo fornecedor, na mesma conta contábil, em até "
+                    f"{config.JANELA_FRACIONAMENTO_DIAS} dias, somando acima do "
+                    "limite de dispensa. Já excluídos: fornecedores com contrato "
+                    "formal registrado e cadências mensais regulares — os dois "
+                    "casos legítimos que inflavam este achado."),
                 evidencia=ev,
+                base_legal="Lei 14.133/2021, art. 29 e art. 75, §1º — vedado "
+                           "fracionar despesa para fugir da modalidade licitatória.",
+                como_verificar="Pedir os processos de compra dos casos listados e "
+                               "verificar se o objeto é o mesmo e se houve "
+                               "planejamento anual da contratação.",
             ))
+
+    # -------------------------------------------------- transferências ao sistema
+    transf = transferencias_sistema(staged)
+    if not transf.empty:
+        serie_t = A.serie_anual(transf, "VALOR", by="FAVORECIDO_NORM")
+        total_t = float(transf["VALOR"].sum())
+        achados.append(Finding(
+            id="empenhos-transferencias-sistema", frente=FRENTE, gravidade="info",
+            titulo=f"{fmt_brl(total_t)} transferidos ao Confea e à Mútua no período",
+            descricao=("Repasses determinados por lei e estatuto, isolados do "
+                       "ranking de fornecedores (não disputam licitação). Mostrados "
+                       "à parte porque respondem por parcela relevante da receita "
+                       "arrecadada dos profissionais e alimentam a rede de "
+                       "influência entre os órgãos do sistema."),
+            evidencia=A.ranking_anual(transf, "FAVORECIDO_NORM", "VALOR", top=6),
+            serie=serie_t, grafico="bar_stacked",
+            tabela_anual=A.ranking_anual(transf, "FAVORECIDO_NORM", "VALOR", top=6),
+        ))
 
     # -------------------------------------------------- anulações e saldos
     if not emp.empty and {"VALOR", "VALOR_ANULADO"} <= set(emp.columns):

@@ -35,12 +35,20 @@ CNPJ_APIS = [
 ]
 
 # Órgãos do "sistema Confea/Crea" usados na frente de rede de influência.
-# CNPJs são resolvidos em runtime via PNCP (busca por razão social) e cacheados.
+#
+# ATENÇÃO: os 27 CREAs compartilham o prefixo "CONSELHO REGIONAL DE ENGENHARIA
+# E AGRONOMIA DO ..." — resolver por prefixo de razão social devolvia o CREA de
+# outro estado. Por isso o CNPJ do órgão-alvo é fixado aqui (Receita Federal:
+# 60.985.017/0001-77, autarquia federal, ativa) e a busca por nome só é usada
+# como último recurso, com verificação de UF.
+ORGAO_ALVO_CNPJ = "60985017000177"
 ORGAO_ALVO_RAZAO = "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DE SAO PAULO"
+ORGAO_ALVO_UF = "SP"
+
 ORGAOS_RELACIONADOS_RAZAO = [
     "CONSELHO FEDERAL DE ENGENHARIA E AGRONOMIA",
-    "MUTUA CAIXA DE ASSISTENCIA DOS PROFISSIONAIS DO CREA",
-    "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO RIO DE JANEIRO",
+    "MUTUA CAIXA DE ASSISTENCIA DOS PROFISSIONAIS DA ENGENHARIA",
+    "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DO RIO DE JANEIRO",
     "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DE MINAS GERAIS",
     "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO PARANA",
 ]

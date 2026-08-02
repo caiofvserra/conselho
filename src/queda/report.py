@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+import shutil
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -17,13 +18,28 @@ from .findings import Finding
 log = logging.getLogger("queda.report")
 
 
+def _formatar_datas(d: pd.DataFrame) -> pd.DataFrame:
+    """Converte qualquer data para texto ISO.
+
+    Colunas `object` contendo `datetime.date` eram serializadas por `to_json`
+    como epoch em milissegundos — no dashboard e no CSV a data aparecia como
+    "1413504000000". Só checar o dtype datetime64 não bastava.
+    """
+    for c in d.columns:
+        if pd.api.types.is_datetime64_any_dtype(d[c]):
+            d[c] = d[c].dt.strftime("%Y-%m-%d")
+        elif d[c].dtype == object:
+            amostra = d[c].dropna()
+            if not amostra.empty and isinstance(amostra.iloc[0], (date, datetime)):
+                d[c] = d[c].map(lambda v: v.isoformat()[:10]
+                                if isinstance(v, (date, datetime)) else v)
+    return d
+
+
 def _records(df: pd.DataFrame | None, limit: int = 30) -> list[dict]:
     if df is None or df.empty:
         return []
-    head = df.head(limit).copy()
-    for c in head.columns:
-        if pd.api.types.is_datetime64_any_dtype(head[c]):
-            head[c] = head[c].dt.strftime("%Y-%m-%d")
+    head = _formatar_datas(df.head(limit).copy())
     head.columns = [str(c) for c in head.columns]
     return json.loads(head.to_json(orient="records", force_ascii=False))
 
@@ -31,15 +47,21 @@ def _records(df: pd.DataFrame | None, limit: int = 30) -> list[dict]:
 def gerar(achados: list[Finding], staged: dict, *, resumo_llm: str = "") -> None:
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     csv_dir = config.OUTPUT_DIR / "csv"
-    csv_dir.mkdir(exist_ok=True)
+    # limpa a evidência da execução anterior: sem isso, CSVs de uma rodada de
+    # teste continuavam ao lado da evidência real, com data e conteúdo antigos
+    if csv_dir.exists():
+        shutil.rmtree(csv_dir)
+    csv_dir.mkdir(parents=True)
 
     payload_findings = []
     for f in achados:
         if f.evidencia is not None and not f.evidencia.empty:
-            f.evidencia.to_csv(csv_dir / f"{f.id}.csv", index=False)
+            _formatar_datas(f.evidencia.copy()).to_csv(
+                csv_dir / f"{f.id}.csv", index=False)
         anual = None
         if f.tabela_anual is not None and not f.tabela_anual.empty:
-            f.tabela_anual.to_csv(csv_dir / f"{f.id}--anual.csv", index=False)
+            _formatar_datas(f.tabela_anual.copy()).to_csv(
+                csv_dir / f"{f.id}--anual.csv", index=False)
             anual = _records(f.tabela_anual, 40)
         payload_findings.append({
             **f.resumo(),

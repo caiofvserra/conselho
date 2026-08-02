@@ -11,7 +11,8 @@ import logging
 import pandas as pd
 
 from . import clients, config
-from .utils import eh_pf, norm_nome, parse_data, parse_valor, so_digitos
+from .utils import (classificar_pessoa, coluna, norm_nome, parse_data,
+                    parse_valor, so_digitos)
 
 log = logging.getLogger("queda.pipeline")
 
@@ -19,7 +20,14 @@ log = logging.getLogger("queda.pipeline")
 # ---------------------------------------------------------------- helpers
 def _salvar(nome: str, df: pd.DataFrame) -> pd.DataFrame:
     config.STAGED_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(config.STAGED_DIR / f"{nome}.csv", index=False)
+    caminho = config.STAGED_DIR / f"{nome}.csv"
+    if df is None or df.empty:
+        # DataFrame sem colunas grava um CSV vazio que pd.read_csv rejeita com
+        # EmptyDataError, quebrando `analyze` e `report` depois da coleta.
+        caminho.write_text("_vazio\n")
+        log.info("staged/%s.csv: 0 linhas", nome)
+        return pd.DataFrame() if df is None else df
+    df.to_csv(caminho, index=False)
     log.info("staged/%s.csv: %d linhas", nome, len(df))
     return df
 
@@ -50,10 +58,10 @@ def stage_empenhos(desde, ate):
     rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Empenhos", a), ate, desde)
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["VALOR"] = df.get("VALOR", 0).map(parse_valor)
-        df["VALOR_PAGO"] = df.get("VALOR_PAGO", 0).map(parse_valor)
-        df["VALOR_ANULADO"] = df.get("VALOR_ANULADO", 0).map(parse_valor)
-        df["DATA"] = parse_data(df.get("DATA_NOTA_FISCAL"))
+        df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
+        df["VALOR_PAGO"] = coluna(df, "VALOR_PAGO", 0).map(parse_valor)
+        df["VALOR_ANULADO"] = coluna(df, "VALOR_ANULADO", 0).map(parse_valor)
+        df["DATA"] = parse_data(coluna(df, "DATA_NOTA_FISCAL", None))
     return _salvar("empenhos", df)
 
 
@@ -61,23 +69,40 @@ def stage_pagamentos(desde, ate):
     rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Pagamentos", a), ate, desde)
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["VALOR"] = df.get("VALOR", 0).map(parse_valor)
-        df["VALOR_LIQUIDO"] = df.get("VALOR_LIQUIDO", 0).map(parse_valor)
-        df["DATA"] = parse_data(df.get("DATA_PAGAMENTO"))
-        df["PF"] = df.get("CPF_CNPJ", "").map(eh_pf)
-        df["FAVORECIDO_NORM"] = df.get("NOME_RAZAO_SOCIAL", "").map(norm_nome)
+        df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
+        df["VALOR_LIQUIDO"] = coluna(df, "VALOR_LIQUIDO", 0).map(parse_valor)
+        df["DATA"] = parse_data(df["DATA_PAGAMENTO"]) if "DATA_PAGAMENTO" in df else pd.NaT
+        doc = df["CPF_CNPJ"] if "CPF_CNPJ" in df else pd.Series("", index=df.index)
+        nome = df["NOME_RAZAO_SOCIAL"] if "NOME_RAZAO_SOCIAL" in df else pd.Series("", index=df.index)
+        df["TIPO_PESSOA"] = [classificar_pessoa(d, n) for d, n in zip(doc, nome)]
+        df["PF"] = df["TIPO_PESSOA"] == "PF"
+        df["PJ"] = df["TIPO_PESSOA"] == "PJ"
+        df["FAVORECIDO_NORM"] = nome.map(norm_nome)
+        df["FAVORECIDO_CNPJ"] = doc.map(so_digitos)
     return _salvar("pagamentos", df)
 
 
 def stage_contratos(desde, ate):
+    """Contratos vigentes. Um contrato plurianual aparece em vários exercícios;
+    mantemos a ocorrência do PRIMEIRO ano de vigência, que traz o valor
+    original — manter a mais recente fazia o percentual de aditivo explodir."""
     rows = _anos_com_sondagem(
         lambda a: clients.implanta_ano("Contratos", a, formato="vigencia"), ate, desde)
-    df = pd.DataFrame(rows).drop_duplicates(subset=None if not rows else ["NUMERO_CONTRATO"])
+    df = pd.DataFrame(rows)
     if not df.empty:
-        df["VALOR"] = df.get("VALOR", 0).map(parse_valor)
-        df["INI"] = parse_data(df.get("DATA_INICIO_VIGENCIA"))
-        df["FIM"] = parse_data(df.get("DATA_FINAL_VIGENCIA"))
-        df["CONTRATADA_NORM"] = df.get("CONTRATADA", "").map(norm_nome)
+        df["VALOR"] = df["VALOR"].map(parse_valor) if "VALOR" in df else 0.0
+        df["INI"] = parse_data(df["DATA_INICIO_VIGENCIA"]) if "DATA_INICIO_VIGENCIA" in df else pd.NaT
+        df["FIM"] = parse_data(df["DATA_FINAL_VIGENCIA"]) if "DATA_FINAL_VIGENCIA" in df else pd.NaT
+        contratada = df["CONTRATADA"].fillna("").astype(str) if "CONTRATADA" in df else pd.Series("", index=df.index)
+        # o portal grava "12.345.678/0001-90 - RAZÃO SOCIAL": separar os dois
+        df["CONTRATADA_CNPJ"] = contratada.str.extract(
+            r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", expand=False).map(so_digitos)
+        df["CONTRATADA_NOME"] = contratada.str.replace(
+            r"^\s*[\d./-]{14,20}\s*-\s*", "", regex=True)
+        df["CONTRATADA_NORM"] = df["CONTRATADA_NOME"].map(norm_nome)
+        if "NUMERO_CONTRATO" in df:
+            df = (df.sort_values("_ano", ascending=True)
+                    .drop_duplicates(subset=["NUMERO_CONTRATO"], keep="first"))
     return _salvar("contratos", df)
 
 
@@ -86,7 +111,7 @@ def stage_aditivos(desde, ate):
         lambda a: clients.implanta_ano("ContratosAditivos", a, formato="vigencia"), ate, desde)
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["VALOR"] = df.get("VALOR", 0).map(parse_valor)
+        df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
         df = df.drop_duplicates(subset=[c for c in ("NUMERO_CONTRATO", "VALOR", "DATA_PUBLICACAO") if c in df])
     return _salvar("aditivos", df)
 
@@ -100,7 +125,7 @@ def stage_convenios(desde, ate):
     rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Convenios", a), ate, desde)
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["VALOR_TOTAL"] = df.get("VALOR_TOTAL", 0).map(parse_valor)
+        df["VALOR_TOTAL"] = coluna(df, "VALOR_TOTAL", 0).map(parse_valor)
     return _salvar("convenios", df)
 
 
@@ -270,9 +295,9 @@ def stage_quadro_pessoal():
                "NOME_LOTACAO": "nomeLotacao"}
         df = df.rename(columns=ren)
     if not df.empty:
-        df["remuneracao"] = df.get("renumeracaoMensal", 0).map(parse_valor)
-        df["NOME_NORM"] = df.get("nome", "").map(norm_nome)
-        df["VINCULO_NORM"] = df.get("vinculo", "").map(norm_nome)
+        df["remuneracao"] = coluna(df, "renumeracaoMensal", 0).map(parse_valor)
+        df["NOME_NORM"] = coluna(df, "nome").map(norm_nome)
+        df["VINCULO_NORM"] = coluna(df, "vinculo").map(norm_nome)
     return _salvar("quadro_pessoal", df)
 
 
@@ -289,7 +314,7 @@ def stage_mandatarios():
         df = df.rename(columns={"NOME_MANDATARIO": "nomeMandatario", "CPF": "cpfMandatario",
                                 "CARGO": "cargo", "DATA_POSSE": "dataPosse"})
     if not df.empty:
-        df["NOME_NORM"] = df.get("nomeMandatario", "").map(norm_nome)
+        df["NOME_NORM"] = coluna(df, "nomeMandatario").map(norm_nome)
     return _salvar("mandatarios", df)
 
 
@@ -307,8 +332,8 @@ def stage_indenizacoes(desde, ate):
             probe.setdefault(ep, []).extend({**r, "_ano": ano} for r in rows)
     df = pd.DataFrame(frames)
     if not df.empty:
-        df["valor"] = df.get("valorBrutoPagamento", 0).map(parse_valor)
-        df["FAVORECIDO_NORM"] = df.get("nomeFavorecidoPagamento", "").map(norm_nome)
+        df["valor"] = coluna(df, "valorBrutoPagamento", 0).map(parse_valor)
+        df["FAVORECIDO_NORM"] = coluna(df, "nomeFavorecidoPagamento").map(norm_nome)
     _salvar("indenizacoes_endpoint", df)
     for ep, rows in probe.items():
         _salvar(f"implanta_probe_{ep.lower()}", pd.DataFrame(rows))
@@ -319,12 +344,13 @@ def stage_pncp(desde, ate):
     """Contratos PNCP do Crea-SP e dos órgãos relacionados (rede de influência)."""
     ini = max(desde or 2021, 2021)   # PNCP só existe desde ago/2021
     orgaos = []
-    alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO)
+    alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO,
+                                       cnpj_fixo=config.ORGAO_ALVO_CNPJ)
     if alvo and alvo.get("cnpj"):
         orgaos.append({**alvo, "papel": "alvo"})
     for razao in config.ORGAOS_RELACIONADOS_RAZAO:
         o = clients.pncp_resolver_orgao(razao)
-        if o and o.get("cnpj"):
+        if o and o.get("cnpj") and o["cnpj"] != (alvo or {}).get("cnpj"):
             orgaos.append({**o, "papel": "relacionado"})
     _salvar("pncp_orgaos", pd.DataFrame(orgaos))
 
@@ -401,7 +427,14 @@ def load_staged() -> dict[str, pd.DataFrame]:
     """Recarrega os CSVs staged sem refazer coleta."""
     out = {}
     for path in sorted(config.STAGED_DIR.glob("*.csv")):
-        df = pd.read_csv(path)
+        try:
+            df = pd.read_csv(path, low_memory=False)
+        except (pd.errors.EmptyDataError, ValueError):
+            out[path.stem] = pd.DataFrame()
+            continue
+        if list(df.columns) == ["_vazio"]:
+            out[path.stem] = pd.DataFrame()
+            continue
         for col in ("DATA", "INI", "FIM"):
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")

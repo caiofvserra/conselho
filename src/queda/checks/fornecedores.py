@@ -11,14 +11,24 @@ from .common import df, fichas_cnpj
 FRENTE = "Fornecedores"
 
 
-def _primeiro_pagamento(staged) -> dict[str, pd.Timestamp]:
+def _pagamentos_por_cnpj(staged) -> pd.core.groupby.DataFrameGroupBy | None:
     pg = df(staged, "pagamentos")
     if pg.empty or "CPF_CNPJ" not in pg or "DATA" not in pg:
-        return {}
-    pj = pg[~pg.get("PF", False).astype(bool)].copy()
+        return None
+    pj = pg.copy()
     pj["cnpj"] = pj["CPF_CNPJ"].map(so_digitos)
     pj = pj[pj["cnpj"].str.len() == 14].dropna(subset=["DATA"])
-    return pj.groupby("cnpj")["DATA"].min().to_dict()
+    return None if pj.empty else pj.groupby("cnpj")["DATA"]
+
+
+def _primeiro_pagamento(staged) -> dict[str, pd.Timestamp]:
+    g = _pagamentos_por_cnpj(staged)
+    return {} if g is None else g.min().to_dict()
+
+
+def _ultimo_pagamento(staged) -> dict[str, pd.Timestamp]:
+    g = _pagamentos_por_cnpj(staged)
+    return {} if g is None else g.max().to_dict()
 
 
 def run(staged) -> list[Finding]:
@@ -53,14 +63,31 @@ def run(staged) -> list[Finding]:
                                "idade_dias_no_1o_pagamento": idade})
 
     if situacoes:
+        ev = pd.DataFrame(situacoes)
+        ultimo = _ultimo_pagamento(staged)
+        ev["ultimo_pagamento"] = ev["cnpj"].map(ultimo)
+        ev["anos_desde_ultimo_pagamento"] = (
+            (pd.Timestamp.today() - pd.to_datetime(ev["ultimo_pagamento"],
+                                                   errors="coerce")).dt.days / 365
+        ).round(1)
+        recentes = ev[ev["anos_desde_ultimo_pagamento"] <= 2]
         achados.append(Finding(
-            id="fornecedores-situacao-irregular", frente=FRENTE, gravidade="alta",
-            titulo=f"{len(situacoes)} fornecedor(es) com situação cadastral não-ATIVA "
-                   "na Receita",
-            descricao="Empresa baixada, inapta ou suspensa recebendo dinheiro público "
-                      "é red flag imediata (pode ter sido baixada depois — conferir "
-                      "datas).",
-            evidencia=pd.DataFrame(situacoes),
+            id="fornecedores-situacao-irregular", frente=FRENTE,
+            gravidade="alta" if not recentes.empty else "media",
+            titulo=(f"{len(recentes)} fornecedor(es) com situação cadastral "
+                    "não-ATIVA e pagamento nos últimos 2 anos"
+                    if not recentes.empty else
+                    f"{len(ev)} fornecedor(es) hoje não-ATIVOS na Receita "
+                    "(pagamentos antigos)"),
+            descricao=(
+                "A ficha da Receita é a de HOJE; o pagamento pode ser de anos "
+                "atrás, quando a empresa estava regular. A coluna "
+                "`anos_desde_ultimo_pagamento` separa os dois casos: baixa "
+                "recente com pagamento recente é red flag; empresa que encerrou "
+                "atividade anos depois do último pagamento não é."),
+            evidencia=ev.sort_values("anos_desde_ultimo_pagamento"),
+            como_verificar="Consultar a data de baixa/inaptidão na Receita e "
+                           "compará-la com a data de cada pagamento.",
         ))
     if jovens:
         achados.append(Finding(

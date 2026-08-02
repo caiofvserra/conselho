@@ -145,23 +145,65 @@ def _norm(s: str) -> str:
     return "".join(c for c in s if unicodedata.category(c) != "Mn").upper()
 
 
-def pncp_resolver_orgao(razao_social: str) -> dict | None:
-    """Resolve CNPJ de um órgão pela razão social (busca pública do PNCP)."""
+def _tokens_distintivos(alvo: str) -> set[str]:
+    """Palavras que diferenciam um órgão dos homônimos do mesmo sistema.
+
+    Todos os 27 CREAs começam com "CONSELHO REGIONAL DE ENGENHARIA E
+    AGRONOMIA"; o que distingue é o final ("SAO PAULO", "PARANA"...).
+    """
+    genericas = {"CONSELHO", "REGIONAL", "FEDERAL", "DE", "DO", "DA", "DOS",
+                 "DAS", "E", "ENGENHARIA", "AGRONOMIA", "ESTADO", "CAIXA",
+                 "ASSISTENCIA", "PROFISSIONAIS", "A"}
+    return {t for t in alvo.split() if t not in genericas and len(t) > 2}
+
+
+def pncp_resolver_orgao(razao_social: str, *, cnpj_fixo: str | None = None,
+                        uf: str | None = None) -> dict | None:
+    """Resolve o CNPJ de um órgão no PNCP.
+
+    `cnpj_fixo` curto-circuita a busca — usar sempre que o CNPJ for conhecido,
+    porque a busca textual do PNCP casa qualquer conselho do mesmo sistema.
+    """
+    if cnpj_fixo:
+        cnpj = re.sub(r"\D", "", cnpj_fixo)
+        dados = get_json(f"{config.PNCP_API}/v1/orgaos/{cnpj}")
+        if isinstance(dados, dict) and dados.get("cnpj"):
+            return {"cnpj": dados["cnpj"],
+                    "razaoSocial": dados.get("razaoSocial") or razao_social}
+        return {"cnpj": cnpj, "razaoSocial": razao_social}
+
     def resolve():
         alvo = _norm(razao_social)
+        distintivos = _tokens_distintivos(alvo)
         termo = " ".join(alvo.split()[:6]).lower()
-        data = get_json(f"{config.PNCP_API}/v1/orgaos/", {"razaoSocial": termo, "pagina": 1})
+        data = get_json(f"{config.PNCP_API}/v1/orgaos/",
+                        {"razaoSocial": termo, "pagina": 1})
         rows = data if isinstance(data, list) else (data or {}).get("data") or []
-        melhor = None
         for o in rows:
-            if _norm(o.get("razaoSocial", "")).startswith(alvo[:40]):
+            nome = _norm(o.get("razaoSocial", ""))
+            # exige TODOS os termos distintivos — sem isso o Crea-PE respondia
+            # pela busca do Crea-SP
+            if distintivos and distintivos <= set(nome.split()):
+                if uf and not _confere_uf(o.get("cnpj"), uf):
+                    continue
                 return {"cnpj": o.get("cnpj"), "razaoSocial": o.get("razaoSocial")}
-            melhor = melhor or o
-        if melhor:
-            return {"cnpj": melhor.get("cnpj"), "razaoSocial": melhor.get("razaoSocial")}
+        log.warning("PNCP: nenhum órgão casou com %r (%d candidatos) — ignorado",
+                    razao_social, len(rows))
         return None
+
     key = "orgao_" + re.sub(r"\W+", "_", razao_social.lower())[:60]
     return memo(key, resolve)
+
+
+def _confere_uf(cnpj: str | None, uf: str) -> bool:
+    """Confirma a UF pelas unidades administrativas do órgão no PNCP."""
+    if not cnpj:
+        return False
+    unidades = get_json(f"{config.PNCP_API}/v1/orgaos/{cnpj}/unidades")
+    if not isinstance(unidades, list) or not unidades:
+        return True                      # sem dado para desmentir: aceita
+    return any((u.get("municipio") or {}).get("uf", {}).get("siglaUF") == uf
+               or u.get("ufSigla") == uf for u in unidades)
 
 
 def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:

@@ -1,6 +1,8 @@
 """Helpers compartilhados entre as frentes."""
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from .. import clients, config
@@ -45,6 +47,42 @@ def pagamentos_indenizacao(staged, *, apenas_pessoa_fisica: bool = True) -> pd.D
     if apenas_pessoa_fisica and "PF" in out.columns:
         out = out[out["PF"].astype(bool)]
     return out
+
+
+RX_TRANSFERENCIA_LEGAL = re.compile(
+    r"\bconfea\b|\bmutua\b|cota[- ]parte|caixa de assistencia", re.IGNORECASE)
+
+
+def fornecedores_mercado(staged) -> pd.DataFrame:
+    """Pagamentos que representam MERCADO de fornecedores.
+
+    Exclui, com motivo:
+    - rótulos sem pessoa jurídica identificada (folha paga a "DIVERSOS
+      FUNCIONARIOS" — vai para a frente de opacidade);
+    - transferências obrigatórias ao Confea e à Mútua, que são determinadas em
+      lei e não disputam licitação.
+
+    Sem esse recorte, o índice de concentração media folha e repasse legal, e
+    não competição — os quatro primeiros colocados eram exatamente esses.
+    """
+    pg = df(staged, "pagamentos")
+    if pg.empty or "VALOR" not in pg:
+        return pd.DataFrame()
+    if "TIPO_PESSOA" in pg:
+        pj = pg[pg["TIPO_PESSOA"] == "PJ"]
+    else:                                   # compat com staged antigo
+        pj = pg[~pg.get("PF", False).astype(bool)]
+    nomes = pj.get("FAVORECIDO_NORM", pd.Series("", index=pj.index)).fillna("")
+    return pj[~nomes.str.contains(RX_TRANSFERENCIA_LEGAL, regex=True, na=False)]
+
+
+def transferencias_sistema(staged) -> pd.DataFrame:
+    """Contrapartida: os repasses obrigatórios, isolados para análise própria."""
+    pg = df(staged, "pagamentos")
+    if pg.empty or "FAVORECIDO_NORM" not in pg:
+        return pd.DataFrame()
+    nomes = pg["FAVORECIDO_NORM"].fillna("")
+    return pg[nomes.str.contains(RX_TRANSFERENCIA_LEGAL, regex=True, na=False)]
 
 
 def pagamentos_viagem_pj(staged) -> pd.DataFrame:
