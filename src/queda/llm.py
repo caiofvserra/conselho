@@ -128,9 +128,14 @@ def subir_servidor(espera: int = 90) -> bool:
         return False
 
     log.info("subindo `ollama serve` (log em %s)...", LOG_SERVIDOR)
+    # Desligar o servidor de TODOS os descritores herdados. Um processo que
+    # sobrevive ao pai e continua segurando o pipe de saída faz a célula do
+    # notebook girar indefinidamente, mesmo com o trabalho já concluído — o
+    # sintoma é "parece travado, mas terminou".
     with open(LOG_SERVIDOR, "wb") as saida:
-        subprocess.Popen(["ollama", "serve"], stdout=saida, stderr=saida,
-                         start_new_session=True)
+        subprocess.Popen(["ollama", "serve"],
+                         stdin=subprocess.DEVNULL, stdout=saida, stderr=saida,
+                         start_new_session=True, close_fds=True)
     for _ in range(espera):
         time.sleep(1)
         if _tags() is not None:
