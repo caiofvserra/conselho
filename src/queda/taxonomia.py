@@ -94,7 +94,14 @@ REGRAS: list[tuple[str, str]] = [
      r"\bvale[- ](transporte|refeicao|alimentacao)|\bcesta basica\b|"
      r"plano de saude|assistencia medica|assistencia odonto|seguro de vida|"
      r"\bestagiario|\bbolsa de estagio|\baprendiz\b|previdencia complementar|"
-     r"resciso|\brescisao\b|indeniza\w* trabalhista|\bhora extra"),
+     # R$ 255 mi caíam em "não classificado" na rodada real, e eram todos
+     # folha: gratificação, auxílios, PDV, substituição. `\bhora extra` ainda
+     # não casava "Horas Extras" — o mesmo defeito de plural de "passagem".
+     r"\bgratifica|\bauxilio (educacao|creche|doenca|funeral|natalidade|"
+     r"alimentacao|filho|maternidade|invalidez)|\bpdv\b|"
+     r"demissao voluntaria|\bsubstituic(ao|oes)\b|"
+     r"reembolso de (oculos|medicamento|despesa medica)|"
+     r"resciso|\brescisao\b|indeniza\w* trabalhista|\bhora(s)? extra"),
 
     # --- fiscalização (finalística) ---
     ("FISCALIZACAO",

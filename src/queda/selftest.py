@@ -255,13 +255,26 @@ def _staged() -> dict[str, pd.DataFrame]:
     ])
 
     contratos = pd.DataFrame([
+        # entidade que é beneficiária de convênio E fornecedora contratada:
+        # o duplo papel real, que o cruzamento convênio × pagamento não via
+        {"NUMERO_CONTRATO": "CT-09/2021",
+         "CONTRATADA": "12.345.678/0001-90 - ASSOCIACAO DOS ENGENHEIROS X",
+         "VALOR": 1_200_000.0, "NUMERO_LICITACAO": None,
+         "DATA_INICIO_VIGENCIA": "2021-01-01", "DATA_FINAL_VIGENCIA": "2021-12-31"},
         {"NUMERO_CONTRATO": "CT-01/2022", "CONTRATADA": _FORN_REDE, "VALOR": 500000.0,
          "NUMERO_LICITACAO": None,
          "DATA_INICIO_VIGENCIA": "2022-01-01", "DATA_FINAL_VIGENCIA": "2022-12-31"},
     ])
     contratos["INI"] = pd.to_datetime(contratos["DATA_INICIO_VIGENCIA"])
     contratos["FIM"] = pd.to_datetime(contratos["DATA_FINAL_VIGENCIA"])
-    contratos["CONTRATADA_NORM"] = contratos["CONTRATADA"].map(norm_nome)
+    # espelha stage_contratos: o portal grava "CNPJ - RAZÃO SOCIAL" e o
+    # pipeline separa os dois antes de normalizar. Sem isso o nome
+    # normalizado carrega o CNPJ e nenhum join por nome casa.
+    contratos["CONTRATADA_CNPJ"] = contratos["CONTRATADA"].str.extract(
+        r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", expand=False).map(so_digitos)
+    contratos["CONTRATADA_NOME"] = contratos["CONTRATADA"].str.replace(
+        r"^\s*[\d./-]{14,20}\s*-\s*", "", regex=True)
+    contratos["CONTRATADA_NORM"] = contratos["CONTRATADA_NOME"].map(norm_nome)
 
     aditivos = pd.DataFrame([{"NUMERO_CONTRATO": "CT-01/2022", "VALOR": 200000.0}])
 
@@ -430,6 +443,7 @@ ESPERADOS = [
     "repr-dinheiro-por-interesse",
     "repr-ranking-entidades",
     "repr-assento-e-dinheiro",         # entidade com assento que recebe
+    "repr-duplo-canal",                # convênio E contrato (não convênio E pagamento)
     "repr-concentracao",
     # orçamento
     "orcamento-execucao",

@@ -36,10 +36,11 @@ def _valor_implausivel(ctr: pd.DataFrame) -> pd.DataFrame:
                 pd.to_datetime(d["INI"], errors="coerce")).dt.days
         d["_dias"] = dias.where(dias > 0, 1.0)
     d["valor_por_dia"] = (d["_valor"] / d["_dias"]).round(2)
-    mediana_dia = float(d["valor_por_dia"].median())
-    suspeitos = d[(d["_valor"] > 4 * segundo) |
-                  (d["valor_por_dia"] > 10 * mediana_dia * 20)]
-    return suspeitos
+    # Só o critério de VALOR exclui. Valor por dia é alto por construção em
+    # contrato curto — usá-lo como corte tirava da carteira 13 contratos,
+    # R$ 685 mi, sendo 12 deles atas de registro de preço perfeitamente
+    # plausíveis. Fica como coluna de contexto, para quem for conferir.
+    return d[d["_valor"] > 4 * segundo]
 
 
 def run(staged) -> list[Finding]:
@@ -65,8 +66,11 @@ def run(staged) -> list[Finding]:
                     f"{fmt_brl(carteira)} da carteira"),
             descricao=(
                 "Contratos cujo valor publicado é várias vezes maior que o "
-                "segundo maior da carteira, ou cujo valor por dia de vigência "
-                "destoa por ordens de grandeza. **Não estamos dizendo que é "
+                "segundo maior da carteira. A coluna `valor_por_dia` entra "
+                "como contexto e NÃO como critério: contrato curto tem valor "
+                "por dia alto por construção, e usá-lo para excluir tirava da "
+                "carteira atas de registro de preço perfeitamente plausíveis. "
+                "**Não estamos dizendo que é "
                 "erro de digitação** — estamos dizendo que o número não é "
                 "comparável aos demais e que somá-lo à carteira sem ressalva "
                 "distorce todos os totais. A divergência é, ela própria, o "

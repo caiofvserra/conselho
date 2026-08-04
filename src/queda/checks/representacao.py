@@ -303,18 +303,35 @@ def run(staged) -> list[Finding]:
     ))
 
     # ------------------------------------------------ 3. duplo canal
-    duplo = por_ent[por_ent["canais"] > 1]
+    #
+    # A primeira versão comparava "convênio" contra "pagamento direto" e
+    # flagrava 183 entidades — mas o pagamento É o desembolso do convênio: a
+    # mesma transação vista em dois datasets, o instrumento e a quitação.
+    # O duplo papel de verdade é ser beneficiária de convênio E fornecedora
+    # com CONTRATO, porque aí a entidade disputa licitação com quem a financia.
+    ctr = df(staged, "contratos")
+    com_contrato: set[str] = set()
+    if not ctr.empty:
+        for col in ("CONTRATADA_NORM", "CONTRATADA_NOME", "CONTRATADA"):
+            if col in ctr.columns:
+                com_contrato |= set(ctr[col].dropna().map(norm_nome))
+    beneficiarias = set(d.loc[d["canal"] == "convênio", "entidade_norm"])
+    duplo = por_ent[por_ent["entidade_norm"].isin(beneficiarias & com_contrato)]
     if not duplo.empty:
         achados.append(Finding(
             id="repr-duplo-canal", frente=FRENTE, gravidade="alta",
-            titulo=(f"{len(duplo)} entidade(s) recebem por convênio E como "
-                    "fornecedor contratado"),
+            titulo=(f"{len(duplo)} entidade(s) são beneficiárias de convênio E "
+                    "têm contrato como fornecedoras"),
             descricao=(
                 "Convênio pressupõe interesse recíproco e plano de trabalho; "
                 "contrato pressupõe fornecedor disputando com outros. A mesma "
                 "entidade nos dois papéis, no mesmo período, é o desenho que "
                 "permite pagar por fora do que o convênio já cobre — e escapa "
-                "das duas fiscalizações, porque cada canal é auditado à parte."),
+                "das duas fiscalizações, porque cada canal é auditado à parte."
+                "\n\nO cruzamento é convênio × **contrato registrado**, não "
+                "convênio × pagamento: o pagamento é o desembolso do próprio "
+                "convênio, e contá-lo como segundo canal transformava repasse "
+                "rotineiro em achado."),
             evidencia=duplo,
             base_legal="Lei 14.133/2021, arts. 9º e 75; Decreto 6.170/2007, "
                        "art. 2º; Lei 8.666/1993, art. 116 (quando aplicável).",
