@@ -34,46 +34,59 @@ from .common import df
 FRENTE = "Superintendências e fiscalização"
 
 # --------------------------------------------------------------- territórios
-# Três camadas, da mais central para a mais capilar. A ordem importa: a
-# primeira que casar vence, e os termos centrais são mais específicos.
+# Escrito sobre os nomes REAIS que a coleta trouxe. A primeira versão usava
+# `\bunidade\b` para achar unidade de campo e classificava "UNIDADE DE
+# FINANÇAS - UF" (R$ 330 mi) como território — invertendo o achado inteiro.
+# No Crea-SP a unidade de campo se chama UGI (Unidade de Gestão Integrada) e
+# vem sempre com o nome da cidade; tudo que é "GERENCIA DE …", "UNIDADE DE …"
+# e "EQUIPE DE …" é estrutura central.
 CAMADAS: list[tuple[str, str]] = [
-    ("DIRECAO_CENTRAL",
-     r"\bpresidencia\b|\bgabinete\b|\bdiretoria\b|\bsuperintendencia geral\b|"
-     r"\bconselho diretor\b|\bplenario\b|\bcamara(s)? especializada|"
-     r"\bassessoria (da |de )?(presidencia|diretoria)"),
+    # campo primeiro: é o único padrão inequívoco
+    ("CAMPO",
+     r"^ugi\b|\bugi\s|unidade de gestao integrada|\binspetoria\b|"
+     r"posto(s)? de (atendimento|servico)|escritorio(s)? (regional|local)"),
 
+    ("POLITICO",
+     r"\bplenari|\bcamara(s)?\b|\bcolegio\b|\bconselho diretor\b|"
+     r"\bcorpo de inspetores\b|\bcomissao\b|\bjunta\b"),
+
+    ("DIRECAO",
+     r"\bpresidencia\b|\bgabinete\b|\bdiretoria\b|\bsuperintendencia\b|"
+     r"\bchefia\b|\bvice-?presidencia\b"),
+
+    # tudo o mais que a coleta mostrou: gerências, unidades e equipes centrais
     ("ADMIN_CENTRAL",
-     r"\brecursos humanos\b|\bfinanceir|\bcontabil|\borcament|\bjuridic|"
-     r"\bprocuradoria\b|\bcompras\b|\blicitac|\bcontratos\b|\bpatrimonio\b|"
-     r"\balmoxarifado\b|\btecnologia da informacao\b|\binformatica\b|"
-     r"\bcomunicacao\b|\bmarketing\b|\bouvidoria\b|\bauditoria\b|"
-     r"\bcontroladoria\b|\bcorregedoria\b|\bsede\b|\bservicos gerais\b|"
-     r"\badministrativ|\bplanejamento\b|\brecepcao\b|\bprotocolo geral\b"),
-
-    ("REGIONAL",
-     r"\bsuperintendencia\b|\bsuperintendencia regional\b|\bregional\b|"
-     r"\bgerencia regional\b|\bcoordenadoria regional\b|\bregiao\b"),
-
-    ("LOCAL",
-     r"\bugi\b|unidade de gestao integrada|\binspetoria\b|\bunidade\b|"
-     r"posto(s)? de (atendimento|servico)|\bagencia\b|\bnucleo\b|"
-     r"escritorio(s)? (regional|local)"),
+     r"\bgerencia\b|\bunidade\b|\bequipe\b|\bsecretaria\b|\bassessoria\b|"
+     r"\bouvidoria\b|\bauditoria\b|\bdepartamento\b|\bdepto\b|"
+     r"\bcontroladoria\b|\bcorregedoria\b|\bcoordenadoria\b|\bdivisao\b|"
+     r"\bsetor\b|\bnucleo\b"),
 ]
 _CAMADAS = [(c, re.compile(rx)) for c, rx in CAMADAS]
 
 ROTULO_CAMADA = {
-    "DIRECAO_CENTRAL": "Direção central",
+    "CAMPO": "Unidades de campo (UGI, inspetorias)",
+    "POLITICO": "Órgãos políticos (plenária, câmaras)",
+    "DIRECAO": "Direção superior",
     "ADMIN_CENTRAL": "Administração central",
-    "REGIONAL": "Superintendências regionais",
-    "LOCAL": "Unidades locais (UGI, inspetorias)",
     "NAO_IDENTIFICADA": "Camada não identificada",
 }
-CENTRAIS = ("DIRECAO_CENTRAL", "ADMIN_CENTRAL")
-TERRITORIAIS = ("REGIONAL", "LOCAL")
+CENTRAIS = ("DIRECAO", "ADMIN_CENTRAL", "POLITICO")
+TERRITORIAIS = ("CAMPO",)
+
+# O portal renomeia centros de custo prefixando "Não utilizar - " e cria um
+# novo com o mesmo nome. Sem fundir os dois, "UGI CAMPINAS" aparece duas vezes
+# com metade do valor cada, e o ranking mente. Foram 73 rótulos assim em 120.
+RX_DESATIVADO = re.compile(r"^\s*n[ãa]o\s+utilizar\s*[-–]\s*", re.IGNORECASE)
+
+
+def normalizar_unidade(nome) -> str:
+    """Nome canônico do centro de custo, sem a marca de desativação."""
+    n = re.sub(r"\s+", " ", str(nome or "")).strip()
+    return RX_DESATIVADO.sub("", n).strip()
 
 
 def camada(nome_centro: str) -> str:
-    t = T.normalizar(nome_centro)
+    t = T.normalizar(normalizar_unidade(nome_centro))
     if not t:
         return "NAO_IDENTIFICADA"
     for cat, rx in _CAMADAS:
@@ -93,7 +106,10 @@ def _base(staged) -> pd.DataFrame:
     d = d[d["valor"] > 0]
     if d.empty:
         return d
-    d["unidade"] = coluna(d, "NOME_CENTRO_CUSTO").fillna("").astype(str)
+    bruto = coluna(d, "NOME_CENTRO_CUSTO").fillna("").astype(str)
+    d["unidade_rotulo"] = bruto
+    d["unidade"] = bruto.map(normalizar_unidade)      # funde renomeações
+    d["desativado"] = bruto.str.match(RX_DESATIVADO)
     d["conta"] = coluna(d, "NOME_CONTA").fillna("").astype(str)
     unicos = {u: camada(u) for u in d["unidade"].unique()}
     d["camada"] = d["unidade"].map(unicos)
@@ -118,21 +134,28 @@ def run(staged) -> list[Finding]:
     identificado = central + territorio
     pct_central = 100 * central / identificado if identificado else 0.0
     razao = central / territorio if territorio else float("inf")
+    n_desativados = int(d.loc[d["desativado"], "unidade"].nunique())
     achados.append(Finding(
         id="super-central-vs-territorio", frente=FRENTE,
         gravidade="alta" if pct_central > 70 else "media",
         titulo=(f"{pct_central:.0f}% da despesa identificada por unidade ficou na "
                 f"estrutura central; {100 - pct_central:.0f}% chegou às unidades "
-                "regionais e locais"),
+                "de campo (UGIs)"),
         descricao=(
             "O Crea-SP fiscaliza o exercício profissional em 645 municípios, e "
             "a fiscalização acontece na ponta: agente que se desloca, vistoria "
             "e autua. Esta é a divisão territorial do gasto — quanto ficou em "
-            "presidência, diretoria, câmaras e administração da sede, e quanto "
-            "foi alocado a superintendências regionais, UGIs e inspetorias. "
-            "Não existe proporção legalmente correta, mas a série mostra a "
-            "direção: estrutura central crescendo mais rápido que a ponta é o "
-            "movimento a explicar."),
+            "presidência, diretoria, câmaras, gerências e unidades da sede, e "
+            "quanto foi alocado às UGIs (Unidades de Gestão Integrada) e "
+            "inspetorias, que são as unidades de campo. Não existe proporção "
+            "legalmente correta, mas a série mostra a direção: estrutura "
+            "central crescendo mais rápido que a ponta é o movimento a "
+            "explicar."
+            + (f" Nota metodológica: {n_desativados} centro(s) de custo "
+               "aparecem no portal com o prefixo 'Não utilizar' e um homônimo "
+               "ativo — são a mesma unidade renomeada, e foram fundidos aqui; "
+               "sem isso o valor de cada uma apareceria pela metade."
+               if n_desativados else "")),
         evidencia=(d.groupby(["_ano", "camada_rotulo"])["valor"].sum()
                    .reset_index().sort_values(["_ano", "valor"],
                                               ascending=[True, False])),
@@ -165,39 +188,60 @@ def run(staged) -> list[Finding]:
         salarios = float(fiscal.loc[fiscal["natureza"] == "REMUNERACAO", "valor"].sum())
         operacional = float(fiscal.loc[~fiscal["natureza"].isin(
             ["VERBAS_PESSOAIS", "REMUNERACAO"]), "valor"].sum())
-        tot_fiscal = verbas + salarios + operacional
+        # A UGI faz atendimento E fiscalização no mesmo centro de custo — o
+        # portal não separa. Cravar um número só seria escolher entre
+        # subestimar (só contas explicitamente rotuladas) e superestimar (toda
+        # a UGI). Publicamos o INTERVALO, que é o que o dado sustenta.
+        campo = d[d["camada"] == "CAMPO"]
+        teto_ano = ((fis_ano.add(A.serie_anual(campo, "valor")["valor"], fill_value=0)
+                     if not campo.empty else fis_ano))
+        pct_teto = (100 * teto_ano / tot_ano.reindex(teto_ano.index)).round(1)
+        pct_teto_medio = float(pct_teto.mean())
         achados.append(Finding(
             id="super-fiscalizacao-efetiva", frente=FRENTE,
-            gravidade="alta" if pct_medio < 15 else "media",
-            titulo=(f"{pct_medio:.1f}% da despesa por centro de custo foi alocada "
-                    "à função de fiscalização"),
+            gravidade="alta" if pct_teto_medio < 15 else "media",
+            titulo=(f"Entre {pct_medio:.1f}% e {pct_teto_medio:.1f}% da despesa "
+                    "por centro de custo sustenta a fiscalização"),
             descricao=(
                 "Quanto do orçamento chega à atividade que justifica a "
-                "existência do conselho, e **de que é feito esse valor**. A "
-                "decomposição importa mais que o total: diária de agente que "
-                "viaja para vistoriar é custo legítimo de fiscalização, não "
-                "desvio. O que merece explicação é a proporção — verba "
+                "existência do conselho, e **de que é feito esse valor**.\n\n"
+                f"O número é um intervalo, não um ponto: o piso ({pct_medio:.1f}%) "
+                "conta só o que está explicitamente rotulado como fiscalização; "
+                f"o teto ({pct_teto_medio:.1f}%) soma todas as UGIs — as "
+                "Unidades de Gestão Integrada, que são as unidades de campo e "
+                "onde os agentes fiscais estão lotados, mas que fazem "
+                "atendimento e análise de processo no MESMO centro de custo. "
+                "O portal não separa as duas coisas, e cravar um número só "
+                "seria escolher entre subestimar e superestimar. Mesmo o teto "
+                "é baixo para um órgão cuja competência primária é fiscalizar."
+                "\n\nA decomposição importa mais que o total: diária de agente "
+                "que viaja para vistoriar é custo legítimo de fiscalização, "
+                "não desvio. O que merece explicação é a proporção — verba "
                 "indenizatória superando o salário do quadro que fiscaliza "
-                "indica que a atividade é sustentada por pagamento eventual e "
-                "não por estrutura permanente. Aqui: "
-                f"{fmt_brl(salarios)} em remuneração, {fmt_brl(verbas)} em "
-                f"verbas a pessoas e {fmt_brl(operacional)} em custeio "
-                "operacional (material, transporte, sistemas)."),
+                "indica atividade sustentada por pagamento eventual e não por "
+                f"estrutura permanente. No núcleo explícito: {fmt_brl(salarios)} "
+                f"em remuneração, {fmt_brl(verbas)} em verbas a pessoas e "
+                f"{fmt_brl(operacional)} em custeio operacional."),
             evidencia=comp.reset_index(),
-            serie=comp, grafico="bar_stacked",
-            tabela_anual=pct_ano.to_frame("% da despesa em fiscalização").reset_index(),
+            serie=pd.DataFrame({"piso (rótulo explícito)": pct_ano,
+                                "teto (incluindo UGIs)": pct_teto}),
+            grafico="line", unidade="%",
+            tabela_anual=pd.DataFrame(
+                {"% piso": pct_ano, "% teto": pct_teto}).reset_index(),
             base_legal="Lei 5.194/1966, art. 34, alíneas 'a' e 'b'; Lei "
                        "12.514/2011 (a anuidade custeia a fiscalização).",
-            metricas={"pct_medio": round(pct_medio, 2),
+            metricas={"pct_piso": round(pct_medio, 2),
+                      "pct_teto": round(pct_teto_medio, 2),
                       "remuneracao": round(salarios, 2),
                       "verbas_pessoais": round(verbas, 2),
                       "custeio_operacional": round(operacional, 2),
                       "verba_sobre_salario": (round(verbas / salarios, 2)
                                               if salarios else None),
                       "pct_por_ano": {int(a): float(v) for a, v in pct_ano.items()}},
-            como_verificar="Pedir o relatório anual de fiscalização (nº de "
-                           "vistorias, autos lavrados e processos instaurados) "
-                           "e dividir a despesa desta tabela pelo volume.",
+            como_verificar="Pedir, por UGI, quantos agentes fiscais estão "
+                           "lotados e quantas vistorias e autos foram feitos — "
+                           "é o que fecha o intervalo num número só. Pedir "
+                           "também o relatório anual de fiscalização.",
         ))
         if salarios > 0 and verbas > salarios:
             achados.append(Finding(

@@ -76,6 +76,11 @@ REGRAS: list[tuple[str, str]] = [
     ("VERBAS_PESSOAIS",
      r"\bdiaria(s)?\b|\bjeton|ajuda de custo|verba de representa|"
      r"indeniza\w* de transporte|auxilio deslocamento|"
+     # "Locomoção de Conselheiros/Inspetores/Funcionários" são as contas de
+     # quilometragem do Crea-SP e somam R$ 87,7 mi na série real. Sem esta
+     # alternativa elas caíam em OUTROS e ficavam fora da frente de verbas —
+     # metade do gasto de deslocamento dos conselheiros, invisível.
+     r"\blocomoca|\blocomoçã|\bdeslocamento\b|"
      r"\bquilometragem\b|\bkm rodado|reembolso de despesa|reembolso de viagem|"
      # plural em -ns: `passagen(s)?` casava "passagens" e NUNCA "passagem",
      # deixando a conta no singular — a mais comum — fora da categoria.
@@ -199,6 +204,46 @@ def classificar_series(*textos: pd.Series) -> pd.Series:
 
 def macro(categoria: pd.Series) -> pd.Series:
     return categoria.map(MACRO).fillna("Não classificado")
+
+
+# ---------------------------------------------------- quem recebeu a verba
+# Quando o favorecido vem agregado ("DIVERSOS FUNCIONÁRIOS"), a identidade da
+# pessoa se perde — mas a CONTA CONTÁBIL ainda diz a que categoria ela
+# pertence: "Diarias com Conselheiros", "Locomoção de Inspetores". É o que
+# permite responder quem recebe a verba mesmo sem nome do beneficiário.
+CATEGORIAS_BENEFICIARIO = {
+    "CONSELHEIRO": "Conselheiros",
+    "INSPETOR": "Inspetores",
+    "DIRECAO": "Direção (presidência, diretoria)",
+    "FUNCIONARIO": "Funcionários (quadro)",
+    "COLABORADOR": "Colaboradores e estagiários",
+    "INDEFINIDO": "Categoria não declarada na conta",
+}
+
+# Estrutura política eleita/indicada × quadro contratado. A separação é o
+# núcleo da pergunta: quem decide o próprio pagamento está do lado de cá.
+POLITICOS = ("CONSELHEIRO", "INSPETOR", "DIRECAO")
+QUADRO = ("FUNCIONARIO", "COLABORADOR")
+
+_REGRAS_BENEFICIARIO: list[tuple[str, str]] = [
+    ("CONSELHEIRO", r"\bconselheir|\bjeton|\bplenari|\bcamara especializada"),
+    ("INSPETOR", r"\binspetor"),
+    ("DIRECAO", r"\bdiretor|\bpresident|\bdiretoria\b|\bgabinete\b"),
+    ("COLABORADOR", r"\bcolaborador|\bestagiari|\baprendiz|\bterceiriz"),
+    ("FUNCIONARIO", r"\bfuncionari|\bservidor|\bempregad|\bpessoal\b|\bquadro\b"),
+]
+_BENEFICIARIO_COMPILADAS = [(c, re.compile(rx)) for c, rx in _REGRAS_BENEFICIARIO]
+
+
+def categoria_beneficiario(nome_conta: str) -> str:
+    """A que categoria de pessoa a conta destina a verba."""
+    t = normalizar(nome_conta)
+    if not t:
+        return "INDEFINIDO"
+    for cat, rx in _BENEFICIARIO_COMPILADAS:
+        if rx.search(t):
+            return cat
+    return "INDEFINIDO"
 
 
 def refinar_residuo(rotulos: pd.Series, categorias: pd.Series,

@@ -14,6 +14,7 @@ import pandas as pd
 
 from .. import analytics as A
 from .. import config
+from .. import taxonomia as T
 from ..findings import Finding
 from ..utils import fmt_brl
 from .common import (classificar_beneficiario, df, pagamentos_indenizacao,
@@ -27,8 +28,122 @@ BASE_LEGAL = ("Lei 4.320/1964, art. 63 (liquidação: comprovação da despesa);
               "individualizada de repasses.")
 
 
-def run(staged) -> list[Finding]:
+def _milhar(n: int) -> str:
+    """12345 -> "12.345" (separador pt-BR), sem tocar no resto do texto."""
+    return f"{int(n):,}".replace(",", ".")
+
+
+def _verbas_por_categoria(staged) -> list[Finding]:
+    """Quem recebe a verba, lido na CONTA — e não no nome do favorecido.
+
+    Esta é a resposta ao problema que motivou a ferramenta: o portal agrega o
+    favorecido sob rótulos como "DIVERSOS FUNCIONÁRIOS", e todas as verbas
+    ficam sem dono identificável. Só que a conta contábil continua dizendo a
+    QUEM a verba se destina — "Diarias com Conselheiros", "Locomoção de
+    Inspetores" —, e isso basta para separar a estrutura política do quadro
+    contratado, que é a comparação que interessa.
+
+    Note que este recorte NÃO exige favorecido pessoa física: é justamente o
+    pagamento agregado, invisível para as outras análises, que aparece aqui.
+    """
     achados: list[Finding] = []
+    todos = pagamentos_indenizacao(staged, apenas_pessoa_fisica=False)
+    if todos.empty or "_conta_match" not in todos:
+        return achados
+    d = todos.copy()
+    # verba é despesa com pessoa: viagem comprada de empresa é custeio e sai
+    if "PJ" in d.columns:
+        d = d[~d["PJ"].astype(bool)]
+    if d.empty:
+        return achados
+    mapa = {c: T.categoria_beneficiario(c) for c in d["_conta_match"].unique()}
+    d["categoria_conta"] = d["_conta_match"].map(mapa)
+    d["rotulo"] = d["categoria_conta"].map(T.CATEGORIAS_BENEFICIARIO)
+
+    resumo = (d.groupby(["categoria_conta", "rotulo"])
+              .agg(total=("VALOR", "sum"), pagamentos=("VALOR", "size"))
+              .reset_index().sort_values("total", ascending=False))
+    resumo["ticket_medio"] = (resumo["total"] / resumo["pagamentos"]).round(2)
+    politico = float(d.loc[d["categoria_conta"].isin(T.POLITICOS), "VALOR"].sum())
+    quadro = float(d.loc[d["categoria_conta"].isin(T.QUADRO), "VALOR"].sum())
+    n_pol = int((d["categoria_conta"].isin(T.POLITICOS)).sum())
+    n_quad = int((d["categoria_conta"].isin(T.QUADRO)).sum())
+    if politico <= 0 and quadro <= 0:
+        return achados
+    razao = politico / quadro if quadro else float("inf")
+
+    serie = A.serie_anual(d, "VALOR", by="rotulo")
+    achados.append(Finding(
+        id="diarias-politico-vs-quadro", frente=FRENTE,
+        gravidade="alta" if razao > 1 else "media",
+        titulo=(f"A estrutura política recebeu {fmt_brl(politico)} em verbas "
+                f"contra {fmt_brl(quadro)} do quadro contratado"
+                + (f" — {razao:.1f}× mais" if razao != float("inf") else "")),
+        descricao=(
+            "A conta contábil declara a QUEM a verba se destina, mesmo quando o "
+            "portal esconde o favorecido sob um rótulo agregado. Separando por "
+            "essa declaração: de um lado conselheiros, inspetores e direção — "
+            "que são eleitos ou indicados e decidem o próprio pagamento; do "
+            "outro, funcionários e colaboradores, que são contratados.\n\n"
+            f"São {_milhar(n_pol)} pagamentos à estrutura política contra "
+            f"{_milhar(n_quad)} ao quadro. "
+            "Nenhum deles aparece no contracheque publicado: a "
+            "remuneração divulgada no quadro de pessoal traz só o salário, e "
+            "verba indenizatória não é salário — não entra em teto, não compõe "
+            "base de contribuição e não aparece na transparência da folha. É "
+            "exatamente por isso que comparar salários entre categorias não "
+            "revela nada, e comparar verbas revela."),
+        evidencia=resumo,
+        serie=serie, grafico="bar_stacked",
+        tabela_anual=A.ranking_anual(d, "rotulo", "VALOR", top=8),
+        base_legal=BASE_LEGAL,
+        como_verificar=(
+            "Pedir via LAI, por exercício e por CPF, a relação nominal de "
+            "beneficiários de cada uma dessas contas, com evento, destino, "
+            "período e valor unitário — é o que o portal deixa de publicar ao "
+            "agregar o favorecido."),
+        metricas={"estrutura_politica": round(politico, 2),
+                  "quadro_contratado": round(quadro, 2),
+                  "razao": None if razao == float("inf") else round(razao, 2),
+                  "pagamentos_politica": n_pol, "pagamentos_quadro": n_quad,
+                  "por_categoria": {r["rotulo"]: round(float(r["total"]), 2)
+                                    for _, r in resumo.iterrows()}},
+    ))
+
+    # ---- o que o agregado esconde: contagem de pagamentos por categoria
+    oculto = d[~d.get("PF", pd.Series(False, index=d.index)).astype(bool)]
+    if not oculto.empty:
+        por_cat = (oculto.groupby("rotulo")
+                   .agg(total=("VALOR", "sum"), pagamentos=("VALOR", "size"))
+                   .reset_index().sort_values("total", ascending=False))
+        tot_oculto = float(oculto["VALOR"].sum())
+        achados.append(Finding(
+            id="diarias-sem-beneficiario", frente=FRENTE, gravidade="alta",
+            titulo=(f"{fmt_brl(tot_oculto)} em verbas pagas sem beneficiário "
+                    f"identificável ({_milhar(len(oculto))} pagamentos)"),
+            descricao=(
+                "Verbas cujo favorecido veio agregado — sem CPF e sem nome de "
+                "pessoa. A conta diz a categoria, mas não a pessoa: é "
+                "impossível saber quantas diárias uma mesma pessoa recebeu, se "
+                "houve acumulação no mesmo dia, ou se o total anual de alguém "
+                "ultrapassa o razoável. A LAI exige divulgação individualizada "
+                "de repasses; agregar o beneficiário de verba indenizatória "
+                "esvazia o controle justamente onde ele mais importa."),
+            evidencia=por_cat,
+            serie=A.serie_anual(oculto, "VALOR", by="rotulo"),
+            grafico="bar_stacked",
+            tabela_anual=A.ranking_anual(oculto, "rotulo", "VALOR", top=8),
+            base_legal="Lei 12.527/2011, art. 8º, §1º, II e III; Decreto "
+                       "7.724/2012, art. 7º, §3º, VI (divulgação de repasses "
+                       "com identificação do beneficiário).",
+            metricas={"total": round(tot_oculto, 2),
+                      "pagamentos": int(len(oculto))},
+        ))
+    return achados
+
+
+def run(staged) -> list[Finding]:
+    achados: list[Finding] = _verbas_por_categoria(staged)
     ind = pagamentos_indenizacao(staged)
     if ind.empty:
         achados.append(Finding(

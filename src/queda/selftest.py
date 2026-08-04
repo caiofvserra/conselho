@@ -80,15 +80,32 @@ def _pagamentos() -> pd.DataFrame:
                      "NUMERO_EMPENHO": 1000, "NUMERO_PAGAMENTO": 1000})
 
     # --- rótulo agregador que esconde o beneficiário (o "DIVERSOS FUNCIONARIOS")
+    # Os nomes de conta abaixo são os REAIS do plano de contas do Crea-SP: é a
+    # conta que declara a QUEM a verba se destina quando o favorecido some.
     for ano in range(2013, 2026):
-        for conta, v in (("Vencimentos e Salários", 4_000_000.0),
-                         ("Diárias no País", 300_000.0),
-                         ("Vale-Refeição", 500_000.0)):
-            rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": "DIVERSOS FUNCIONARIOS",
-                         "CPF_CNPJ": "", "CONTA_EMPENHO": conta,
-                         "HISTORICO": "folha", "VALOR": v, "VALOR_LIQUIDO": v,
-                         "DATA_PAGAMENTO": f"20/06/{ano}",
-                         "NUMERO_EMPENHO": 5000, "NUMERO_PAGAMENTO": 5000})
+        for conta, v, n in (
+                ("6.2.2.1.1.01.01.01.001-Salários", 4_000_000.0, 1),
+                ("6.2.2.1.1.01.04.02.001-Auxílio Educação e Creche", 300_000.0, 1),
+                # estrutura política: recebe mais que o quadro, em muito mais
+                # pagamentos — o padrão que a frente tem de isolar
+                ("6.2.2.1.1.01.04.05.002-Diarias com Conselheiros", 5_200_000.0, 90),
+                ("6.2.2.1.1.01.04.08.002-Locomoção de Conselheiros", 4_100_000.0, 80),
+                ("6.2.2.1.1.01.04.05.005-Pagamento de Jeton", 700_000.0, 17),
+                ("6.2.2.1.1.01.04.05.004-Diarias com Inspetores", 2_100_000.0, 21),
+                ("6.2.2.1.1.01.04.08.008-Locomoção de Inspetores", 1_400_000.0, 20),
+                # quadro contratado
+                ("6.2.2.1.1.01.04.05.001-Diarias com Funcionários", 2_600_000.0, 25),
+                ("6.2.2.1.1.01.04.08.001-Locomoção de Funcionários", 670_000.0, 13),
+                ("6.2.2.1.1.01.04.05.003-Diarias com Colaboradores", 570_000.0, 11),
+        ):
+            for i in range(n):
+                rows.append({"_ano": ano,
+                             "NOME_RAZAO_SOCIAL": "DIVERSOS FUNCIONARIOS",
+                             "CPF_CNPJ": "", "CONTA_EMPENHO": conta,
+                             "HISTORICO": "folha", "VALOR": v / n,
+                             "VALOR_LIQUIDO": v / n,
+                             "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/{(i % 12) + 1:02d}/{ano}",
+                             "NUMERO_EMPENHO": 5000 + i, "NUMERO_PAGAMENTO": 5000 + i})
 
     # --- entidade associativa que leva o nome do próprio conselho
     for ano in range(2018, 2026):
@@ -345,6 +362,8 @@ ESPERADOS = [
     "diarias-top-beneficiarios-ano",   # ranking ANUAL, não do período todo
     "diarias-limite-mensal",           # mais de 12 verbas num mês
     "diarias-acumulacao-diaria",       # duas verbas no mesmo dia
+    "diarias-politico-vs-quadro",      # a conta declara a quem a verba se destina
+    "diarias-sem-beneficiario",        # verba paga a favorecido agregado
     # pessoal e finalidade
     "pessoal-renda-invisivel",         # indenização >30% do salário
     "pessoal-serie-historica",
@@ -428,6 +447,12 @@ def _confere_metricas(achados) -> list[str]:
     exige("repr-assento-e-dinheiro", "entidades", 3)
     # patronal = SINDUSCON + Assoc. Comercial
     exige("repr-dinheiro-por-interesse", "patronal", 800_000 * 8 + 250_000 * 7)
+    # conselheiros + inspetores + jeton, 13 exercícios
+    exige("diarias-politico-vs-quadro", "estrutura_politica",
+          (5_200_000 + 4_100_000 + 700_000 + 2_100_000 + 1_400_000) * 13)
+    # funcionários + colaboradores
+    exige("diarias-politico-vs-quadro", "quadro_contratado",
+          (2_600_000 + 670_000 + 570_000) * 13)
     return erros
 
 
