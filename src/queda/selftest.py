@@ -219,7 +219,15 @@ def _staged() -> dict[str, pd.DataFrame]:
     mandatarios["NOME_NORM"] = mandatarios["nomeMandatario"].map(norm_nome)
     mandatarios["ENTIDADE_NORM"] = mandatarios["entidade"].map(norm_nome)
 
-    empenhos = pd.DataFrame([
+    # Série anual coerente com o demonstrativo: sem ela a conferência de
+    # reconciliação acusaria divergência na própria fixture.
+    _emp_base = [
+        {"_ano": a, "NOME_CONTA": "Serviços de Terceiros PJ",
+         "PESSOA": f"FORNECEDOR REGULAR {i}", "VALOR": 125e6 / 20,
+         "VALOR_PAGO": 115e6 / 20, "VALOR_ANULADO": 0.0}
+        for a in range(2013, 2026) for i in range(20)]
+
+    empenhos = pd.DataFrame(_emp_base + [
         {"_ano": 2024, "NOME_CONTA": "Diárias", "PESSOA": _CONSELHEIRO,
          "VALOR": 1000.0, "VALOR_PAGO": 1500.0, "VALOR_ANULADO": 0.0},
         {"_ano": 2024, "NOME_CONTA": "Serviços", "PESSOA": _FORN_FRACIONA,
@@ -271,6 +279,19 @@ def _staged() -> dict[str, pd.DataFrame]:
         {"_ano": a, "NOME": "Anuidades", "ANALITICA": True,
          "REALIZADO_EXERCICIO": 120e6 * (1.05 ** (a - 2013))}
         for a in range(2013, 2026)])
+
+    # Demonstrativo em ÁRVORE: a sintética repete a soma das filhas. Somar
+    # tudo conta o mesmo real duas vezes — o bug que inflou a execução
+    # orçamentária em 3-4x na rodada real.
+    demonstrativo = pd.DataFrame(
+        [{"_ano": a, "NOME": "6.2.2 DESPESA CORRENTE", "_nivel": 0,
+          "_folha": False, "ORCADO": 130e6, "EMPENHADOEXERCICIO": 125e6,
+          "LIQUIDADO_EXERCICIO": 118e6, "PAGO_EXERCICIO": 115e6}
+         for a in range(2013, 2026)] +
+        [{"_ano": a, "NOME": f"6.2.2.{i} conta analítica {i}", "_nivel": 1,
+          "_folha": True, "ORCADO": 130e6 / 2, "EMPENHADOEXERCICIO": 125e6 / 2,
+          "LIQUIDADO_EXERCICIO": 118e6 / 2, "PAGO_EXERCICIO": 115e6 / 2}
+         for a in range(2013, 2026) for i in (1, 2)])
 
     balanco = pd.DataFrame([
         {"_ano": a, "DOTACOES": 130e6 * (1.05 ** (a - 2013)),
@@ -335,6 +356,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "aditivos": aditivos, "licitacoes": pd.DataFrame(), "convenios": convenios,
         "comparativo_despesa": comparativo, "despesas_centro_custo": centro_custo,
         "comparativo_receita": receita, "balanco_orcamentario": balanco,
+        "demonstrativo": demonstrativo,
         "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
@@ -447,6 +469,13 @@ def _confere_metricas(achados) -> list[str]:
     exige("repr-assento-e-dinheiro", "entidades", 3)
     # patronal = SINDUSCON + Assoc. Comercial
     exige("repr-dinheiro-por-interesse", "patronal", 800_000 * 8 + 250_000 * 7)
+    # execução tem de somar só as folhas (130e6), não árvore + folhas (260e6)
+    f = por_id.get("orcamento-execucao")
+    if f is not None and f.serie is not None and not f.serie.empty:
+        orcado = float(f.serie["orçado"].iloc[0])
+        if abs(orcado - 130e6) > 1e6:
+            erros.append(f"orcamento-execucao somou a árvore: orçado={orcado:,.0f}"
+                         f" (esperado 130.000.000 = só as folhas)")
     # conselheiros + inspetores + jeton, 13 exercícios
     exige("diarias-politico-vs-quadro", "estrutura_politica",
           (5_200_000 + 4_100_000 + 700_000 + 2_100_000 + 1_400_000) * 13)

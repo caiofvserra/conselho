@@ -299,6 +299,7 @@ FUNCOES = {
     "POLITICO": "Órgãos políticos (plenário, câmaras, inspetorias)",
     "DIRECAO_SUPERIOR": "Direção superior (presidência, diretoria, gabinete)",
     "ADMINISTRACAO": "Administração e apoio (meio)",
+    "TRANSFERENCIA": "Transferências legais ao sistema",
     "NAO_IDENTIFICADA": "Função não identificada",
 }
 
@@ -318,6 +319,14 @@ REGRAS_FUNCAO: list[tuple[str, str]] = [
      r"posto(s)? de (atendimento|servico)|\bugi\b|unidade(s)? de gestao integrada|"
      r"central de relacionamento|\bcadastro\b|\bcertidao|\bcertidoes"),
 
+    # CIPA e comissões administrativas ANTES de POLITICO: `\bcomissao\b`
+    # sozinho puxava a Comissão Interna de Prevenção de Acidentes para
+    # "órgãos políticos". Ética, Orçamento e Tomada de Contas continuam
+    # colegiados e caem em POLITICO abaixo.
+    ("ADMINISTRACAO",
+     r"comissao interna de prevencao|\bcipa\b|comissao de licitac|"
+     r"comissao de sindicancia|comissao de compras"),
+
     ("POLITICO",
      r"\bplenario\b|\bplenaria\b|camara(s)? especializada|\bcolegiado|"
      r"\bconselheiro|\bconselho diretor|\binspetoria|\bcomissao\b|"
@@ -331,14 +340,28 @@ REGRAS_FUNCAO: list[tuple[str, str]] = [
      r"\balta administracao|\bvice-?presidencia"),
 
     ("ADMINISTRACAO",
-     r"\badministrativ|\brecursos humanos|\brh\b|\bpessoal\b|\bfinanceir|"
-     r"\bcontabil|\borcament|\bjuridic|\bprocuradoria\b|\bcompras\b|"
-     r"\blicitac|\bcontratos\b|\bpatrimonio\b|\balmoxarifado\b|"
-     r"\btecnologia da informacao|\binformatica\b|\bti\b|\bsistemas\b|"
-     r"\bcomunicacao\b|\bmarketing\b|\bouvidoria\b|\bauditoria\b|"
-     r"\bcontroladoria\b|\bcorregedoria\b|\bmanutencao\b|\bservicos gerais|"
-     r"\bsede\b|\bpredio\b|\btransporte\b|\bfrota\b|\bplanejamento\b|"
-     r"\bgeral\b|\bapoio\b|\bsuporte\b"),
+     # "FINANÇAS" normaliza para "financas" e NÃO casava `\bfinanceir`;
+     # "GESTAO DE PESSOAS" não casava `\bpessoal\b`; "ADMINISTRAÇÃO" não
+     # casava `\badministrativ`. Eram R$ 1,06 bi caindo em "não identificada"
+     # e inflando artificialmente o resíduo da matriz natureza × função.
+     r"\badministra|\brecursos humanos|\brh\b|\bpessoal\b|\bpessoas\b|"
+     r"\bfinanceir|\bfinanca|\bcontabil|\borcament|\bjuridic|"
+     r"\bprocuradoria\b|\bcompras\b|\blicitac|\bcontratos\b|"
+     r"\bpatrimonio\b|\balmoxarifado\b|\btecnologia da informacao|"
+     r"\binformatica\b|\bsistemas\b|\bcomunicacao\b|\bmarketing\b|"
+     r"\bouvidoria\b|\bauditoria\b|\bcontroladoria\b|\bcorregedoria\b|"
+     r"\bmanutencao\b|\bservicos gerais|\bsede\b|\bpredio\b|"
+     r"\btransporte\b|\bfrota\b|\bplanejamento\b|\bapoio\b|"
+     r"\bsuporte\b|\bsuprimento|\blogistica\b|\binfraestrutura\b|"
+     r"\bexperiencia e (atendimento|jornada)"),
+
+    # Genérica de estrutura, por ÚLTIMO. Vem depois de fiscalização e
+    # atendimento de propósito: senão a Gerência de Fiscalização e a Gerência
+    # de Atendimento ao Cliente virariam administração.
+    ("ADMINISTRACAO",
+     r"\bgerencia\b|\bequipe\b|\bsecretaria executiva\b|\bchefia\b|"
+     r"\bdepartamento\b|\bdepto\b|\bdivisao\b|\bsetor\b|"
+     r"\bcoordenadoria\b|\bunidade\b"),
 ]
 
 _FUNCAO_COMPILADAS = [(cat, re.compile(rx)) for cat, rx in REGRAS_FUNCAO]
@@ -347,6 +370,9 @@ _FUNCAO_COMPILADAS = [(cat, re.compile(rx)) for cat, rx in REGRAS_FUNCAO]
 # custo, a natureza da conta ainda carrega um sinal fraco de função. Este mapa
 # só é usado como último recurso e o resultado é marcado como inferido.
 _NATUREZA_PARA_FUNCAO = {
+    # repasse ao Confea/Mútua é imposição legal, não escolha de gestão: sem
+    # coluna própria, R$ 431,8 mi inchavam a "máquina administrativa"
+    "TRANSFERENCIAS": "TRANSFERENCIA",
     "FISCALIZACAO": "FISCALIZACAO",
     "ATENDIMENTO": "ATENDIMENTO",
     "INSTITUCIONAL": "POLITICO",

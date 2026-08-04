@@ -58,16 +58,29 @@ def _receita_anual(staged) -> pd.Series:
     return pd.Series(dtype=float)
 
 
-def _execucao_anual(staged) -> pd.DataFrame:
-    """orçado → empenhado → liquidado → pago por exercício."""
+def _execucao_anual(staged) -> tuple[pd.DataFrame, str]:
+    """orçado → empenhado → liquidado → pago por exercício.
+
+    O `demonstrativo` vem em ÁRVORE: cada conta sintética repete a soma das
+    filhas. Somar tudo conta o mesmo real três ou quatro vezes — foi o que
+    aconteceu na primeira rodada (empenhado 3,2× e pago 4,6× acima do que os
+    próprios datasets de empenhos e pagamentos registram). Só as FOLHAS entram.
+    """
     dem = df(staged, "demonstrativo")
     if not dem.empty and "ORCADO" in dem:
+        folhas = dem
+        if "_folha" in dem.columns:
+            folhas = dem[dem["_folha"].astype(bool)]
+        elif "_nivel" in dem.columns:          # sem marca de folha: nível máximo
+            folhas = dem[dem["_nivel"] == dem["_nivel"].max()]
+        if folhas.empty:
+            folhas = dem
         return pd.DataFrame({
-            "orçado": _num(dem, "ORCADO").groupby(dem["_ano"]).sum(),
-            "empenhado": _num(dem, "EMPENHADOEXERCICIO").groupby(dem["_ano"]).sum(),
-            "liquidado": _num(dem, "LIQUIDADO_EXERCICIO").groupby(dem["_ano"]).sum(),
-            "pago": _num(dem, "PAGO_EXERCICIO").groupby(dem["_ano"]).sum(),
-        })
+            "orçado": _num(folhas, "ORCADO").groupby(folhas["_ano"]).sum(),
+            "empenhado": _num(folhas, "EMPENHADOEXERCICIO").groupby(folhas["_ano"]).sum(),
+            "liquidado": _num(folhas, "LIQUIDADO_EXERCICIO").groupby(folhas["_ano"]).sum(),
+            "pago": _num(folhas, "PAGO_EXERCICIO").groupby(folhas["_ano"]).sum(),
+        }), "demonstrativo"
     bal = df(staged, "balanco_orcamentario")
     if not bal.empty and "DOTACOES" in bal:
         base = _num(bal, "DOTACOES_ATUALIZADAS")
@@ -78,17 +91,65 @@ def _execucao_anual(staged) -> pd.DataFrame:
             "empenhado": _num(bal, "DESPESAS_EMPENHADAS").groupby(bal["_ano"]).sum(),
             "liquidado": _num(bal, "DESPESAS_LIQUIDADAS").groupby(bal["_ano"]).sum(),
             "pago": _num(bal, "DESPESAS_PAGAS").groupby(bal["_ano"]).sum(),
-        })
-    return pd.DataFrame()
+        }), "balanco"
+    return pd.DataFrame(), "indisponivel"
 
 
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
 
     # ------------------------------------------------ 1. execução do orçamento
-    exec_ = _execucao_anual(staged)
-    if not exec_.empty and float(exec_["orçado"].sum()) > 0:
+    exec_, fonte_exec = _execucao_anual(staged)
+    # A conferência só faz sentido contra o DEMONSTRATIVO, que vem em árvore.
+    # O balanço orçamentário já é consolidado e não tem risco de dupla soma.
+    if (not exec_.empty and float(exec_["orçado"].sum()) > 0
+            and fonte_exec == "demonstrativo"):
         exec_ = exec_[exec_["orçado"] > 0].round(2)
+        # Teste de consistência DENTRO da própria árvore: a soma das contas
+        # sintéticas de nível 0 tem de bater com a soma das folhas, porque são
+        # o mesmo dinheiro visto em dois níveis. Se não bate, o achatamento
+        # perdeu a marca de folha e a série está contando o mesmo real duas ou
+        # três vezes — foi o que inflou empenhado em 3,2x e pago em 4,6x.
+        dem = df(staged, "demonstrativo")
+        conferencia = []
+        if {"_folha", "_nivel"} <= set(dem.columns):
+            folhas = dem[dem["_folha"].astype(bool)]
+            raizes = dem[dem["_nivel"] == dem["_nivel"].min()]
+            for etapa, col in (("orçado", "ORCADO"),
+                               ("empenhado", "EMPENHADOEXERCICIO"),
+                               ("pago", "PAGO_EXERCICIO")):
+                sf = float(_num(folhas, col).sum())
+                sr = float(_num(raizes, col).sum())
+                if sr <= 0:
+                    continue
+                conferencia.append({"etapa": etapa, "soma_folhas": round(sf, 2),
+                                    "soma_sinteticas_raiz": round(sr, 2),
+                                    "razao": round(sf / sr, 3)})
+        divergente = [c for c in conferencia
+                      if c["razao"] > 1.15 or c["razao"] < 0.85]
+        if divergente:
+            achados.append(Finding(
+                id="orcamento-execucao-inconsistente", frente=FRENTE,
+                gravidade="alta",
+                titulo=("A árvore do demonstrativo não fecha entre folhas e "
+                        "sintéticas — série de execução suprimida"),
+                descricao=(
+                    "O demonstrativo vem em árvore: cada conta sintética "
+                    "repete a soma das filhas, e as duas somas têm de bater. "
+                    "Quando não batem, ou o achatamento perdeu a marca de "
+                    "folha — e então o mesmo real é contado duas ou três "
+                    "vezes —, ou o portal publica níveis incompletos. Nos dois "
+                    "casos a série **não foi publicada**: preferimos não "
+                    "mostrar número a mostrar número errado."),
+                evidencia=pd.DataFrame(conferencia),
+                metricas={"conferencia": conferencia},
+                como_verificar="Conferir se o endpoint devolve as contas "
+                               "sintéticas junto com as analíticas e se o "
+                               "achatamento preserva `_folha`.",
+            ))
+            exec_ = pd.DataFrame()
+
+    if not exec_.empty:
         exec_["% executado"] = (100 * exec_["pago"] / exec_["orçado"]).round(1)
         # empenhado mas não liquidado = compromisso que atravessa o exercício
         exec_["a liquidar"] = (exec_["empenhado"] - exec_["liquidado"]).round(2)

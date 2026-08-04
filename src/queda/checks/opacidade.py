@@ -13,6 +13,7 @@ import re
 import pandas as pd
 
 from .. import analytics as A
+from .. import taxonomia as T
 from ..findings import Finding
 from ..utils import fmt_brl
 from .common import df
@@ -155,43 +156,60 @@ def run(staged) -> list[Finding]:
         tabela_anual=A.ranking_anual(agr, "FAVORECIDO_NORM", "VALOR", top=5),
     ))
 
-    # ------------------------------------- 5. conciliação com a contabilidade
-    comp = df(staged, "comparativo_despesa")
-    if not comp.empty and "NOME" in comp and conta_col:
-        valor_col = ("REALIZADO_EXERCICIO" if "REALIZADO_EXERCICIO" in comp
-                     else "TOTAL_EXERCICIO")
-        if valor_col in comp:
-            analitica = (comp[comp["ANALITICA"].astype(bool)]
-                         if "ANALITICA" in comp else comp)
-            rx_pessoal = (r"pessoal|vencimento|salario|remunera|encargo|"
-                          r"beneficio|vale|plano de saude")
-            pess = analitica[analitica["NOME"].fillna("").str.lower()
-                             .str.contains(rx_pessoal, regex=True)]
-            cont_ano = pess.groupby("_ano")[valor_col].sum()
-            comparo = pd.DataFrame({
-                "pago_a_agregadores": por_ano["valor"],
-                "despesa_pessoal_contabil": cont_ano,
-            }).dropna(how="all").fillna(0)
-            comparo["excedente"] = (comparo["pago_a_agregadores"] -
-                                    comparo["despesa_pessoal_contabil"]).round(2)
-            excede = comparo[comparo["excedente"] > 0]
-            achados.append(Finding(
-                id="opacidade-conciliacao-pessoal", frente=FRENTE,
-                gravidade="media" if len(excede) >= 3 else "info",
-                titulo="Pagamentos a rótulos agregados × despesa de pessoal "
-                       "registrada na contabilidade",
-                descricao=(
-                    "Se o rótulo agregado fosse apenas folha de pagamento, o valor "
-                    "pago deveria ficar em linha com a despesa de pessoal "
-                    "contabilizada. O excedente indica que há, dentro do agregado, "
-                    "verbas que não são salário — tipicamente diárias, indenizações "
-                    "e benefícios pagos em lote."),
-                evidencia=comparo.reset_index(),
-                serie=comparo[["pago_a_agregadores", "despesa_pessoal_contabil"]],
-                grafico="bar",
-                metricas={"anos_com_excedente": int(len(excede)),
-                          "excedente_total": round(float(excede["excedente"].sum()), 2)
-                          if not excede.empty else 0.0},
-            ))
+    # ------------------------------------- 5. do que o agregado é feito
+    #
+    # A versão anterior comparava o PAGO a agregadores com a despesa de
+    # pessoal REALIZADA na contabilidade e chamava a diferença de "excedente".
+    # Duas coisas estavam erradas: (a) o filtro rodava sobre o nome da conta
+    # sem remover acento, então "Férias", "Gratificação" e "13º Salário" nunca
+    # casavam e a folha contábil vinha subestimada; (b) mesmo com o regex
+    # certo, são bases e regimes diferentes — fluxo de caixa contra despesa
+    # realizada —, e a diferença não é excedente de coisa nenhuma.
+    #
+    # A decomposição por conta contábil, abaixo, é mesma-base e cobre 100% do
+    # agregado: ela responde à mesma pergunta sem inventar número.
+    if conta_col and not agr.empty:
+        d = agr.copy()
+        contas = d[conta_col].fillna("").astype(str)
+        d["natureza"] = contas.map(
+            {c: T.classificar_texto(c) for c in contas.unique()})
+        por_nat = (d.groupby("natureza")["VALOR"]
+                   .agg(total="sum", pagamentos="size").reset_index()
+                   .sort_values("total", ascending=False))
+        por_nat["rotulo"] = por_nat["natureza"].map(T.GRUPOS)
+        tot = float(d["VALOR"].sum())
+        por_nat["share_pct"] = (100 * por_nat["total"] / tot).round(2)
+        folha = float(d.loc[d["natureza"] == "REMUNERACAO", "VALOR"].sum())
+        verba = float(d.loc[d["natureza"] == "VERBAS_PESSOAIS", "VALOR"].sum())
+        n_verba = int((d["natureza"] == "VERBAS_PESSOAIS").sum())
+        outros = tot - folha - verba
+        achados.append(Finding(
+            id="opacidade-composicao", frente=FRENTE,
+            gravidade="alta" if verba > 0 else "info",
+            titulo=(f"Dentro do rótulo agregado: {fmt_brl(folha)} de folha, "
+                    f"{fmt_brl(verba)} de verba indenizatória e "
+                    f"{fmt_brl(outros)} de outras naturezas"),
+            descricao=(
+                "A decomposição pela conta contábil cobre **100%** do valor "
+                "agregado — não sobra resíduo e não há comparação entre bases "
+                "diferentes. Folha de pagamento agregada é defensável: salário "
+                "individual tem regra própria de publicação. Verba "
+                f"indenizatória não: são {n_verba:,} pagamentos individuais de "
+                "diária, locomoção e jeton, cada um com um beneficiário "
+                "concreto, publicados sob um rótulo que não identifica "
+                "ninguém.").replace(",", "."),
+            evidencia=por_nat[["rotulo", "total", "pagamentos", "share_pct"]],
+            serie=A.serie_anual(d, "VALOR", by="natureza").rename(columns=T.GRUPOS),
+            grafico="area_stacked",
+            tabela_anual=A.ranking_anual(d, "natureza", "VALOR", top=8),
+            base_legal="Lei 12.527/2011, art. 8º, §1º, II e III; Decreto "
+                       "7.724/2012, art. 7º, §3º, VI.",
+            metricas={"total": round(tot, 2), "folha": round(folha, 2),
+                      "verba_indenizatoria": round(verba, 2),
+                      "outros": round(outros, 2),
+                      "pagamentos_de_verba": n_verba},
+            como_verificar="Pedir a relação nominal dos pagamentos das contas "
+                           "de verba — as de folha podem permanecer agregadas.",
+        ))
 
     return achados
