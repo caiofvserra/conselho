@@ -73,6 +73,66 @@ def implanta_exercicio(endpoint: str, ano: int):
     return implanta(endpoint, {"exercicio": ano})
 
 
+def achatar_grupos(rows) -> list[dict]:
+    """Extrai as linhas de um payload agrupado, sem adivinhar o nome do campo.
+
+    Endpoints como QuadrosPessoas e Conselheiros devolvem grupos com uma lista
+    aninhada dentro (`[{"TITULO": ..., "PESSOAS": [...]}]`). O código anterior
+    procurava a lista por nome — `PESSOAS`, `CONSELHEIROS` — e devolvia vazio
+    quando o campo se chamava outra coisa, sem erro nenhum. Foi assim que
+    quadro_pessoal e mandatarios vieram com 0 linhas mesmo com o host de pé.
+
+    Aqui a lista é encontrada pela ESTRUTURA (qualquer valor que seja lista de
+    dicionários), os campos escalares do grupo descem para o filho com prefixo
+    `_grupo_`, e um payload já plano passa direto.
+    """
+    out: list[dict] = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        aninhadas = {k: v for k, v in r.items()
+                     if isinstance(v, list) and v and isinstance(v[0], dict)}
+        if not aninhadas:
+            out.append(r)                       # payload já plano
+            continue
+        escalares = {f"_grupo_{k}": v for k, v in r.items()
+                     if not isinstance(v, (list, dict))}
+        for campo, filhos in aninhadas.items():
+            for filho in filhos:
+                if isinstance(filho, dict):
+                    out.append({**escalares, "_grupo_campo": campo, **filho})
+    return out
+
+
+# Formatos de parâmetro aceitos pelo portal — variam por endpoint e não estão
+# documentados. Tentados em ordem até um devolver dado.
+def _variantes_params(ano: int | None) -> list[dict]:
+    v: list[dict] = [{}]
+    if ano:
+        v += [{"exercicio": ano},
+              {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
+              {"dataInicio": f"01/01/{ano}", "dataTermino": f"31/12/{ano}"},
+              {"vigenciaInicio": f"01/{ano}", "vigenciaTermino": f"12/{ano}"}]
+    return v
+
+
+def implanta_variantes(endpoint: str, ano: int | None = None) -> tuple[list, dict]:
+    """Tenta os formatos de parâmetro até um devolver dado.
+
+    Devolve (linhas_achatadas, params_vencedores). Um 400 por formato errado
+    era indistinguível de "não há dado" — esta função separa os dois casos.
+    """
+    for params in _variantes_params(ano):
+        bruto = implanta(endpoint, params or None)
+        linhas = achatar_grupos(bruto)
+        if linhas:
+            log.info("%s: %d linha(s) com params=%s", endpoint, len(linhas),
+                     params or "sem parâmetros")
+            return linhas, params
+    log.info("%s: nenhum formato de parâmetro devolveu dado", endpoint)
+    return [], {}
+
+
 def achatar_demonstrativo(rows: list, nivel: int = 0, pai: str = "") -> list[dict]:
     """DemonstrativoEmpenhosPagamentos vem em árvore (campo DETALHES). Achata
     preservando o caminho hierárquico, para permitir agregação por conta."""

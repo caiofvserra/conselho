@@ -46,7 +46,7 @@ modelo local já leu — esses vão para o Google Drive:
 ```bash
 export QUEDA_DATA_DIR=/content/drive/MyDrive/queda/data
 export QUEDA_OUTPUT_DIR=/content/drive/MyDrive/queda/output
-export OLLAMA_MODELS=/content/drive/MyDrive/queda/ollama   # não rebaixa 4,7 GB
+# OLLAMA_MODELS fica em disco LOCAL: o Drive é FUSE e o Ollama não sobe nele
 python main.py all --desde auto --ate 2026 --retomar
 ```
 
@@ -109,46 +109,64 @@ intermediação na rede — sem ele, a métrica cai para o grau de ligação.
    separa "gasta muito com pessoal" de "gasta muito com pessoal que não
    fiscaliza", e isola as verbas indenizatórias pagas dentro das unidades que
    as autorizam.
-2. **Orçamento** — orçado → empenhado → liquidado → pago por exercício; contas
+2. **Superintendências e fiscalização** — o Crea fiscaliza 645 municípios, e a
+   fiscalização acontece na rua. A frente divide o gasto em quatro camadas
+   territoriais (direção central, administração central, superintendências
+   regionais, unidades locais) e mede **quanto fica na estrutura e quanto chega
+   à ponta**; decompõe o gasto de fiscalização em salário, verba e custeio
+   operacional; flagra unidade territorial que quase nada gasta com a
+   atividade-fim; e compara o ritmo de crescimento da despesa total com o da
+   fiscalização. Quando o quadro de pessoal vem com lotação, mostra também onde
+   estão as pessoas, não só o dinheiro.
+3. **Representação e interesses** — quem indica os conselheiros e para onde vai
+   o repasse institucional. As entidades de classe indicam o plenário e formam
+   o colégio eleitoral que elege a diretoria; a frente classifica cada uma por
+   interesse representado (patronal/empresarial, profissional, ensino, sistema
+   Confea/Crea), mede o dinheiro que cada grupo recebe ano a ano, isola quem
+   recebe por dois canais (convênio *e* contrato) e cruza **assento × dinheiro**.
+   Mede o vínculo financeiro entre o conselho e sua base política — não prova
+   que um conselheiro votou a favor de quem o indicou, o que exigiria a ata
+   nominal da votação.
+4. **Orçamento** — orçado → empenhado → liquidado → pago por exercício; contas
    que estouram a dotação ano após ano (subestimação na peça orçamentária, não
    imprevisto); diárias executadas acima do aprovado; e quanto de cada real
    arrecadado do profissional voltou como fiscalização.
-3. **Opacidade** — o que se esconde atrás de rótulos agregadores tipo "DIVERSOS
+5. **Opacidade** — o que se esconde atrás de rótulos agregadores tipo "DIVERSOS
    FUNCIONÁRIOS", decomposto pela conta contábil que vem na própria linha do
    pagamento.
-4. **Diárias e verbas a pessoas** — classificadas **só** pela conta contábil
+6. **Diárias e verbas a pessoas** — classificadas **só** pela conta contábil
    (nunca pelo histórico ou pelo nome do favorecido, que era a origem dos
    falsos positivos). Série anual com CAGR real, ranking por exercício,
    beneficiários persistentes, volume anual implausível, mais de 12 verbas num
    mês, acumulação de verbas no mesmo dia, e viagem comprada de PJ isolada como
    custeio.
-5. **Pessoal** — salário nominal do quadro + "renda invisível" (indenizações
+7. **Pessoal** — salário nominal do quadro + "renda invisível" (indenizações
    por pessoa); série histórica por conta contábil.
-6. **Casos concentrados** — entidades associativas que levam o nome do próprio
+8. **Casos concentrados** — entidades associativas que levam o nome do próprio
    conselho, obra/nova sede, contratos de valor excepcional, pessoa física
    prestando serviço.
-7. **Empenhos e pagamentos** — concentração por fornecedor (HHI sobre o mercado
+9. **Empenhos e pagamentos** — concentração por fornecedor (HHI sobre o mercado
    real, sem folha nem repasse legal), fracionamento aferido contra o limite de
    dispensa **vigente em cada exercício**, anatomia das anulações (empenho
    fantasma, corrida de dezembro, reempenho no ano seguinte), pago > empenhado.
-8. **Contratos e licitações** — aditivos de valor acima do limite legal
+10. **Contratos e licitações** — aditivos de valor acima do limite legal
    (separados dos de prazo), pagamento após vigência, contratação direta,
    cross-check Implanta × PNCP.
-9. **Rede de influência** — fornecedores compartilhados com Confea/Mútua/outros
+11. **Rede de influência** — fornecedores compartilhados com Confea/Mútua/outros
    CREAs, sócios homônimos de conselheiros e funcionários, **grupos econômicos
    de fato** (componente conexa fornecedor–sócio: empresas ligadas por uma
    pessoa não são concorrentes), nós de maior intermediação, convênios com
    teste de ciclo eleitoral e detecção de rateio por valor redondo idêntico.
-10. **Deliberações dos colegiados** — decisões com efeito financeiro extraídas
-    das atas pelo modelo local e cruzadas com os pagamentos.
-11. **Forense estatística** — Benford de 1 e 2 dígitos (limiares de Nigrini
+12. **Deliberações dos colegiados** — decisões com efeito financeiro extraídas
+   das atas pelo modelo local e cruzadas com os pagamentos.
+13. **Forense estatística** — Benford de 1 e 2 dígitos (limiares de Nigrini
     próprios de cada teste), represamento abaixo do limite de dispensa do ano,
     valores redondos, pares favorecido+valor repetidos, sazonalidade de
     dezembro, estornos.
-12. **Fornecedores** — situação cadastral não-ativa na Receita ponderada pela
+14. **Fornecedores** — situação cadastral não-ativa na Receita ponderada pela
     distância até o último pagamento, empresa criada às vésperas do primeiro
     pagamento.
-13. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
+15. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
     o que faltou, que exercícios ficaram fora e **qual análise está desligada
     por falta de qual fonte**. Poucos achados numa frente cuja fonte veio vazia
     não é sinal de regularidade.

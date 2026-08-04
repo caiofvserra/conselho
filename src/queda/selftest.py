@@ -173,11 +173,34 @@ def _staged() -> dict[str, pd.DataFrame]:
         {"nome": "ANA BEATRIZ SOUZA", "vinculo": "Efetivo", "renumeracaoMensal": "7.500,00"},
     ])
     quadro["remuneracao"] = [12000.0, 8000.0, 7500.0]
+    quadro["lotacao"] = ["Gabinete da Presidência",
+                         "Superintendência Administrativa",
+                         "Departamento de Fiscalização"]
     quadro["NOME_NORM"] = quadro["nome"].map(norm_nome)
     quadro["VINCULO_NORM"] = quadro["vinculo"].map(norm_nome)
+    quadro["LOTACAO_NORM"] = quadro["lotacao"].map(norm_nome)
 
-    mandatarios = pd.DataFrame([{"nomeMandatario": _CONSELHEIRO, "cargo": "Presidente"}])
+    # A ENTIDADE que indicou é o elo entre assento e interesse representado.
+    # Maioria patronal, e duas das indicantes também recebem repasse — a
+    # interseção que a frente de representação tem de isolar.
+    mandatarios = pd.DataFrame([
+        {"nomeMandatario": _CONSELHEIRO, "cargo": "Presidente",
+         "entidade": "SINDUSCON SP"},
+        {"nomeMandatario": "CARLOS EDUARDO PRADO", "cargo": "Conselheiro",
+         "entidade": "SINDICATO DA INDUSTRIA DA CONSTRUCAO DE CAMPINAS"},
+        {"nomeMandatario": "MARIA LUCIA FARIAS", "cargo": "Conselheira",
+         "entidade": "ASSOCIACAO COMERCIAL DE SANTOS"},
+        {"nomeMandatario": "ROBERTO ALVES LIMA", "cargo": "Conselheiro",
+         "entidade": "SINDUSCON SP"},
+        {"nomeMandatario": "JOANA PEREIRA DIAS", "cargo": "Conselheira",
+         "entidade": "SENGE SP"},
+        {"nomeMandatario": "PAULO ROBERTO NEVES", "cargo": "Conselheiro",
+         "entidade": "ASSOCIACAO DOS ENGENHEIROS X"},
+        {"nomeMandatario": "TEREZA CRISTINA MELO", "cargo": "Conselheira",
+         "entidade": "UNIVERSIDADE ESTADUAL PAULISTA"},
+    ])
     mandatarios["NOME_NORM"] = mandatarios["nomeMandatario"].map(norm_nome)
+    mandatarios["ENTIDADE_NORM"] = mandatarios["entidade"].map(norm_nome)
 
     empenhos = pd.DataFrame([
         {"_ano": 2024, "NOME_CONTA": "Diárias", "PESSOA": _CONSELHEIRO,
@@ -206,7 +229,12 @@ def _staged() -> dict[str, pd.DataFrame]:
          for a in (2019, 2020, 2021, 2022, 2023, 2024)] +
         [{"_ano": a, "BENEFICIARIO": f"SINDICATO DOS TECNICOS {i}",
           "VALOR_TOTAL": 90000.0}
-         for a in (2020, 2023) for i in range(1, 6)])
+         for a in (2020, 2023) for i in range(1, 6)] +
+        # patronal com assento no plenário e volume muito maior
+        [{"_ano": a, "BENEFICIARIO": "SINDUSCON SP", "VALOR_TOTAL": 800000.0}
+         for a in range(2018, 2026)] +
+        [{"_ano": a, "BENEFICIARIO": "ASSOCIACAO COMERCIAL DE SANTOS",
+          "VALOR_TOTAL": 250000.0} for a in range(2019, 2026)])
 
     # VALOR_ORCADO propositalmente subestimado nas diárias: é o padrão que a
     # frente de orçamento tem de flagrar (dotação figurativa, execução muito
@@ -238,19 +266,28 @@ def _staged() -> dict[str, pd.DataFrame]:
 
     # Fonte preferencial da frente "para onde vai o dinheiro": traz o CENTRO DE
     # CUSTO, única evidência do eixo FUNÇÃO (para que unidade se gastou).
+    # Camadas territoriais de um Crea: direção e administração na sede,
+    # superintendências regionais e UGIs no interior. A despesa de
+    # fiscalização é deliberadamente pequena e cresce menos que o total —
+    # é o padrão que a frente das superintendências tem de flagrar.
+    _CENTROS = (
+        # (centro de custo, conta, base, crescimento ao ano)
+        ("Gabinete da Presidência", "Diárias no País", 3.0e6, 1.09),
+        ("Câmaras Especializadas", "Jetons a Conselheiros", 4.0e6, 1.09),
+        ("Superintendência Administrativa", "Vencimentos e Salários", 22.0e6, 1.07),
+        ("Gerência de Tecnologia da Informação", "Serviços de Terceiros PJ", 8.0e6, 1.08),
+        ("Departamento de Fiscalização", "Vencimentos e Salários", 4.0e6, 1.01),
+        ("Departamento de Fiscalização", "Diárias no País", 5.0e6, 1.02),
+        ("Superintendência Regional de Campinas", "Vencimentos e Salários", 3.0e6, 1.03),
+        ("Superintendência Regional de Bauru", "Material de Consumo", 0.6e6, 1.03),
+        ("UGI Ribeirão Preto - Atendimento", "Vencimentos e Salários", 1.2e6, 1.03),
+        ("UGI Santos - Atendimento", "Locação de Imóveis", 0.9e6, 1.03),
+    )
     centro_custo = pd.DataFrame([
         {"_ano": a, "NOME_CENTRO_CUSTO": cc, "NOME_CONTA": conta,
-         "ANALITICO": True, "VALOR_TOTAL": base * (1.06 ** (a - 2013))}
+         "ANALITICO": True, "VALOR_TOTAL": base * (cresc ** (a - 2013))}
         for a in range(2013, 2026)
-        for cc, conta, base in (
-            ("Gabinete da Presidência", "Diárias no País", 3.0e6),
-            ("Câmaras Especializadas", "Jetons a Conselheiros", 4.0e6),
-            ("Departamento de Fiscalização", "Vencimentos e Salários", 9.0e6),
-            ("Departamento de Fiscalização", "Diárias no País", 1.2e6),
-            ("Superintendência Administrativa", "Vencimentos e Salários", 22.0e6),
-            ("Gerência de Tecnologia da Informação", "Serviços de Terceiros PJ", 8.0e6),
-            ("UGI Campinas - Atendimento", "Material de Consumo", 1.5e6),
-        )])
+        for cc, conta, base, cresc in _CENTROS])
 
     atas = pd.DataFrame([
         {"_ano": a, "NUMERO": f"{a}/0{i}", "COLEGIADO": "Plenário",
@@ -316,6 +353,20 @@ ESPERADOS = [
     "finalistica-matriz",              # natureza × função (dois eixos)
     "finalistica-verbas-politicas",    # diárias/jetons na direção e no plenário
     "finalistica-centros-custo",
+    # superintendências: onde o dinheiro fica × onde ele chega
+    "super-central-vs-territorio",
+    "super-fiscalizacao-efetiva",
+    "super-verba-supera-salario",      # verba > folha na própria fiscalização
+    "super-ranking-unidades",
+    "super-unidade-sem-fiscalizacao",
+    "super-tendencia-divergente",      # total cresce mais que a atividade-fim
+    "super-quadro-por-camada",
+    # representação: quem ocupa o plenário e para onde vai o repasse
+    "repr-composicao",
+    "repr-dinheiro-por-interesse",
+    "repr-ranking-entidades",
+    "repr-assento-e-dinheiro",         # entidade com assento que recebe
+    "repr-concentracao",
     # orçamento
     "orcamento-execucao",
     "orcamento-estouro-conta",         # conta que estoura a dotação todo ano
@@ -354,12 +405,39 @@ ESPERADOS = [
 ]
 
 
+# Alguns achados precisam ser conferidos pelo VALOR, não só pela presença: o
+# filtro de entidade coletiva chegou a excluir o SINDUSCON — a maior
+# beneficiária com assento — e o cenário continuou "detectado", porque o
+# achado disparava com as duas entidades restantes.
+def _confere_metricas(achados) -> list[str]:
+    por_id = {f.id: f for f in achados}
+    erros: list[str] = []
+
+    def exige(fid, chave, esperado, tol=0.01):
+        f = por_id.get(fid)
+        if f is None:
+            return
+        obtido = f.metricas.get(chave)
+        if obtido is None:
+            erros.append(f"{fid}.{chave} ausente")
+        elif abs(float(obtido) - esperado) > abs(esperado) * tol:
+            erros.append(f"{fid}.{chave} = {obtido}, esperado ~{esperado}")
+
+    # SINDUSCON (800k x 8 anos) + Assoc. Comercial (250k x 7) + Assoc. Eng. (90k x 6)
+    exige("repr-assento-e-dinheiro", "valor", 800_000 * 8 + 250_000 * 7 + 90_000 * 6)
+    exige("repr-assento-e-dinheiro", "entidades", 3)
+    # patronal = SINDUSCON + Assoc. Comercial
+    exige("repr-dinheiro-por-interesse", "patronal", 800_000 * 8 + 250_000 * 7)
+    return erros
+
+
 def run() -> int:
     common._FICHAS = dict(_FICHAS_FIXTURE)   # evita rede no selftest
     staged = _staged()
     achados = run_all(staged)
     ids = {f.id for f in achados}
     faltando = [e for e in ESPERADOS if e not in ids]
+    metricas_erradas = _confere_metricas(achados)
     report.gerar(achados, staged)
 
     print(f"selftest: {len(achados)} achados gerados")
@@ -367,6 +445,11 @@ def run() -> int:
         print(f"  [{f.gravidade:5}] {f.id}: {f.titulo}")
     if faltando:
         print(f"\nFALHOU — checks esperados ausentes: {faltando}")
+        return 1
+    if metricas_erradas:
+        print("\nFALHOU — achados presentes mas com valor errado:")
+        for e in metricas_erradas:
+            print(f"  {e}")
         return 1
     html = (config.OUTPUT_DIR / "report.html")
     assert html.exists() and html.stat().st_size > 100_000, "report.html não gerado"

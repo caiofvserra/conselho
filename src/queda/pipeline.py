@@ -323,43 +323,63 @@ def stage_orcamento(desde, ate):
     return _salvar("comparativo_receita", dfr)
 
 
-def stage_quadro_pessoal():
-    """Quadro de pessoal: tenta Dados Abertos e cai para Implanta QuadrosPessoas."""
+def _primeira_coluna(df: pd.DataFrame, *nomes: str) -> pd.Series:
+    """Primeira coluna existente entre as candidatas — os nomes de campo mudam
+    entre Dados Abertos e Implanta, e entre versões do portal."""
+    for n in nomes:
+        if n in df.columns:
+            return df[n].fillna("")
+    return pd.Series([""] * len(df), index=df.index)
+
+
+def stage_quadro_pessoal(ate=None):
+    """Quadro de pessoal: Dados Abertos e, se falhar, Implanta QuadrosPessoas.
+
+    O Implanta responde mesmo quando o host de Dados Abertos está barrado — é
+    o caminho que mantém viva a frente de pessoal.
+    """
     rows = clients.dados_abertos("quadro-colaboradores")
     df = pd.DataFrame(rows)
     if df.empty:
-        pessoas = []
-        for quadro in clients.implanta("QuadrosPessoas"):
-            for p in quadro.get("PESSOAS") or []:
-                p["TITULO_QUADRO"] = quadro.get("TITULO")
-                pessoas.append(p)
-        df = pd.DataFrame(pessoas)
-        ren = {"NOME": "nome", "CPF": "cpf", "NOME_CARGO": "nomeCargo",
-               "VINCULO": "vinculo", "REMUNERACAO_MENSAL": "renumeracaoMensal",
-               "SITUACAO": "situacao", "DATA_ADMISSAO": "dataAdmissao",
-               "NOME_LOTACAO": "nomeLotacao"}
-        df = df.rename(columns=ren)
+        linhas, _ = clients.implanta_variantes("QuadrosPessoas", ate)
+        df = pd.DataFrame(linhas)
     if not df.empty:
-        df["remuneracao"] = coluna(df, "renumeracaoMensal", 0).map(parse_valor)
-        df["NOME_NORM"] = coluna(df, "nome").map(norm_nome)
-        df["VINCULO_NORM"] = coluna(df, "vinculo").map(norm_nome)
+        df["nome"] = _primeira_coluna(df, "nome", "NOME", "NOME_PESSOA")
+        df["vinculo"] = _primeira_coluna(df, "vinculo", "VINCULO", "TIPO_VINCULO",
+                                         "_grupo_TITULO")
+        df["cargo"] = _primeira_coluna(df, "nomeCargo", "NOME_CARGO", "CARGO")
+        df["lotacao"] = _primeira_coluna(df, "nomeLotacao", "NOME_LOTACAO",
+                                         "LOTACAO", "UNIDADE")
+        df["remuneracao"] = _primeira_coluna(
+            df, "renumeracaoMensal", "remuneracaoMensal", "REMUNERACAO_MENSAL",
+            "REMUNERACAO").map(parse_valor)
+        df["NOME_NORM"] = df["nome"].map(norm_nome)
+        df["VINCULO_NORM"] = df["vinculo"].map(norm_nome)
+        df["LOTACAO_NORM"] = df["lotacao"].map(norm_nome)
     return _salvar("quadro_pessoal", df)
 
 
-def stage_mandatarios():
+def stage_mandatarios(ate=None):
+    """Conselheiros/mandatários — quem decide e por qual entidade tem assento.
+
+    A ENTIDADE que indicou o conselheiro é o elo entre o assento e o interesse
+    representado; sem ela não há como ligar composição do plenário a
+    beneficiário de repasse.
+    """
     rows = clients.dados_abertos("mandatarios")
     df = pd.DataFrame(rows)
     if df.empty:
-        pessoas = []
-        for grupo in clients.implanta("Conselheiros"):
-            for p in grupo.get("CONSELHEIROS") or []:
-                p["TITULO"] = grupo.get("TITULO")
-                pessoas.append(p)
-        df = pd.DataFrame(pessoas)
-        df = df.rename(columns={"NOME_MANDATARIO": "nomeMandatario", "CPF": "cpfMandatario",
-                                "CARGO": "cargo", "DATA_POSSE": "dataPosse"})
+        linhas, _ = clients.implanta_variantes("Conselheiros", ate)
+        df = pd.DataFrame(linhas)
     if not df.empty:
-        df["NOME_NORM"] = coluna(df, "nomeMandatario").map(norm_nome)
+        df["nome"] = _primeira_coluna(df, "nomeMandatario", "NOME_MANDATARIO",
+                                      "NOME_CONSELHEIRO", "NOME")
+        df["cargo"] = _primeira_coluna(df, "cargo", "CARGO", "_grupo_TITULO")
+        df["entidade"] = _primeira_coluna(
+            df, "entidade", "ENTIDADE", "NOME_ENTIDADE", "ENTIDADE_CLASSE",
+            "INSTITUICAO", "NOME_INSTITUICAO", "REPRESENTACAO", "_grupo_TITULO")
+        df["NOME_NORM"] = df["nome"].map(norm_nome)
+        df["ENTIDADE_NORM"] = df["entidade"].map(norm_nome)
     return _salvar("mandatarios", df)
 
 
@@ -492,8 +512,8 @@ def build_staged(desde: int | None, ate: int, *,
         ("processos_itens", lambda: stage_processos_compras(desde, ate)),
         ("atas", lambda: stage_atas(desde, ate)),
         ("comparativo_receita", lambda: stage_orcamento(desde, ate)),
-        ("quadro_pessoal", stage_quadro_pessoal),
-        ("mandatarios", stage_mandatarios),
+        ("quadro_pessoal", lambda: stage_quadro_pessoal(ate)),
+        ("mandatarios", lambda: stage_mandatarios(ate)),
         ("indenizacoes_endpoint", lambda: stage_indenizacoes(desde, ate)),
         ("pncp_contratos", lambda: stage_pncp(desde, ate)),
     ]
