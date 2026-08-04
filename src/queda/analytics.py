@@ -51,8 +51,16 @@ def ranking_anual(df: pd.DataFrame, entidade: str, valor: str,
         return pd.DataFrame()
     d = df.dropna(subset=[ano]).copy()
     d[ano] = pd.to_numeric(d[ano], errors="coerce").astype("Int64")
-    g = (d.groupby([ano, entidade])[valor]
-         .agg(total="sum", operacoes="size").reset_index())
+    # Somar líquido e contar bruto engana: um fornecedor com 10 pagamentos e
+    # 4 estornos aparecia com "14 operações" e o total já compensado. As duas
+    # coisas passam a ser visíveis lado a lado.
+    d["_estorno"] = pd.to_numeric(d[valor], errors="coerce").fillna(0) < 0
+    g = (d.groupby([ano, entidade])
+         .agg(total=(valor, "sum"),
+              operacoes=(valor, "size"),
+              estornos=("_estorno", "sum"),
+              valor_estornado=(valor, lambda s: float(s[s < 0].sum())))
+         .reset_index())
     g["posicao"] = g.groupby(ano)["total"].rank(ascending=False, method="first")
     g = g[g["posicao"] <= top].sort_values([ano, "total"], ascending=[True, False])
     return g.astype({"posicao": int})
@@ -185,22 +193,74 @@ def fatores_ipca(base_ano: int) -> dict[int, float]:
 
 
 # ------------------------------------------------------------------ forense
+# Benford descreve grandezas que variam por ordens de magnitude — preço de
+# mercado, receita, população. Ela NÃO descreve tarifa: uma diária de valor
+# fixo repetida 117 mil vezes produz sempre os mesmos dígitos, e o teste
+# reprova a base inteira sem que exista qualquer manipulação. Na rodada real,
+# 75,6% dos lançamentos eram diária, locomoção e jeton, e o par "64" sozinho
+# respondia por 15,75% contra 0,673% esperados.
+# Dois critérios, porque um só erra: em Benford o par mais frequente ("10")
+# já vale 4,1% legitimamente, então um corte absoluto sozinho reprovaria base
+# conforme. Exigimos share alto E muito acima do esperado para aquele par.
+LIMITE_DOMINANCIA = 0.05
+LIMITE_EXCESSO = 3.0
+
+
+def _valor_dominante(v: pd.Series) -> dict | None:
+    """Detecta base dominada por valor tabelado, onde Benford não se aplica."""
+    if v.empty:
+        return None
+    d2 = v.map(lambda x: str(int(x))[:2])
+    top = d2.value_counts(normalize=True)
+    par = str(top.index[0])
+    share = float(top.iloc[0])
+    try:
+        esperado = math.log10(1 + 1 / int(par))
+    except (ValueError, ZeroDivisionError):
+        return None
+    if share <= LIMITE_DOMINANCIA or share < LIMITE_EXCESSO * esperado:
+        return None
+    frequentes = v.value_counts().head(3)
+    return {
+        "motivo": (f"base dominada por valor tabelado: os dígitos '{par}' "
+                   f"aparecem em {100 * share:.1f}% dos "
+                   "lançamentos (esperado por Benford: "
+                   f"{100 * esperado:.2f}%, ou seja {share / esperado:.0f}x "
+                   "mais). Benford "
+                   "descreve preço que varia por ordens de magnitude, não "
+                   "tarifa repetida — o teste não se aplica a este universo."),
+        "digitos_dominantes": par,
+        "share_dominante": round(share, 4),
+        "excesso_sobre_esperado": round(share / esperado, 1),
+        "valores_mais_repetidos": {str(k): int(n) for k, n in frequentes.items()},
+    }
+
+
 def benford_primeiro_digito(valores: pd.Series) -> dict:
     """Conformidade com a Lei de Benford (1º dígito).
 
     Usa o MAD de Nigrini: <0,006 conforme; 0,006–0,012 aceitável;
     0,012–0,015 marginal; >0,015 não conforme.
     """
-    v = pd.to_numeric(valores, errors="coerce").dropna().abs()
+    # estorno não é pagamento: `.abs()` transformava devolução em despesa e
+    # duplicava o dígito. Negativos saem.
+    v = pd.to_numeric(valores, errors="coerce").dropna()
     v = v[v >= 10]                                  # valores pequenos distorcem
     if len(v) < 300:
         return {"n": int(len(v)), "aplicavel": False,
                 "motivo": "amostra menor que 300 registros"}
+    dominante = _valor_dominante(v)
+    if dominante:
+        return {"n": int(len(v)), "aplicavel": False, **dominante}
     d1 = v.map(lambda x: int(str(int(x))[0]))
     obs = d1.value_counts(normalize=True).reindex(range(1, 10), fill_value=0.0)
     esp = pd.Series({d: math.log10(1 + 1 / d) for d in range(1, 10)})
     mad = float((obs - esp).abs().mean())
-    qui = float(((obs - esp) ** 2 / esp).sum() * len(v))
+    # O qui-quadrado cresce LINEARMENTE com n: a n=493 mil ele reprova
+    # qualquer base real, e o número não informa nada. Cramér's V é o mesmo
+    # desvio normalizado pelo tamanho da amostra, comparável entre rodadas.
+    qui = float(((obs - esp) ** 2 / esp).sum())
+    cramer = float(math.sqrt(qui / 8))       # 8 = graus de liberdade (9-1)
     if mad < 0.006:
         conform = "conforme"
     elif mad < 0.012:
@@ -211,7 +271,7 @@ def benford_primeiro_digito(valores: pd.Series) -> dict:
         conform = "nao_conforme"
     return {
         "n": int(len(v)), "aplicavel": True, "mad": round(mad, 5),
-        "qui_quadrado": round(qui, 2), "conformidade": conform,
+        "cramer_v": round(cramer, 4), "conformidade": conform,
         "observado": {int(d): round(float(obs[d]), 4) for d in range(1, 10)},
         "esperado": {int(d): round(float(esp[d]), 4) for d in range(1, 10)},
         "maior_desvio_digito": int((obs - esp).abs().idxmax()),
@@ -227,11 +287,14 @@ def benford_dois_digitos(valores: pd.Series) -> dict:
     deste teste (0,0012 / 0,0018 / 0,0022); reaproveitar os de 1 dígito
     reprovaria qualquer base.
     """
-    v = pd.to_numeric(valores, errors="coerce").dropna().abs()
+    v = pd.to_numeric(valores, errors="coerce").dropna()
     v = v[v >= 10]
     if len(v) < 1000:
         return {"n": int(len(v)), "aplicavel": False,
                 "motivo": "amostra menor que 1.000 registros"}
+    dominante = _valor_dominante(v)
+    if dominante:
+        return {"n": int(len(v)), "aplicavel": False, **dominante}
     d2 = v.map(lambda x: int(str(int(x))[:2]))
     obs = d2.value_counts(normalize=True).reindex(range(10, 100), fill_value=0.0)
     esp = pd.Series({d: math.log10(1 + 1 / d) for d in range(10, 100)})
@@ -265,11 +328,24 @@ def bunching(valores: pd.Series, limite: float, faixa: float = 0.10) -> dict:
     baixo = v[(v >= limite * (1 - faixa)) & (v < limite)]
     alto = v[(v >= limite) & (v < limite * (1 + faixa))]
     n_alto = max(len(alto), 1)
-    return {
+    out = {
         "limite": limite, "n_abaixo": int(len(baixo)), "n_acima": int(len(alto)),
         "razao": round(len(baixo) / n_alto, 2),
         "valor_abaixo": round(float(baixo.sum()), 2),
+        "valores_distintos_abaixo": int(baixo.nunique()),
+        "conclusivo": True,
     }
+    # Degenerescência: uma parcela mensal de contrato repetida cai sempre na
+    # mesma faixa e simula represamento. No Crea-SP era a parcela de convênio
+    # de R$ 17.459,54 (R$ 209.514,48 ÷ 12) produzindo "6,9x" em 2019 — que
+    # sumia sozinho quando o teto mudou para R$ 50.000 em 2021.
+    if len(baixo) >= 10:
+        dominante = baixo.value_counts(normalize=True)
+        if float(dominante.iloc[0]) > 0.20:
+            out["conclusivo"] = False
+            out["valor_repetido"] = float(dominante.index[0])
+            out["share_valor_repetido"] = round(float(dominante.iloc[0]), 3)
+    return out
 
 
 def zscore_robusto(serie: pd.Series) -> pd.Series:

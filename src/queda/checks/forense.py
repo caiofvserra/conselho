@@ -10,6 +10,7 @@ import pandas as pd
 
 from .. import analytics as A
 from .. import config
+from .. import taxonomia as T
 from ..findings import Finding
 from ..utils import fmt_brl
 from .common import df
@@ -27,10 +28,35 @@ def run(staged) -> list[Finding]:
         pg["_ano"] = pd.to_datetime(pg["DATA"], errors="coerce").dt.year
 
     # ------------------------------------------------ 1. Lei de Benford
-    geral = A.benford_primeiro_digito(pg["VALOR"])
+    #
+    # Benford descreve preço que varia por ordens de magnitude. Diária, jeton e
+    # locomoção têm valor TABELADO e repetido dezenas de milhares de vezes —
+    # numa base dominada por eles o teste reprova tudo sem que exista
+    # manipulação. Por isso o universo é recortado: só o que se compra a preço
+    # de mercado. A base cheia entra como achado à parte, rotulada.
+    conta_txt = pg.get("CONTA_EMPENHO", pd.Series("", index=pg.index)).fillna("")
+    mapa_nat = {c: T.classificar_texto(c) for c in conta_txt.unique()}
+    natureza = conta_txt.map(mapa_nat)
+    mercado = pg[~natureza.isin(["VERBAS_PESSOAIS", "REMUNERACAO",
+                                 "TRANSFERENCIAS"])]
+    cheio = A.benford_primeiro_digito(pg["VALOR"])
+    if not cheio.get("aplicavel") and cheio.get("digitos_dominantes"):
+        achados.append(Finding(
+            id="forense-benford-nao-aplicavel", frente=FRENTE, gravidade="info",
+            titulo=("Benford não se aplica ao conjunto completo de pagamentos "
+                    f"— dominado pelos dígitos '{cheio['digitos_dominantes']}'"),
+            descricao=(
+                "Registrado para que a ausência do teste não seja lida como "
+                "aprovação. " + cheio.get("motivo", "") + " O teste é aplicado "
+                "abaixo apenas ao universo em que ele vale: despesa comprada a "
+                "preço de mercado, sem folha, verba indenizatória nem repasse."),
+            metricas=cheio,
+        ))
+    pg_benford = mercado if len(mercado) >= 300 else pg
+    geral = A.benford_primeiro_digito(pg_benford["VALOR"])
     if geral.get("aplicavel"):
         linhas = []
-        for ano, g in pg.groupby("_ano"):
+        for ano, g in pg_benford.groupby("_ano"):
             r = A.benford_primeiro_digito(g["VALOR"])
             if r.get("aplicavel"):
                 linhas.append({"_ano": int(ano), "n": r["n"], "mad": r["mad"],
@@ -69,7 +95,7 @@ def run(staged) -> list[Finding]:
         ))
 
     # ------------------------------------------------ 1b. Benford 2 dígitos
-    d2 = A.benford_dois_digitos(pg["VALOR"])
+    d2 = A.benford_dois_digitos(pg_benford["VALOR"])
     if d2.get("aplicavel"):
         excessos = pd.DataFrame({
             "excesso_sobre_o_esperado": d2["maiores_excessos"]}).reset_index(
@@ -113,8 +139,13 @@ def run(staged) -> list[Finding]:
         faixas.append(g[(g["VALOR"] >= limite * 0.9) & (g["VALOR"] < limite)])
     tabela = pd.DataFrame(por_ano_b)
     faixa = pd.concat(faixas) if faixas else pd.DataFrame()
-    agudos = (tabela[(tabela["n_abaixo"] >= 20) & (tabela["razao"] >= 2)]
+    # exercício cuja faixa é dominada por um valor único não conta: é parcela
+    # de contrato caindo sempre no mesmo ponto, não valor ajustado ao teto
+    agudos = (tabela[(tabela["n_abaixo"] >= 20) & (tabela["razao"] >= 2) &
+                     (tabela["conclusivo"].astype(bool))]
               if not tabela.empty else pd.DataFrame())
+    inconclusivos = (tabela[~tabela["conclusivo"].astype(bool)]
+                     if not tabela.empty else pd.DataFrame())
     if not agudos.empty:
         n_abaixo = int(agudos["n_abaixo"].sum())
         pior = agudos.loc[agudos["razao"].idxmax()]
@@ -129,7 +160,11 @@ def run(staged) -> list[Finding]:
                 f"{int(agudos['n_acima'].sum())} na faixa simétrica acima. Numa "
                 "distribuição natural de preços as duas faixas seriam parecidas; "
                 "a assimetria indica valores ajustados para não cruzar o limite "
-                "que obrigaria licitação. A coluna `limite` mostra o teto usado "
+                "que obrigaria licitação. Exercícios em que um único valor "
+                "responde por mais de 20% da faixa são marcados como "
+                "inconclusivos e ficam de fora: são parcela de contrato "
+                "caindo sempre no mesmo ponto, não valor ajustado ao teto. "
+                "A coluna `limite` mostra o teto usado "
                 f"em cada ano (em {int(pior['_ano'])}: "
                 f"{fmt_brl(float(pior['limite']))})."),
             evidencia=tabela[["_ano", "limite", "n_abaixo", "n_acima", "razao",
@@ -142,7 +177,10 @@ def run(staged) -> list[Finding]:
                                           top=10) if not faixa.empty
                           else pd.DataFrame()),
             metricas={"exercicios_agudos": agudos["_ano"].astype(int).tolist(),
-                      "n_abaixo_total": n_abaixo},
+                      "n_abaixo_total": n_abaixo,
+                      "exercicios_inconclusivos":
+                          inconclusivos["_ano"].astype(int).tolist()
+                          if not inconclusivos.empty else []},
             base_legal="Lei 14.133/2021, art. 29 e art. 75 (e Lei 8.666/1993, "
                        "art. 23, §5º, nos exercícios anteriores) — vedado o "
                        "fracionamento para fugir da modalidade licitatória.",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(os.environ.get("QUEDA_ROOT", Path(__file__).resolve().parents[2]))
@@ -20,6 +21,12 @@ STAGED_DIR = DATA_DIR / "staged"
 CACHE_DIR = DATA_DIR / "cache"
 OUTPUT_DIR = Path(os.environ.get("QUEDA_OUTPUT_DIR") or (ROOT / "output"))
 ASSETS_DIR = ROOT / "assets"          # vendorizado no repo, nunca no Drive
+
+# Identificador da execução. Cada rodada grava em `output/rodadas/<RUN_ID>/`,
+# de modo que corrigir um bug e rodar de novo NÃO apaga o retrato anterior —
+# dá para comparar o que mudou. Pode ser fixado por variável de ambiente para
+# reproduzir uma rodada específica.
+RUN_ID = os.environ.get("QUEDA_RUN_ID") or datetime.now().strftime("%Y-%m-%d_%H%M")
 
 
 def onde_estao_os_dados() -> str:

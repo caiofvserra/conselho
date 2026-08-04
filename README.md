@@ -29,7 +29,31 @@ python main.py selftest                      # valida o pipeline sem rede (fixtu
 - `--desde auto` sonda anos retroativamente até a API esvaziar (meta: alcançar
   exercícios pré-2016 para a série histórica de diárias e pessoal).
 - Saída: `output/report.html` (dashboard autocontido) + `output/csv/*.csv`
-  (evidência bruta de cada achado).
+  (evidência completa de cada achado — o HTML mostra uma amostra, o CSV traz
+  tudo).
+
+### Cada rodada fica guardada
+
+Rodar de novo **não apaga o relatório anterior**. Os dados coletados são
+reaproveitados; a saída é versionada:
+
+```
+output/
+├── index.html              histórico de todas as rodadas
+├── report.html             a mais recente, para abrir sem procurar
+├── csv/                    evidência da mais recente
+└── rodadas/
+    ├── 2026-08-04_1930/    report.html + csv/ + achados.json
+    └── 2026-08-05_1015/
+```
+
+O relatório novo abre com **o que mudou** desde a rodada anterior: achados que
+apareceram, achados que sumiram e valores que se moveram. É a pergunta mais
+útil depois da segunda execução, e ela só existe porque nada é sobrescrito —
+inclusive quando a mudança vem de uma correção de bug, e não do órgão.
+
+`QUEDA_RUN_ID` fixa o identificador da rodada, se você quiser reproduzir uma
+execução específica.
 - Cache de rede em `data/raw/` — reexecuções não repetem chamadas. Se a coleta
   parar (rate-limit, queda de sessão), rode de novo com `--retomar`: ele pula
   as etapas já concluídas e continua de onde parou.

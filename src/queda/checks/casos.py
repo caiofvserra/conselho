@@ -13,8 +13,8 @@ import pandas as pd
 
 from .. import analytics as A
 from ..findings import Finding
-from ..utils import fmt_brl, norm_nome
-from .common import df, fornecedores_mercado
+from ..utils import coluna, fmt_brl, norm_nome
+from .common import df, fichas_cnpj, fornecedores_mercado
 
 FRENTE = "Casos concentrados"
 
@@ -23,9 +23,35 @@ FRENTE = "Casos concentrados"
 # clássico de autocontratação em conselhos profissionais.
 RX_ENTIDADE_CASA = re.compile(
     r"\bCREA\b|\bCONFEA\b|CONSELHO REGIONAL DE ENGENHARIA", re.IGNORECASE)
+# Abreviações reais do portal. "ASSOC. DOS PROCURADORES" e "INST. PAULISTA"
+# não casavam a forma por extenso, e a entidade de R$ 41,5 mi ficava de fora.
 RX_ASSOCIATIVA = re.compile(
-    r"ASSOCIACAO|SINDICATO|INSTITUTO|FUNDACAO|COOPERATIVA|CLUBE|CAIXA",
+    r"ASSOCIACAO|ASSOC\.?\b|SINDICATO|SIND\.?\b|INSTITUTO|INST\.?\b|"
+    r"FUNDACAO|FUND\.?\b|COOPERATIVA|CLUBE|CAIXA|SOCIEDADE|ENTIDADE|UNIAO",
     re.IGNORECASE)
+
+# Quem é da "casa" pela função, mesmo sem o nome do conselho no rótulo: são os
+# cargos que só existem DENTRO do órgão.
+RX_QUADRO_PROPRIO = re.compile(
+    r"PROCURADOR|ADVOGADO(S)? PUBLICO|CONSELHEIR|INSPETOR|SERVIDOR|"
+    r"EMPREGADO(S)? PUBLICO|FUNCIONARIO", re.IGNORECASE)
+
+
+def _nomes_resolvidos(pg, staged) -> "pd.Series":
+    """Razão social da Receita quando houver, senão o rótulo do portal.
+
+    O portal trunca o favorecido em ~60 caracteres, e a truncagem come
+    justamente o sufixo que identifica o conselho: "ASSOCIACAO DOS
+    PROCURADORES, ADVOGADOS E CONSULTORES JURIDICOS" perde o "DO CREA-SP".
+    Testar o regex contra o nome truncado escondia R$ 41,5 mi.
+    """
+    rotulo = coluna(pg, "NOME_RAZAO_SOCIAL").fillna("").astype(str)
+    fichas = fichas_cnpj(staged)
+    if not fichas or "FAVORECIDO_CNPJ" not in pg.columns:
+        return rotulo
+    razoes = {c: (f.get("razao_social") or "") for c, f in fichas.items()}
+    receita = pg["FAVORECIDO_CNPJ"].map(razoes).fillna("")
+    return receita.where(receita.str.len() > 0, rotulo)
 
 RX_OBRA = re.compile(
     r"\bobra\b|\bconstrucao\b|\bnova sede\b|\bsede\b|\breforma\b|"
@@ -40,9 +66,15 @@ def run(staged) -> list[Finding]:
 
     # ------------------------------------------------ 1. entidade "da casa"
     if not pg.empty and "FAVORECIDO_NORM" in pg:
-        nomes = pg["FAVORECIDO_NORM"].fillna("")
-        casa = pg[nomes.str.contains(RX_ENTIDADE_CASA, regex=True, na=False)
-                  & nomes.str.contains(RX_ASSOCIATIVA, regex=True, na=False)]
+        # nome do portal OU razão social da Receita — o que for mais completo
+        nomes = (pg["FAVORECIDO_NORM"].fillna("").astype(str) + " | " +
+                 _nomes_resolvidos(pg, staged).map(norm_nome))
+        associativa = nomes.str.contains(RX_ASSOCIATIVA, regex=True, na=False)
+        # "da casa" por duas vias: o nome do conselho aparece, OU a entidade é
+        # formada por quem só existe dentro dele (procuradores, conselheiros)
+        da_casa = (nomes.str.contains(RX_ENTIDADE_CASA, regex=True, na=False) |
+                   nomes.str.contains(RX_QUADRO_PROPRIO, regex=True, na=False))
+        casa = pg[associativa & da_casa]
         if not casa.empty:
             total = float(casa["VALOR"].sum())
             por_ent = (casa.groupby("FAVORECIDO_NORM")["VALOR"]
@@ -126,8 +158,14 @@ def run(staged) -> list[Finding]:
     if not ctr.empty and "VALOR" in ctr:
         v = pd.to_numeric(ctr["VALOR"], errors="coerce").fillna(0)
         if (v > 0).sum() >= 10:
-            z = A.zscore_robusto(v[v > 0])
-            outliers = ctr.loc[z[z > 8].index]
+            # Carteira de contratos é log-normal: o z-robusto sobre o valor
+            # BRUTO sinalizava os 18% maiores (170 de 965), o que não
+            # seleciona nada. Em escala log a distribuição fica simétrica e o
+            # corte volta a significar "fora do padrão".
+            import numpy as np
+            z = A.zscore_robusto(pd.Series(np.log10(v[v > 0].values),
+                                           index=v[v > 0].index))
+            outliers = ctr.loc[z[z > 3.5].index]
             if not outliers.empty:
                 cols = [c for c in ("NUMERO_CONTRATO", "CONTRATADA", "VALOR",
                                     "OBJETO", "DATA_INICIO_VIGENCIA",
@@ -138,16 +176,50 @@ def run(staged) -> list[Finding]:
                     titulo=f"{len(outliers)} contrato(s) com valor muito acima do "
                            "padrão da carteira",
                     descricao=(
-                        "Contratos cujo valor está a mais de 8 desvios (medida "
-                        "robusta por mediana/MAD) do típico da carteira. Ou são os "
-                        "grandes projetos do órgão — que merecem acompanhamento "
-                        "individual — ou erro de digitação no portal, que também é "
-                        "achado de transparência. Verifique caso a caso."),
+                        "Contratos a mais de 3,5 desvios robustos do típico da "
+                        "carteira, medidos em escala logarítmica — que é a "
+                        "escala natural de valor de contrato. São os grandes "
+                        "projetos do órgão, que merecem acompanhamento "
+                        "individual, ou erro de cadastro no portal, que também "
+                        "é achado de transparência. Verifique caso a caso."),
                     evidencia=outliers[cols].sort_values("VALOR", ascending=False),
                     como_verificar="Comparar o valor publicado no portal com o "
                                    "extrato do contrato no PNCP e com o total "
                                    "efetivamente pago à contratada.",
                 ))
+
+        # ---- concentração da carteira: o que outlier estatístico não mostra
+        vv = v[v > 0].sort_values(ascending=False)
+        if len(vv) >= 20:
+            total_c = float(vv.sum())
+            acum = vv.cumsum() / total_c
+            n_metade = int((acum <= 0.5).sum()) + 1
+            maiores = ctr.loc[vv.head(n_metade).index]
+            cols_c = [c for c in ("NUMERO_CONTRATO", "CONTRATADA", "VALOR",
+                                  "OBJETO", "DATA_INICIO_VIGENCIA")
+                      if c in maiores]
+            ev = maiores[cols_c].copy()
+            ev["share_da_carteira_pct"] = (100 * ev["VALOR"] / total_c).round(2)
+            achados.append(Finding(
+                id="casos-concentracao-carteira", frente=FRENTE,
+                gravidade="media" if n_metade <= len(vv) * 0.05 else "info",
+                titulo=(f"{n_metade} de {len(vv)} contratos concentram metade "
+                        f"da carteira ({fmt_brl(total_c)})"),
+                descricao=(
+                    "Quantos contratos bastam para chegar a 50% do valor "
+                    "contratado. É a pergunta que o teste de outlier não "
+                    "responde: não interessa se um contrato é estatisticamente "
+                    "atípico, interessa onde está o dinheiro. Poucos contratos "
+                    "concentrando a carteira significa que auditar meia dúzia "
+                    "de processos cobre metade do risco."),
+                evidencia=ev.sort_values("VALOR", ascending=False),
+                metricas={"contratos_ate_50pct": n_metade,
+                          "universo": int(len(vv)),
+                          "carteira": round(total_c, 2)},
+                como_verificar="Pedir o processo completo dos contratos "
+                               "listados — é o menor conjunto que cobre a "
+                               "maior parte do valor.",
+            ))
 
     # ------------------------------------------------ 4. pessoa física fornecedora
     if not pg.empty and "TIPO_PESSOA" in pg:

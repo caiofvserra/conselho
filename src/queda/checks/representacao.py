@@ -52,15 +52,23 @@ INTERESSES: list[tuple[str, str]] = [
      r"associacao brasileira (da |de )?industria|\bapeop\b|"
      r"sindicato (da |das )?(construcao|habitacao|empresas)"),
 
+    # Conselhos profissionais são pares institucionais, não entidades de
+    # classe: CFT, CFTA e CAU disputam atribuição COM o Crea.
+    ("CONSELHO_PROFISSIONAL",
+     r"conselho federal dos tecnicos|conselho regional dos tecnicos|"
+     r"\bcft\b|\bcfta\b|\bcau\b|conselho de arquitetura"),
+
+    # Padrões com LACUNA: "ASSOCIACAO PAULISTA DOS ENGENHEIROS" e "INSTITUTO
+    # BRASILEIRO DE AVALIACOES E PERICIAS DE ENGENHARIA" não casavam as
+    # colocações rígidas e caíam em "Outras".
     ("PROFISSIONAL",
-     r"\bsenge\b|sindicato dos engenheiros|sindicato dos tecnicos|"
-     r"sindicato dos arquitetos|sindicato dos agronomos|"
-     r"associacao dos engenheiros|associacao de engenharia|"
-     r"associacao dos tecnicos|associacao dos agronomos|"
-     r"associacao (dos |de )?(geologos|geografos|meteorolog)|"
+     r"\bsenge\b|\bseesp\b|\bsintesp\b|\bibape\b|\bipeea\b|"
+     r"(sindicato|associacao|federacao|instituto|clube|uniao)"
+     r"(\s+\S+){0,4}\s+(de|dos|das|do|da)\s+"
+     r"(engenh|arquitet|agronom|geolog|geograf|meteorolog|tecnolog|tecnic|"
+     r"avaliac|pericia|profissiona)|"
      r"instituto de engenharia|clube de engenharia|\baea\b|"
-     r"associacao profissional|sindicato dos profissionais|"
-     r"\bfaeasp\b|\bfisenge\b|federacao dos engenheiros"),
+     r"\bfaeasp\b|\bfisenge\b"),
 
     ("SISTEMA",
      r"\bconfea\b|\bmutua\b|\bcrea\b|caixa de assistencia|"
@@ -73,6 +81,7 @@ ROTULO = {
     "PROFISSIONAL": "Profissional / trabalhador",
     "ENSINO": "Instituições de ensino",
     "SISTEMA": "Sistema Confea/Crea",
+    "CONSELHO_PROFISSIONAL": "Outros conselhos profissionais",
     "OUTRA": "Outras entidades",
 }
 
@@ -99,6 +108,15 @@ def interesse(nome: str) -> str:
     return "OUTRA"
 
 
+# Órgão público, autarquia federal e cartório aparecem como "INSTITUTO" ou
+# "CONSELHO" no nome e não compõem colégio eleitoral nenhum.
+RX_NAO_ENTIDADE = re.compile(
+    r"\binss\b|instituto nacional do seguro|\binpi\b|receita federal|"
+    r"\bcartorio|tabeliona|instituto de estudos de protesto|junta comercial|"
+    r"\bdetran\b|\bcorreios\b|caixa economica|banco do brasil|\bunimed\b|"
+    r"instituto de pesquisas economicas", re.IGNORECASE)
+
+
 def _e_coletiva(nome: str) -> bool:
     """Entidade de classe, e não fornecedor com nome de aparência coletiva.
 
@@ -107,6 +125,8 @@ def _e_coletiva(nome: str) -> bool:
     justamente as entidades mais relevantes do colégio eleitoral.
     """
     n = str(nome or "")
+    if RX_NAO_ENTIDADE.search(n):
+        return False
     if interesse(n) != "OUTRA":
         return True                        # padrão de interesse reconhecido
     if not RX_COLETIVA.search(n):
@@ -124,25 +144,33 @@ def _entidades_pagas(staged) -> pd.DataFrame:
         c["valor"] = pd.to_numeric(coluna(c, "VALOR_TOTAL", 0),
                                    errors="coerce").fillna(0)
         c["canal"] = "convênio"
-        frames.append(c[["_ano", "entidade", "valor", "canal"]]
-                      if "_ano" in c else c.assign(_ano=pd.NA)[
-                          ["_ano", "entidade", "valor", "canal"]])
+        c["TIPO_PESSOA"] = "PJ"          # convênio é sempre com entidade
+        cols = ["_ano", "entidade", "valor", "canal", "TIPO_PESSOA"]
+        frames.append(c[cols] if "_ano" in c else c.assign(_ano=pd.NA)[cols])
     pg = df(staged, "pagamentos")
     if not pg.empty and "FAVORECIDO_NORM" in pg:
         p = pg.copy()
         p["entidade"] = coluna(p, "NOME_RAZAO_SOCIAL").fillna("").astype(str)
         p["valor"] = pd.to_numeric(p["VALOR"], errors="coerce").fillna(0)
         p["canal"] = "pagamento direto"
-        frames.append(p[["_ano", "entidade", "valor", "canal"]])
+        if "TIPO_PESSOA" not in p.columns:
+            p["TIPO_PESSOA"] = "INDEFINIDO"
+        frames.append(p[["_ano", "entidade", "valor", "canal", "TIPO_PESSOA"]])
     if not frames:
         return pd.DataFrame()
     d = pd.concat(frames, ignore_index=True)
     d = d[d["valor"] > 0]
-    coletivas = {n: _e_coletiva(n) for n in d["entidade"].unique()}
-    d = d[d["entidade"].map(coletivas)]
+    # Normalizar ANTES de filtrar: o filtro rodava sobre o texto cru e a
+    # classificação sobre o normalizado, e R$ 236 mi ficavam fora do ranking
+    # por causa dessa assimetria.
+    d["entidade_norm"] = d["entidade"].map(norm_nome)
+    # verba a pessoa física nunca é entidade de classe
+    if "TIPO_PESSOA" in d.columns:
+        d = d[d["TIPO_PESSOA"] != "PF"]
+    coletivas = {n: _e_coletiva(n) for n in d["entidade_norm"].unique()}
+    d = d[d["entidade_norm"].map(coletivas)]
     if d.empty:
         return d
-    d["entidade_norm"] = d["entidade"].map(norm_nome)
     unicos = {e: interesse(e) for e in d["entidade_norm"].unique()}
     d["interesse"] = d["entidade_norm"].map(unicos)
     d["interesse_rotulo"] = d["interesse"].map(ROTULO)
@@ -234,7 +262,10 @@ def run(staged) -> list[Finding]:
         gravidade="alta" if pat > prof and pat > 0 else "media",
         titulo=(f"{fmt_brl(total)} repassados a entidades coletivas — "
                 f"{fmt_brl(pat)} a patronais e {fmt_brl(prof)} a entidades "
-                "profissionais"),
+                "profissionais"
+                if pat > 0 else
+                f"{fmt_brl(total)} repassados a entidades coletivas; nenhuma "
+                "entidade patronal foi identificada pelo classificador"),
         descricao=(
             "Todo o dinheiro que saiu do conselho para sindicatos, "
             "associações, federações, institutos e escolas, somando convênio e "

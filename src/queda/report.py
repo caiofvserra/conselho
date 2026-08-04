@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from pathlib import Path
 from datetime import date, datetime
 
 import pandas as pd
@@ -44,18 +45,64 @@ def _records(df: pd.DataFrame | None, limit: int = 30) -> list[dict]:
     return json.loads(head.to_json(orient="records", force_ascii=False))
 
 
+def _rodadas_anteriores() -> list[Path]:
+    """Rodadas já gravadas, da mais recente para a mais antiga."""
+    raiz = config.OUTPUT_DIR / "rodadas"
+    if not raiz.exists():
+        return []
+    return sorted((p for p in raiz.iterdir()
+                   if p.is_dir() and (p / "achados.json").exists()),
+                  key=lambda p: p.name, reverse=True)
+
+
+def comparar_com_anterior(achados: list[Finding]) -> dict:
+    """Diferença entre esta rodada e a anterior.
+
+    Existe porque a pergunta mais útil depois da segunda rodada não é "o que o
+    relatório diz", é "o que MUDOU". Achado novo, achado que sumiu e valor que
+    se moveu são as três coisas que merecem olhar primeiro — e sem guardar as
+    rodadas anteriores nenhuma delas é respondível.
+    """
+    anteriores = _rodadas_anteriores()
+    if not anteriores:
+        return {}
+    try:
+        antes = json.loads((anteriores[0] / "achados.json").read_text())
+    except (ValueError, OSError):
+        return {}
+    mapa_antes = {a["id"]: a for a in antes.get("findings", [])}
+    mapa_agora = {f.id: f for f in achados}
+
+    novos = [f.titulo for i, f in mapa_agora.items() if i not in mapa_antes]
+    sumiram = [a["titulo"] for i, a in mapa_antes.items() if i not in mapa_agora]
+    mudou = []
+    for i, f in mapa_agora.items():
+        a = mapa_antes.get(i)
+        if a and (a.get("titulo") or "") != f.titulo:
+            mudou.append({"id": i, "antes": a.get("titulo"), "agora": f.titulo})
+    return {"rodada_anterior": anteriores[0].name,
+            "novos": novos, "sumiram": sumiram, "mudaram": mudou}
+
+
 def gerar(achados: list[Finding], staged: dict, *, resumo_llm: str = "") -> None:
-    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_dir = config.OUTPUT_DIR / "csv"
-    # limpa a evidência da execução anterior: sem isso, CSVs de uma rodada de
-    # teste continuavam ao lado da evidência real, com data e conteúdo antigos
-    if csv_dir.exists():
-        shutil.rmtree(csv_dir)
-    csv_dir.mkdir(parents=True)
+    """Grava a rodada numa pasta própria e atualiza os atalhos da raiz.
+
+    Cada execução vira `output/rodadas/<AAAA-MM-DD_HHMM>/`, com o relatório e
+    a evidência daquele momento. A raiz de `output/` continua com a rodada
+    mais recente, para quem só quer abrir e olhar — mas nada é destruído: dá
+    para comparar o que mudou entre duas execuções, e uma correção de bug não
+    apaga o retrato anterior.
+    """
+    comparacao = comparar_com_anterior(achados)
+
+    rodada = config.OUTPUT_DIR / "rodadas" / config.RUN_ID
+    csv_dir = rodada / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
 
     payload_findings = []
     for f in achados:
         if f.evidencia is not None and not f.evidencia.empty:
+            # CSV COMPLETO em disco — a tabela do HTML é recortada, o arquivo não
             _formatar_datas(f.evidencia.copy()).to_csv(
                 csv_dir / f"{f.id}.csv", index=False)
         anual = None
@@ -74,17 +121,62 @@ def gerar(achados: list[Finding], staged: dict, *, resumo_llm: str = "") -> None
                      if isinstance(v, pd.DataFrame)}
     payload = {
         "gerado_em": date.today().isoformat(),
+        "rodada": config.RUN_ID,
         "staged": resumo_staged,
         "findings": payload_findings,
         "frentes": sorted({f.frente for f in achados}),
         "resumo_llm": resumo_llm,
+        "comparacao": comparacao,
     }
 
     chartjs = (config.ASSETS_DIR / "chart.umd.js").read_text()
     html = _TEMPLATE.replace("/*__CHARTJS__*/", chartjs) \
                     .replace("__PAYLOAD__", json.dumps(payload, ensure_ascii=False))
+    (rodada / "report.html").write_text(html)
+    (rodada / "achados.json").write_text(
+        json.dumps({"rodada": config.RUN_ID, "gerado_em": payload["gerado_em"],
+                    "findings": [f.resumo() for f in achados]},
+                   ensure_ascii=False))
+
+    # raiz = cópia da rodada mais recente, para abrir sem procurar
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (config.OUTPUT_DIR / "report.html").write_text(html)
-    log.info("output/report.html gerado com %d achados", len(achados))
+    raiz_csv = config.OUTPUT_DIR / "csv"
+    if raiz_csv.exists():
+        shutil.rmtree(raiz_csv)
+    shutil.copytree(csv_dir, raiz_csv)
+    _escrever_indice()
+
+    log.info("rodada %s: %d achados em %s", config.RUN_ID, len(achados), rodada)
+    if comparacao:
+        log.info("vs %s: %d novo(s), %d sumiram, %d mudaram de valor",
+                 comparacao["rodada_anterior"], len(comparacao["novos"]),
+                 len(comparacao["sumiram"]), len(comparacao["mudaram"]))
+
+
+def _escrever_indice() -> None:
+    """Página simples listando todas as rodadas guardadas."""
+    linhas = []
+    for p in _rodadas_anteriores():
+        try:
+            d = json.loads((p / "achados.json").read_text())
+            n = len(d.get("findings", []))
+            altas = sum(1 for f in d.get("findings", [])
+                        if f.get("gravidade") == "alta")
+        except (ValueError, OSError):
+            n = altas = 0
+        linhas.append(
+            f'<li><a href="rodadas/{p.name}/report.html">{p.name}</a> — '
+            f'{n} achados, {altas} de gravidade alta</li>')
+    html = ("<!doctype html><meta charset='utf-8'><title>QUEDA — rodadas</title>"
+            "<style>body{font:16px/1.6 system-ui;margin:3rem auto;max-width:44rem;"
+            "padding:0 1rem}a{color:#0645ad}</style>"
+            "<h1>QUEDA — histórico de rodadas</h1>"
+            "<p>Cada execução fica guardada com o relatório e a evidência "
+            "daquele momento. A mais recente também está em "
+            "<a href='report.html'>report.html</a>.</p><ul>"
+            + "\n".join(linhas) + "</ul>")
+    (config.OUTPUT_DIR / "index.html").write_text(html)
 
 
 _TEMPLATE = r"""<!DOCTYPE html>
@@ -197,6 +289,17 @@ function show(tab,btn){
   antes de qualquer denúncia. Coleta anônima, sem autenticação.</div>`;
   if(P.resumo_llm) html+=`<div class="resumo"><h3>Resumo executivo</h3>${
     P.resumo_llm.split(/\n\n+/).map(p=>`<p>${esc(p)}</p>`).join('')}</div>`;
+  const C=P.comparacao;
+  if(C && C.rodada_anterior){
+    const bloco=(t,arr,fmt)=>arr&&arr.length?`<p><b>${t} (${arr.length})</b></p><ul>${
+      arr.slice(0,12).map(x=>`<li>${esc(fmt(x))}</li>`).join('')}${
+      arr.length>12?`<li>… e mais ${arr.length-12}</li>`:''}</ul>`:'';
+    const corpo=bloco('Achados novos',C.novos,x=>x)
+      +bloco('Deixaram de aparecer',C.sumiram,x=>x)
+      +bloco('Mudaram de valor',C.mudaram,x=>`${x.antes} → ${x.agora}`);
+    html+=`<div class="resumo"><h3>O que mudou desde a rodada ${esc(C.rodada_anterior)}</h3>${
+      corpo||'<p>Nenhuma diferença em relação à rodada anterior.</p>'}</div>`;
+  }
   const pan=P.findings.find(f=>f.id==='finalistica-panorama');
   if(pan) html+=card(pan,900);
   html+=`<h3 style="margin:18px 0 10px;font-size:15px">Achados de gravidade alta</h3>`;

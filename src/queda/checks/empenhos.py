@@ -5,6 +5,7 @@ import pandas as pd
 
 from .. import analytics as A
 from .. import config
+from .. import taxonomia as T
 from ..findings import Finding
 from ..utils import fmt_brl
 from .common import df, fornecedores_mercado, transferencias_sistema
@@ -54,10 +55,17 @@ def _anatomia_anulacoes(emp: pd.DataFrame):
         100 * resumo["anulado_dezembro"] /
         resumo["anulado"].replace(0, pd.NA)).fillna(0).round(1)
 
-    # reempenho: mesmo credor + mesma conta, anulado num ano e empenhado no seguinte
+    # Reempenho: mesmo credor + mesma conta, anulado num ano e empenhado no
+    # seguinte. Na rodada real o dataset de empenhos não trazia credor nem
+    # conta, `chave` vinha VAZIA e o ramo nunca executava — mas o relatório
+    # publicava "reempenhos: 0", que é afirmação negativa sem lastro. Agora a
+    # ausência do dado é declarada como ausência.
     reempenhos = pd.DataFrame()
-    chave = [c for c in ("FAVORECIDO_NORM", "CONTA_EMPENHO") if c in d.columns]
+    reempenho_testavel = False
+    chave = [c for c in ("FAVORECIDO_NORM", "PESSOA", "CONTA_EMPENHO",
+                         "NOME_CONTA") if c in d.columns]
     if chave and not fantasmas.empty:
+        reempenho_testavel = True
         vivos = (d[d["VALOR_PAGO"] > 0]
                  .groupby(chave + ["_ano"])["VALOR"].sum().reset_index())
         alvo = fantasmas.groupby(chave + ["_ano"])["VALOR"].sum().reset_index()
@@ -65,7 +73,7 @@ def _anatomia_anulacoes(emp: pd.DataFrame):
         reempenhos = alvo.merge(
             vivos, left_on=chave + ["_ano_seguinte"], right_on=chave + ["_ano"],
             suffixes=("_anulado", "_reempenhado"))
-    return resumo.round(2), fantasmas, reempenhos
+    return resumo.round(2), fantasmas, reempenhos, reempenho_testavel
 
 
 def run(staged) -> list[Finding]:
@@ -142,10 +150,33 @@ def run(staged) -> list[Finding]:
         pj = pj[~pj["FAVORECIDO_NORM"].isin(com_contrato)].sort_values("DATA")
 
         conta_col = "CONTA_EMPENHO" if "CONTA_EMPENHO" in pj.columns else None
+        # Fracionamento é burla de LICITAÇÃO — só existe onde havia dever de
+        # licitar. Convênio, termo de colaboração, repasse de ART, sentença
+        # judicial e tributo não se licitam, e respondiam por quase todo o
+        # achado (727 casos na rodada real, dos quais ~60 sobrevivem).
+        if conta_col:
+            nat = pj[conta_col].fillna("").astype(str)
+            mapa_nat = {c: T.classificar_texto(c) for c in nat.unique()}
+            nao_licitavel = nat.map(mapa_nat).isin(
+                ["TRANSFERENCIAS", "FINANCEIRA_JUDICIAL", "REMUNERACAO",
+                 "VERBAS_PESSOAIS"])
+            # SEM ACENTO: "Convênios RES. 1032" não casa `convenio`. É o mesmo
+            # defeito que fabricou o excedente de R$ 1,5 bi na conciliação —
+            # todo regex sobre nome de conta tem de passar por T.normalizar.
+            mapa_norm = {c: T.normalizar(c) for c in nat.unique()}
+            nao_licitavel |= nat.map(mapa_norm).str.contains(
+                r"convenio|termo de (?:colaboracao|fomento|parceria)|"
+                r"\brepasse|subvencao|auxilio financeiro|restitui|devolu|"
+                r"\bart\b|deposito judicial|precatorio",
+                regex=True, na=False)
+            pj = pj[~nao_licitavel]
+        pj = pj[pj["VALOR"] > 0]        # estorno satisfazia "< limite" e
+        if len(pj) < 3:                 # empurrava a contagem para 3
+            pj = pj.iloc[0:0]
         suspeitas = []
         janela = pd.Timedelta(days=config.JANELA_FRACIONAMENTO_DIAS)
         chaves = ["FAVORECIDO_NORM"] + ([conta_col] if conta_col else [])
-        for chave, g in pj.groupby(chaves):
+        for chave, g in (pj.groupby(chaves) if not pj.empty else []):
             if len(g) < 3:
                 continue
             datas = g["DATA"].reset_index(drop=True)
@@ -164,6 +195,10 @@ def run(staged) -> list[Finding]:
                 soma = float(pequenos.sum())
                 if n >= 3 and soma > limite:
                     dias = (datas[j] - datas[i]).days
+                    # Três pagamentos no MESMO dia não é fracionamento no
+                    # tempo: é parcela de uma nota só, ou lote de repasse.
+                    if dias < 1:
+                        continue
                     # cadência mensal regular = execução de contrato, não rajada
                     if n <= 4 and dias >= 60:
                         continue
@@ -185,9 +220,14 @@ def run(staged) -> list[Finding]:
                        .agg(casos=("fornecedor", "size"),
                             soma=("soma_janela", "sum")))
             achados.append(Finding(
-                id="empenhos-fracionamento", frente=FRENTE, gravidade="alta",
+                id="empenhos-fracionamento", frente=FRENTE, gravidade="media",
                 titulo=f"{len(ev)} caso(s) de possível fracionamento de despesa",
                 descricao=(
+                    "Gravidade média, e não alta, por uma razão: sem o processo "
+                    "de compra não dá para saber se os pagamentos correspondem "
+                    "ao mesmo objeto — que é o que caracteriza o fracionamento. "
+                    "A lista é ponto de partida para pedir os processos, não "
+                    "conclusão.\n\n"
                     "≥3 pagamentos ao mesmo fornecedor, na mesma conta contábil, "
                     f"em até {config.JANELA_FRACIONAMENTO_DIAS} dias, cada um "
                     "abaixo do limite de dispensa **vigente naquele exercício** e "
@@ -197,8 +237,14 @@ def run(staged) -> list[Finding]:
                     "R$ 50.000 a partir de 2021 (Lei 14.133, art. 75, II) e "
                     "R$ 59.906,02 de 2023 em diante (Decreto 11.317/2022) — "
                     "confira o valor dos exercícios mais recentes, atualizados "
-                    "por decreto anual. Já excluídos: fornecedores com contrato "
-                    "formal registrado e cadências mensais regulares."),
+                    "por decreto anual.\n\nJá excluídos, porque não são "
+                    "fracionamento: fornecedores com contrato formal "
+                    "registrado; cadências mensais regulares; despesas que "
+                    "**não se licitam** (convênio, termo de colaboração, "
+                    "repasse, sentença judicial, tributo, folha e verba "
+                    "indenizatória); rajadas de um único dia, que são parcela "
+                    "de nota só; e estornos, que satisfaziam 'abaixo do "
+                    "limite' por serem negativos."),
                 evidencia=ev,
                 serie=por_ano[["soma"]].rename(
                     columns={"soma": "valor fracionado"}),
@@ -263,7 +309,7 @@ def run(staged) -> list[Finding]:
         # ---- anatomia: empenho fantasma, dezembro, reempenho
         anat = _anatomia_anulacoes(emp)
         if anat is not None:
-            resumo, fantasmas, reempenhos = anat
+            resumo, fantasmas, reempenhos, reempenho_testavel = anat
             achados.append(Finding(
                 id="empenhos-anulacao-anatomia", frente=FRENTE,
                 gravidade="alta" if float(resumo["fantasma"].sum()) > 0 else "info",
@@ -292,7 +338,14 @@ def run(staged) -> list[Finding]:
                 metricas={
                     "empenhos_fantasma": int(len(fantasmas)),
                     "valor_fantasma": round(float(resumo["fantasma"].sum()), 2),
-                    "reempenhos_ano_seguinte": int(len(reempenhos)),
+                    "reempenhos_ano_seguinte": (int(len(reempenhos))
+                                                if reempenho_testavel
+                                                else "nao_testado"),
+                    "reempenho_motivo": (None if reempenho_testavel else
+                                         "o dataset de empenhos não trouxe "
+                                         "credor nem conta contábil — sem eles "
+                                         "não há como parear anulação e "
+                                         "reempenho"),
                 },
             ))
             if not fantasmas.empty:
@@ -300,15 +353,45 @@ def run(staged) -> list[Finding]:
                                     "CONTA_EMPENHO", "VALOR", "VALOR_ANULADO",
                                     "VALOR_PAGO", "DATA")
                         if c in fantasmas.columns]
+                # Anulação nos primeiros dias do exercício, ou em lote no mesmo
+                # dia, é abertura de exercício: rotina contábil, não anomalia.
+                fant = fantasmas.copy()
+                dt = pd.to_datetime(fant.get("DATA"), errors="coerce")
+                inicio_ano = dt.dt.dayofyear.le(15).fillna(False)
+                lote = dt.dt.date.map(dt.dt.date.value_counts()).ge(5).fillna(False)
+                fant["_rotina"] = inicio_ano | lote
+                anomalos = fant[~fant["_rotina"]]
+                taxa = resumo["pct_fantasma"]
+                pior = taxa.idxmax() if not taxa.empty else None
                 achados.append(Finding(
-                    id="empenhos-fantasma", frente=FRENTE, gravidade="media",
-                    titulo=f"{len(fantasmas)} empenho(s) anulados integralmente "
-                           "sem qualquer pagamento",
-                    descricao="Reserva de dotação que nunca virou despesa. Em "
-                              "volume, é indício de empenho feito para travar "
-                              "orçamento e não para contratar.",
-                    evidencia=fantasmas[cols].sort_values(
-                        "VALOR", ascending=False).head(200),
+                    id="empenhos-fantasma", frente=FRENTE,
+                    gravidade="media" if not anomalos.empty else "info",
+                    titulo=(f"Empenho anulado sem pagamento: {taxa.mean():.1f}% do "
+                            f"empenhado em média, pico de {taxa.max():.1f}% em "
+                            f"{int(pior)}" if pior is not None else
+                            f"{len(fantasmas)} empenho(s) anulados integralmente"),
+                    descricao=(
+                        "Reserva de dotação que nunca virou despesa. Publicado "
+                        "como TAXA e não como contagem: mil empenhos fantasma "
+                        "num órgão que emite cem mil é rotina; a mesma "
+                        "contagem em quem emite mil é outra coisa.\n\n"
+                        "Já separada a rotina contábil — anulação nos 15 "
+                        f"primeiros dias do exercício ou em lote no mesmo dia "
+                        f"({len(fant) - len(anomalos)} de {len(fant)}). O que "
+                        f"resta são {len(anomalos)} anulações integrais fora "
+                        "desse padrão, que é onde vale perguntar por que a "
+                        "despesa foi empenhada."),
+                    evidencia=(anomalos[cols].sort_values(
+                        "VALOR", ascending=False) if not anomalos.empty
+                        else fant[cols].sort_values("VALOR", ascending=False)),
+                    serie=resumo[["pct_fantasma"]].rename(
+                        columns={"pct_fantasma": "% do empenhado anulado sem pagar"}),
+                    grafico="line", unidade="%",
+                    metricas={"taxa_media_pct": round(float(taxa.mean()), 2),
+                              "taxa_maxima_pct": round(float(taxa.max()), 2),
+                              "ano_pico": int(pior) if pior is not None else None,
+                              "rotina_abertura": int(len(fant) - len(anomalos)),
+                              "fora_do_padrao": int(len(anomalos))},
                 ))
         estouro = emp[emp["VALOR_PAGO"] > emp["VALOR"] * 1.001]
         if not estouro.empty:

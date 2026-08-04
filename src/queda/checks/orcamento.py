@@ -258,6 +258,77 @@ def run(staged) -> list[Finding]:
                     metricas={"anos_acima": acima.index.astype(int).tolist()},
                 ))
 
+    # ------------------------------------------------ 2b. conciliação da verba
+    #
+    # Duas fontes independentes medem a mesma verba indenizatória: o que foi
+    # PAGO (fluxo, conta a conta) e o que foi REALIZADO na peça orçamentária.
+    # As duas deveriam convergir. Divergência grande não é irregularidade por
+    # si — regime de caixa e de competência diferem —, mas é a pergunta que
+    # ninguém fez ainda, e o tamanho dela define se cabe explicação contábil.
+    pg = df(staged, "pagamentos")
+    # `d` só existe se o bloco de desvio por conta rodou (comparativo com
+    # orçado e realizado). Sem ele não há o lado contábil da conciliação.
+    if not pg.empty and isinstance(locals().get("d"), pd.DataFrame) \
+            and "categoria" in locals()["d"].columns:
+        conta_pg = coluna(pg, "CONTA_EMPENHO").fillna("").astype(str)
+        nat_pg = conta_pg.map({c: T.classificar_texto(c)
+                               for c in conta_pg.unique()})
+        pago = (pg[nat_pg == "VERBAS_PESSOAIS"]
+                .groupby("_ano")["VALOR"].sum())
+        realizado = (d[d["categoria"] == "VERBAS_PESSOAIS"]
+                     .groupby("_ano")["realizado"].sum())
+        conc = pd.DataFrame({"pago (fluxo)": pago,
+                             "realizado (contabilidade)": realizado}).dropna()
+        if len(conc) >= 3 and float(conc.sum().sum()) > 0:
+            conc["diferenca"] = (conc["pago (fluxo)"] -
+                                 conc["realizado (contabilidade)"]).round(2)
+            conc["divergencia_pct"] = (
+                100 * conc["diferenca"] /
+                conc["realizado (contabilidade)"].replace(0, pd.NA)
+            ).fillna(0).round(1)
+            tot_pago = float(conc["pago (fluxo)"].sum())
+            tot_real = float(conc["realizado (contabilidade)"].sum())
+            div = tot_pago - tot_real
+            pct = 100 * div / tot_real if tot_real else 0.0
+            achados.append(Finding(
+                id="orcamento-conciliacao-verba", frente=FRENTE,
+                gravidade="alta" if abs(pct) > 25 else "media",
+                titulo=(f"Verba indenizatória: {fmt_brl(tot_pago)} pagos contra "
+                        f"{fmt_brl(tot_real)} registrados na contabilidade "
+                        f"({pct:+.0f}%)"),
+                descricao=(
+                    "Duas fontes independentes do próprio portal medem a mesma "
+                    "coisa: o que foi **pago** (fluxo, somado conta a conta nos "
+                    "pagamentos) e o que foi **realizado** (peça orçamentária). "
+                    "Deveriam convergir.\n\n"
+                    "Divergência não é irregularidade por si — regime de caixa "
+                    "e de competência diferem, e restos a pagar deslocam valor "
+                    "entre exercícios. Mas uma diferença desta ordem precisa de "
+                    "explicação contábil, e a pergunta ainda não foi feita: ou "
+                    "há verba paga fora da dotação, ou a peça orçamentária não "
+                    "reflete o desembolso. A tabela mostra a diferença ano a "
+                    "ano, que é o que permite distinguir defasagem temporal "
+                    "(oscila de sinal) de divergência estrutural (mesmo sinal "
+                    "todo ano)."),
+                evidencia=conc.reset_index(),
+                serie=conc[["pago (fluxo)", "realizado (contabilidade)"]],
+                grafico="bar",
+                tabela_anual=conc.reset_index(),
+                base_legal="Lei 4.320/1964, arts. 35 (regime), 60 (empenho "
+                           "prévio) e 63 (liquidação); art. 85 (escrituração "
+                           "sintética e analítica).",
+                como_verificar="Pedir a conciliação entre o razão das contas de "
+                               "verba e o relatório de pagamentos do mesmo "
+                               "exercício, com os restos a pagar destacados.",
+                metricas={"pago": round(tot_pago, 2),
+                          "realizado": round(tot_real, 2),
+                          "diferenca": round(div, 2),
+                          "divergencia_pct": round(pct, 1),
+                          "sinal_constante": bool(
+                              (conc["diferenca"] > 0).all() or
+                              (conc["diferenca"] < 0).all())},
+            ))
+
     # ------------------------------------------------ 3. receita × atividade-fim
     receita = _receita_anual(staged)
     if not receita.empty:

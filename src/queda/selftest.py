@@ -126,8 +126,11 @@ def _pagamentos() -> pd.DataFrame:
                      "NUMERO_EMPENHO": 9000 + ano, "NUMERO_PAGAMENTO": 9000 + ano})
 
     # --- assinaturas forenses ---------------------------------------------
-    # (a) valores uniformes: violam Benford
-    for i in range(700):
+    # (a) valores uniformes: violam Benford. São 1.100 para que o universo de
+    # "preço de mercado" (sem folha nem verba) passe do mínimo de 1.000 do
+    # teste de dois dígitos — abaixo disso ele não é aplicável, e o selftest
+    # tem de exercitar o caminho em que ele roda.
+    for i in range(1100):
         rows.append({"_ano": 2024, "NOME_RAZAO_SOCIAL": f"FORNECEDOR UNIF {i % 40}",
                      "CPF_CNPJ": f"{10000000000000 + i}",
                      "CONTA_EMPENHO": "Material de Consumo", "HISTORICO": "compra",
@@ -147,12 +150,15 @@ def _pagamentos() -> pd.DataFrame:
                          "VALOR_LIQUIDO": 0,
                          "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/07/{ano}",
                          "NUMERO_EMPENHO": 3000 + i, "NUMERO_PAGAMENTO": 3000 + i})
-    # (c) corrida de dezembro
+    # (c) corrida de dezembro — valores VARIADOS: 120 pagamentos idênticos
+    # fariam a própria fixture ser reprovada pela guarda de valor tabelado,
+    # que é justamente o que o teste de Benford tem de evitar.
     for i in range(120):
         rows.append({"_ano": 2022, "NOME_RAZAO_SOCIAL": f"FIM DE ANO SA {i % 10}",
                      "CPF_CNPJ": f"{30000000000000 + i}",
                      "CONTA_EMPENHO": "Serviços de Terceiros PJ",
-                     "HISTORICO": "empenho de dezembro", "VALOR": 90000.0,
+                     "HISTORICO": "empenho de dezembro",
+                     "VALOR": round(random.uniform(20000, 180000), 2),
                      "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"{(i % 28) + 1:02d}/12/2022",
                      "NUMERO_EMPENHO": 4000 + i, "NUMERO_PAGAMENTO": 4000 + i})
     # (d) estornos
@@ -227,7 +233,21 @@ def _staged() -> dict[str, pd.DataFrame]:
          "VALOR_PAGO": 115e6 / 20, "VALOR_ANULADO": 0.0}
         for a in range(2013, 2026) for i in range(20)]
 
-    empenhos = pd.DataFrame(_emp_base + [
+    # Empenhos fantasma: anulados integralmente, nada pago. Metade é rotina de
+    # abertura de exercício (primeiros dias / lote no mesmo dia) e tem de ser
+    # separada; a outra metade é o que merece pergunta.
+    _fantasmas = (
+        [{"_ano": a, "NOME_CONTA": "Serviços de Terceiros PJ",
+          "PESSOA": f"FANTASMA ROTINA {i}", "VALOR": 50_000.0, "VALOR_PAGO": 0.0,
+          "VALOR_ANULADO": 50_000.0, "DATA": pd.Timestamp(f"{a}-01-05")}
+         for a in (2023, 2024, 2025) for i in range(6)] +
+        [{"_ano": a, "NOME_CONTA": "Serviços de Terceiros PJ",
+          "PESSOA": f"FANTASMA ANOMALO {i}", "VALOR": 900_000.0,
+          "VALOR_PAGO": 0.0, "VALOR_ANULADO": 900_000.0,
+          "DATA": pd.Timestamp(f"{a}-0{5 + i}-1{i}")}
+         for a in (2024, 2025) for i in range(3)])
+
+    empenhos = pd.DataFrame(_emp_base + _fantasmas + [
         {"_ano": 2024, "NOME_CONTA": "Diárias", "PESSOA": _CONSELHEIRO,
          "VALOR": 1000.0, "VALOR_PAGO": 1500.0, "VALOR_ANULADO": 0.0},
         {"_ano": 2024, "NOME_CONTA": "Serviços", "PESSOA": _FORN_FRACIONA,
@@ -266,6 +286,9 @@ def _staged() -> dict[str, pd.DataFrame]:
     # acima) e que não aparece olhando só a despesa.
     _ORCADO_PCT = {"Vencimentos e Salários": 1.05, "Diárias no País": 0.35,
                    "Cargos em Comissão": 1.02}
+    # "Diárias no País" tem realizado MENOR que o efetivamente pago nos
+    # pagamentos: é a divergência entre fluxo e contabilidade que a conciliação
+    # tem de expor.
     comparativo = pd.DataFrame([
         {"_ano": a, "NOME": nome, "ANALITICA": True,
          "REALIZADO_EXERCICIO": base * (1.06 ** (a - 2013)),
@@ -413,12 +436,14 @@ ESPERADOS = [
     "orcamento-estouro-conta",         # conta que estoura a dotação todo ano
     "orcamento-verbas-vs-dotacao",     # diárias executadas acima do aprovado
     "orcamento-retorno-da-anuidade",   # quanto da receita volta como fiscalização
+    "orcamento-conciliacao-verba",     # pago (fluxo) × realizado (contabilidade)
     # opacidade
     "opacidade-agregadores",           # "DIVERSOS FUNCIONARIOS"
     "opacidade-decomposicao-conta",    # o que há dentro do agregado
     # execução
     "empenhos-fracionamento",
     "empenhos-pago-maior-que-empenhado",
+    "empenhos-fantasma",               # taxa, com a rotina de abertura separada
     "contratos-aditivos-limite",
     # rede
     "rede-fornecedores-compartilhados",

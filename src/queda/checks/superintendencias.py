@@ -22,6 +22,7 @@ atividade.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import pandas as pd
 
@@ -80,9 +81,18 @@ RX_DESATIVADO = re.compile(r"^\s*n[ãa]o\s+utilizar\s*[-–]\s*", re.IGNORECASE)
 
 
 def normalizar_unidade(nome) -> str:
-    """Nome canônico do centro de custo, sem a marca de desativação."""
-    n = re.sub(r"\s+", " ", str(nome or "")).strip()
-    return RX_DESATIVADO.sub("", n).strip()
+    """Nome canônico do centro de custo, sem a marca de desativação.
+
+    Dobra acento e espaço em torno do hífen porque o portal grava a mesma
+    unidade de formas diferentes — "GERENCIA EXECUTIVA - GEX" e "GERENCIA
+    EXECUTIVA-GEX", "ADMINISTRAÇAO" e "ADMINISTRACAO". Sem isso R$ 264 mi
+    continuavam partidos entre variantes do mesmo nome.
+    """
+    n = unicodedata.normalize("NFD", str(nome or ""))
+    n = "".join(c for c in n if unicodedata.category(c) != "Mn")
+    n = RX_DESATIVADO.sub("", n)
+    n = re.sub(r"\s*-\s*", " - ", n)      # padroniza o hífen
+    return re.sub(r"\s+", " ", n).strip().upper()
 
 
 def camada(nome_centro: str) -> str:
