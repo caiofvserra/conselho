@@ -53,6 +53,14 @@ DADOS_ABERTOS_CANDIDATES = [
 PNCP_CONSULTA = "https://pncp.gov.br/api/consulta"
 PNCP_API = "https://pncp.gov.br/api/pncp"
 
+# Categoria do processo, atribuída pelo PRÓPRIO órgão ao publicar no PNCP.
+# As categorias 7 e 9 são obra e serviço de engenharia — exatamente as que
+# exigem ART e responsável técnico (Lei 6.496/1977, art. 1º; Lei 14.133/2021,
+# art. 6º, XII e XXI). Num conselho de engenharia isso permite a pergunta
+# espelhada: o órgão que fiscaliza a ART dos outros contrata engenharia com
+# que rito?
+CATEGORIA_PNCP = {7: "obras", 8: "servicos", 9: "engenharia"}
+
 CNPJ_APIS = [
     "https://brasilapi.com.br/api/cnpj/v1/{cnpj}",
     "https://minhareceita.org/{cnpj}",

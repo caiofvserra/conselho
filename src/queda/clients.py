@@ -214,13 +214,16 @@ def dados_abertos(endpoint: str, params: dict | None = None) -> list:
 
 
 # ================================================================ PNCP
-def pncp_paginado(path: str, params: dict, *, max_paginas: int = 200) -> list:
+def pncp_paginado(path: str, params: dict, *, max_paginas: int = 200,
+                  retries: int | None = None, espera_base: float = 2.0) -> list:
     """Itera as páginas de um endpoint de consulta do PNCP."""
     out: list = []
     pagina = 1
     while pagina <= max_paginas:
         data = get_json(f"{config.PNCP_CONSULTA}{path}",
-                        {**params, "pagina": pagina, "tamanhoPagina": params.get("tamanhoPagina", 50)})
+                        {**params, "pagina": pagina,
+                         "tamanhoPagina": params.get("tamanhoPagina", 50)},
+                        retries=retries, espera_base=espera_base)
         if not data:
             break
         rows = data.get("data") if isinstance(data, dict) else data
@@ -333,13 +336,42 @@ def _confere_uf(cnpj: str | None, uf: str) -> bool:
                or u.get("ufSigla") == uf for u in unidades)
 
 
-def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:
-    out = []
+def _meses(ano_ini: int, ano_fim: int):
+    """Janelas MENSAIS (AAAAMMDD, AAAAMMDD).
+
+    O PNCP devolve 503 em janela anual — foi o que derrubou a etapa na rodada
+    real. Janela de um mês responde. O custo é mais requisições; o benefício é
+    a coleta terminar.
+    """
+    import calendar
     for ano in range(ano_ini, ano_fim + 1):
-        out.extend(pncp_paginado("/v1/contratos", {
-            "dataInicial": f"{ano}0101", "dataFinal": f"{ano}1231",
-            "cnpjOrgao": cnpj, "tamanhoPagina": 500,
-        }))
+        for mes in range(1, 13):
+            ultimo = calendar.monthrange(ano, mes)[1]
+            yield f"{ano}{mes:02d}01", f"{ano}{mes:02d}{ultimo:02d}"
+
+
+def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:
+    """Contratos do órgão no PNCP, mês a mês.
+
+    Um mês que falha não derruba a coleta: registra e segue. Perder um mês é
+    perder um mês; perder a etapa inteira por causa dele custa todo o resto.
+    """
+    out: list = []
+    falhas: list[str] = []
+    for ini, fim in _meses(ano_ini, ano_fim):
+        try:
+            rows = pncp_paginado("/v1/contratos", {
+                "dataInicial": ini, "dataFinal": fim,
+                "cnpjOrgao": cnpj, "tamanhoPagina": 500,
+            }, retries=6, espera_base=4.0)
+        except Exception as e:
+            falhas.append(f"{ini[:6]} ({type(e).__name__})")
+            continue
+        out.extend(rows)
+    if falhas:
+        log.warning("PNCP contratos: %d mês(es) sem resposta — %s",
+                    len(falhas), ", ".join(falhas[:12]))
+    log.info("PNCP contratos: %d registro(s) para o CNPJ %s", len(out), cnpj)
     return out
 
 

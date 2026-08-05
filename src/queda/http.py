@@ -67,7 +67,8 @@ def _throttle(url: str) -> None:
 
 def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
              ok_empty_status: tuple[int, ...] = (204,),
-             rate_limit_retries: int | None = None):
+             rate_limit_retries: int | None = None,
+             retries: int | None = None, espera_base: float = 2.0):
     """GET com cache. Retorna o JSON, [] para respostas vazias, None para 404.
 
     Levanta exceção só depois de esgotar os retries em erros 5xx/rede.
@@ -79,6 +80,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
     """
     limite = (config.RATE_LIMIT_RETRIES if rate_limit_retries is None
               else rate_limit_retries)
+    limite_rede = config.RETRIES if retries is None else retries
     cache = _cache_path(url, params)
     if use_cache and cache.exists():
         try:
@@ -108,7 +110,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
     last_err: Exception | None = None
     net_attempt = 0
     rate_attempt = 0
-    max_iter = config.RETRIES + limite + 2
+    max_iter = limite_rede + limite + 2
     for _ in range(max_iter):
         _throttle(url)
         try:
@@ -116,11 +118,23 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
         except requests.RequestException as e:
             last_err = e
             net_attempt += 1
-            if net_attempt > config.RETRIES:
+            if net_attempt > limite_rede:
                 break
-            time.sleep(2 ** net_attempt)
+            time.sleep(espera_base * (2 ** (net_attempt - 1)))
             continue
 
+        if r.status_code >= 500:
+            # 5xx é servidor sobrecarregado, não resposta. Vale esperar: o PNCP
+            # devolve 503 em janela grande e responde na janela menor.
+            last_err = RuntimeError(f"HTTP {r.status_code}")
+            net_attempt += 1
+            if net_attempt > limite_rede:
+                break
+            espera = espera_base * (2 ** (net_attempt - 1))
+            log.info("HTTP %s em %s — tentativa %d/%d, aguardando %.0fs",
+                     r.status_code, url, net_attempt, limite_rede, espera)
+            time.sleep(espera)
+            continue
         if r.status_code == 404:
             return _store(None, 404)                 # ausência genuína: cacheável
         if r.status_code in ok_empty_status:

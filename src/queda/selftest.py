@@ -311,10 +311,26 @@ def _staged() -> dict[str, pd.DataFrame]:
                            ("Diárias no País", 2e6),
                            ("Cargos em Comissão", 6e6))])
 
+    # A receita não é só denominador: a ART mede o volume de engenharia que o
+    # conselho DEVERIA fiscalizar. Aqui ela cresce 12% ao ano enquanto o
+    # Departamento de Fiscalização cresce 1-2% (ver _CENTROS): a cobertura por
+    # real de ART cai, e é esse o cenário que a frente de receita tem de pegar.
+    _RECEITAS = (
+        # (conta, base, crescimento ao ano)
+        ("Anuidades de Pessoa Física", 90e6, 1.05),
+        ("Anuidades de Pessoa Jurídica", 30e6, 1.05),
+        ("ART - Anotação de Responsabilidade Técnica", 30e6, 1.12),
+        ("Multas por Infração à Legislação Profissional", 4e6, 1.16),
+        ("Multa e Juros de Mora sobre Anuidades", 3e6, 1.04),
+        ("Dívida Ativa - Anuidades", 8e6, 1.06),
+        ("Receita de Certidões e Emolumentos", 2e6, 1.05),
+        ("Rendimentos de Aplicações Financeiras", 6e6, 1.03),
+    )
     receita = pd.DataFrame([
-        {"_ano": a, "NOME": "Anuidades", "ANALITICA": True,
-         "REALIZADO_EXERCICIO": 120e6 * (1.05 ** (a - 2013))}
-        for a in range(2013, 2026)])
+        {"_ano": a, "NOME": nome, "ANALITICA": True,
+         "REALIZADO_EXERCICIO": base * (cresc ** (a - 2013))}
+        for a in range(2013, 2026)
+        for nome, base, cresc in _RECEITAS])
 
     # Demonstrativo em ÁRVORE: a sintética repete a soma das filhas. Somar
     # tudo conta o mesmo real duas vezes — o bug que inflou a execução
@@ -372,6 +388,30 @@ def _staged() -> dict[str, pd.DataFrame]:
         for a in (2022, 2023, 2024) for i in (3, 8)])
 
     pncp = pd.DataFrame([
+        # categoria declarada pelo próprio órgão: 9 = serviço de engenharia
+        {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
+         "orgao_nome": "CREA-SP", "fornecedor_ni": "55666777000188",
+         "fornecedor_nome": "ELETRICA PREDIAL LTDA",
+         "objeto": "instalação elétrica e subestação do prédio sede",
+         "valorGlobal": 2_400_000.0, "valorAcumulado": 2_400_000.0,
+         "numeroContrato": "7/2023", "vigenciaInicio": "2023-01-01",
+         "vigenciaFim": "2023-12-31", "anoContrato": 2023, "tipoPessoa": "PJ",
+         "dataAssinatura": "2023-01-01", "categoriaProcessoId": 9,
+         "categoriaProcessoNome": "Serviços de Engenharia",
+         "numeroControlePNCPCompra": "00000000000191-1-000123/2023",
+         "processo": "2023/000123"},
+        # SUBENQUADRAMENTO: objeto de engenharia declarado como serviço comum
+        {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
+         "orgao_nome": "CREA-SP", "fornecedor_ni": "66777888000199",
+         "fornecedor_nome": "REFORMA TOTAL LTDA",
+         "objeto": "reforma e impermeabilização da cobertura com troca de telhado",
+         "valorGlobal": 1_800_000.0, "valorAcumulado": 1_800_000.0,
+         "numeroContrato": "8/2023", "vigenciaInicio": "2023-03-01",
+         "vigenciaFim": "2024-02-29", "anoContrato": 2023, "tipoPessoa": "PJ",
+         "dataAssinatura": "2023-03-01", "categoriaProcessoId": 8,
+         "categoriaProcessoNome": "Serviços",
+         "numeroControlePNCPCompra": "00000000000191-1-000456/2023",
+         "processo": "2023/000456"},
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo", "orgao_nome": "CREA-SP",
          "fornecedor_ni": _CNPJ_REDE, "fornecedor_nome": _FORN_REDE,
          "objeto": "obra sede", "valorGlobal": 500000.0, "valorAcumulado": 900000.0,
@@ -386,6 +426,11 @@ def _staged() -> dict[str, pd.DataFrame]:
          "anoContrato": 2023, "tipoPessoa": "PJ", "dataAssinatura": "2023-01-01"},
     ])
     pncp["fornecedor_norm"] = pncp["fornecedor_nome"].map(norm_nome)
+    # espelha stage_pncp
+    pncp["_ano"] = pd.to_numeric(pncp["anoContrato"], errors="coerce")
+    _cat = pd.to_numeric(pncp.get("categoriaProcessoId"), errors="coerce")
+    pncp["categoria"] = _cat.map(config.CATEGORIA_PNCP).fillna("outra")
+    pncp["exige_art"] = pncp["categoria"].isin(("obras", "engenharia"))
 
     return {
         "pagamentos": _pagamentos(), "empenhos": empenhos, "contratos": contratos,
@@ -445,6 +490,11 @@ ESPERADOS = [
     "repr-assento-e-dinheiro",         # entidade com assento que recebe
     "repr-duplo-canal",                # convênio E contrato (não convênio E pagamento)
     "repr-concentracao",
+    # receita: de onde vem o dinheiro e o que ele deveria comprar
+    "receita-composicao",
+    "receita-cobertura-por-art",       # ART cresce 12%/ano, fiscalização 1-2%
+    "receita-multa-vs-anuidade",
+    "receita-dependencia-anuidade",
     # orçamento
     "orcamento-execucao",
     "orcamento-estouro-conta",         # conta que estoura a dotação todo ano
@@ -470,6 +520,10 @@ ESPERADOS = [
     # atas (LLM opcional: sem chave, avisa em vez de silenciar)
     "atas-llm-desligado",
     # casos concentrados
+    # o conselho pela própria régua (PNCP: categoria declarada na origem)
+    "espelho-categoria-declarada",
+    "espelho-subenquadramento",        # objeto de engenharia como serviço comum
+    "espelho-certame-no-pncp",
     "casos-entidade-da-casa",
     "casos-obras",
     # forense estatística
@@ -515,6 +569,30 @@ def _confere_metricas(achados) -> list[str]:
         if abs(orcado - 130e6) > 1e6:
             erros.append(f"orcamento-execucao somou a árvore: orçado={orcado:,.0f}"
                          f" (esperado 130.000.000 = só as folhas)")
+    # Receita: a conta tem de bater com as linhas da fixture, senão um regex de
+    # fonte que deixe de casar (ex.: "ART" virando OUTRA) passa despercebido —
+    # e a cobertura por ART, que é o achado, sai com denominador errado.
+    def soma(base, cresc):            # 13 exercícios, 2013..2025
+        return sum(base * (cresc ** t) for t in range(13))
+
+    exige("receita-dependencia-anuidade", "anuidade",
+          soma(90e6, 1.05) + soma(30e6, 1.05))
+    exige("receita-dependencia-anuidade", "divida_ativa", soma(8e6, 1.06))
+    exige("receita-composicao", "total",
+          soma(90e6, 1.05) + soma(30e6, 1.05) + soma(30e6, 1.12)
+          + soma(4e6, 1.16) + soma(3e6, 1.04) + soma(8e6, 1.06)
+          + soma(2e6, 1.05) + soma(6e6, 1.03))
+    # ART cresce 12% ao ano; a fiscalização (4e6 a 1%/ano + 5e6 a 2%/ano) fica
+    # muito atrás — a cobertura por real de ART tem de CAIR.
+    exige("receita-cobertura-por-art", "cagr_art", 0.12, tol=0.02)
+    fisc_ini, fisc_fim = 4e6 + 5e6, 4e6 * 1.01 ** 12 + 5e6 * 1.02 ** 12
+    exige("receita-cobertura-por-art", "cagr_fiscalizacao",
+          (fisc_fim / fisc_ini) ** (1 / 12) - 1, tol=0.05)
+    f = por_id.get("receita-cobertura-por-art")
+    if f is not None and not (f.metricas.get("cobertura_final", 1)
+                              < f.metricas.get("cobertura_inicial", 0)):
+        erros.append("receita-cobertura-por-art: a cobertura por real de ART "
+                     "deveria cair na fixture e não caiu")
     # conselheiros + inspetores + jeton, 13 exercícios
     exige("diarias-politico-vs-quadro", "estrutura_politica",
           (5_200_000 + 4_100_000 + 700_000 + 2_100_000 + 1_400_000) * 13)
