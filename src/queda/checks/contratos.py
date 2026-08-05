@@ -6,7 +6,7 @@ import pandas as pd
 from .. import analytics as A
 from .. import config
 from ..findings import Finding
-from ..utils import fmt_brl
+from ..utils import coluna, fmt_brl
 from .common import df
 
 FRENTE = "Contratos e licitações"
@@ -265,6 +265,50 @@ def run(staged) -> list[Finding]:
                     como_verificar="Pedir a relação de licitações do período e "
                                    "o vínculo contrato ↔ certame.",
                 ))
+                # O contrato publicado no PNCP carrega o número de controle da
+                # COMPRA de origem — e por ele se chega ao edital e ao termo de
+                # referência. Isso muda o enquadramento do achado acima: não é
+                # que o certame não exista, é que o portal PRÓPRIO não o publica
+                # enquanto o órgão o declara no sistema nacional.
+                if not pncp.empty and "numeroControlePNCPCompra" in pncp:
+                    alvo_c = pncp[pncp.get("orgao_papel") == "alvo"]
+                    com_compra = alvo_c[coluna(alvo_c, "numeroControlePNCPCompra")
+                                        .fillna("").astype(str).str.len() > 5]
+                    if not com_compra.empty:
+                        achados.append(Finding(
+                            id="contratos-certame-no-pncp", frente=FRENTE,
+                            gravidade="media",
+                            titulo=(f"{len(com_compra)} contrato(s) têm o certame "
+                                    "de origem identificado no PNCP, que o portal "
+                                    "do conselho não informa"),
+                            descricao=(
+                                "O mesmo órgão que deixa o campo de licitação "
+                                "vazio no portal próprio declara, no PNCP, o "
+                                "número de controle da COMPRA que originou cada "
+                                "contrato. Por esse número se chega ao edital, ao "
+                                "termo de referência e à modalidade.\n\n"
+                                "A informação existe e é pública — só não está "
+                                "onde o cidadão a procuraria. Cada linha abaixo é "
+                                "um caminho pronto para pedir os documentos do "
+                                "certame."),
+                            evidencia=(com_compra[[c for c in
+                                                   ("numeroContrato", "fornecedor_nome",
+                                                    "valorGlobal", "objeto",
+                                                    "numeroControlePNCPCompra",
+                                                    "processo")
+                                                   if c in com_compra]]
+                                       .sort_values("valorGlobal", ascending=False)
+                                       .head(200)),
+                            base_legal="Lei 14.133/2021, arts. 94 e 174; Lei "
+                                       "12.527/2011, art. 8º, §1º, IV.",
+                            como_verificar=(
+                                "Para cada número de controle, consultar "
+                                "`pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/"
+                                "{ano}/{sequencial}/arquivos` e baixar o edital e "
+                                "o termo de referência."),
+                            metricas={"com_certame_no_pncp": int(len(com_compra)),
+                                      "sem_certame_no_portal": int(len(sem_lic))},
+                        ))
             else:
                 achados.append(Finding(
                     id="contratos-sem-licitacao", frente=FRENTE,

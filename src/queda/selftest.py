@@ -388,7 +388,8 @@ def _staged() -> dict[str, pd.DataFrame]:
         for a in (2022, 2023, 2024) for i in (3, 8)])
 
     pncp = pd.DataFrame([
-        # categoria declarada pelo próprio órgão: 9 = serviço de engenharia
+        # numeroControlePNCPCompra: o certame de origem que o portal do
+        # conselho não informa em nenhum dos seus 965 contratos
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
          "orgao_nome": "CREA-SP", "fornecedor_ni": "55666777000188",
          "fornecedor_nome": "ELETRICA PREDIAL LTDA",
@@ -396,11 +397,9 @@ def _staged() -> dict[str, pd.DataFrame]:
          "valorGlobal": 2_400_000.0, "valorAcumulado": 2_400_000.0,
          "numeroContrato": "7/2023", "vigenciaInicio": "2023-01-01",
          "vigenciaFim": "2023-12-31", "anoContrato": 2023, "tipoPessoa": "PJ",
-         "dataAssinatura": "2023-01-01", "categoriaProcessoId": 9,
-         "categoriaProcessoNome": "Serviços de Engenharia",
+         "dataAssinatura": "2023-01-01",
          "numeroControlePNCPCompra": "00000000000191-1-000123/2023",
          "processo": "2023/000123"},
-        # SUBENQUADRAMENTO: objeto de engenharia declarado como serviço comum
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
          "orgao_nome": "CREA-SP", "fornecedor_ni": "66777888000199",
          "fornecedor_nome": "REFORMA TOTAL LTDA",
@@ -408,8 +407,7 @@ def _staged() -> dict[str, pd.DataFrame]:
          "valorGlobal": 1_800_000.0, "valorAcumulado": 1_800_000.0,
          "numeroContrato": "8/2023", "vigenciaInicio": "2023-03-01",
          "vigenciaFim": "2024-02-29", "anoContrato": 2023, "tipoPessoa": "PJ",
-         "dataAssinatura": "2023-03-01", "categoriaProcessoId": 8,
-         "categoriaProcessoNome": "Serviços",
+         "dataAssinatura": "2023-03-01",
          "numeroControlePNCPCompra": "00000000000191-1-000456/2023",
          "processo": "2023/000456"},
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo", "orgao_nome": "CREA-SP",
@@ -428,9 +426,6 @@ def _staged() -> dict[str, pd.DataFrame]:
     pncp["fornecedor_norm"] = pncp["fornecedor_nome"].map(norm_nome)
     # espelha stage_pncp
     pncp["_ano"] = pd.to_numeric(pncp["anoContrato"], errors="coerce")
-    _cat = pd.to_numeric(pncp.get("categoriaProcessoId"), errors="coerce")
-    pncp["categoria"] = _cat.map(config.CATEGORIA_PNCP).fillna("outra")
-    pncp["exige_art"] = pncp["categoria"].isin(("obras", "engenharia"))
 
     return {
         "pagamentos": _pagamentos(), "empenhos": empenhos, "contratos": contratos,
@@ -520,10 +515,7 @@ ESPERADOS = [
     # atas (LLM opcional: sem chave, avisa em vez de silenciar)
     "atas-llm-desligado",
     # casos concentrados
-    # o conselho pela própria régua (PNCP: categoria declarada na origem)
-    "espelho-categoria-declarada",
-    "espelho-subenquadramento",        # objeto de engenharia como serviço comum
-    "espelho-certame-no-pncp",
+    "contratos-certame-no-pncp",       # o PNCP diz qual compra originou o contrato
     "casos-entidade-da-casa",
     "casos-obras",
     # forense estatística

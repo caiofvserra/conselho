@@ -445,17 +445,10 @@ def stage_pncp(desde, ate):
                 "vigenciaFim": r.get("dataVigenciaFim"),
                 "anoContrato": r.get("anoContrato"),
                 "numeroContrato": r.get("numeroContratoEmpenho"),
-                # A categoria do processo classifica o contrato na ORIGEM, pelo
-                # próprio órgão: 7 = obras, 8 = serviços, 9 = serviços de
-                # engenharia. Num conselho de ENGENHARIA isso é a pergunta
-                # espelhada — as categorias 7 e 9 são exatamente as que exigem
-                # ART e responsável técnico, que é o que o Crea fiscaliza nos
-                # outros.
-                "categoriaProcessoId": (r.get("categoriaProcesso") or {}).get("id"),
-                "categoriaProcessoNome": (r.get("categoriaProcesso") or {}).get("nome"),
                 # O contrato não expõe edital nem termo de referência; a COMPRA
                 # de origem sim. É por este número que se chega aos documentos
-                # do certame — e o portal do próprio Crea não publica nenhum.
+                # do certame — e o portal do próprio Crea não publica nenhum
+                # número de licitação em 965 contratos.
                 "numeroControlePNCPCompra": r.get("numeroControlePNCPCompra"),
                 "processo": r.get("processo"),
             })
@@ -476,11 +469,6 @@ def stage_pncp(desde, ate):
     if not df_c.empty:
         df_c["fornecedor_norm"] = df_c["fornecedor_nome"].map(norm_nome)
         df_c["_ano"] = pd.to_numeric(coluna(df_c, "anoContrato"), errors="coerce")
-        cat = pd.to_numeric(coluna(df_c, "categoriaProcessoId"), errors="coerce")
-        df_c["categoria"] = cat.map(config.CATEGORIA_PNCP).fillna("outra")
-        # engenharia e obra são as categorias que exigem ART e responsável
-        # técnico — as mesmas que o conselho fiscaliza nos outros
-        df_c["exige_art"] = df_c["categoria"].isin(("obras", "engenharia"))
     _salvar("pncp_contratos", df_c)
     _salvar("pncp_cobrancas", pd.DataFrame(cobrancas))
     return df_c
