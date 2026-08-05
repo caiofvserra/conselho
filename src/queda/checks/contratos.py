@@ -1,15 +1,61 @@
-"""Frente 4 — Contratos e licitações: aditivos, vigência, cross-check PNCP."""
+"""Frente 4 — Contratos e licitações: o instrumento contra a execução.
+
+Duas perguntas diferentes convivem aqui. A primeira é sobre o **instrumento**:
+o contrato foi aditivado além do limite legal, tem vigência coerente, valor de
+ordem de grandeza plausível, e aparece no PNCP como a lei manda.
+
+A segunda é sobre a **distância entre o que foi contratado e o que foi pago**,
+por fornecedor — a medida mais direta que existe de execução contratual e a
+que ninguém publica. Ela abre dois caminhos opostos:
+
+* **pago muito acima do contratado** sugere execução além do instrumento,
+  aditivo não registrado no portal, ou pagamento sem cobertura contratual;
+* **pago muito abaixo do contratado, com a vigência já encerrada**, sugere
+  contrato inflado na origem: o valor reservado nunca foi executado, mas
+  serviu de referência de preço, de dispensa de novo certame e de habilitação.
+
+O limite honesto dessa segunda análise está no seu próprio material e precisa
+ser dito em cada achado: contrato é **instrumento** (compromisso, muitas vezes
+plurianual) e pagamento é **fluxo de caixa** de um exercício — não são a mesma
+base. A junção entre os dois é feita por NOME normalizado da contratada,
+porque o portal nem sempre publica o CNPJ do contrato, e um pagamento pode
+quitar contrato anterior à janela coletada. Nenhuma linha destes achados prova
+irregularidade: cada uma é uma divergência que o extrato do contrato e a
+relação de empenhos resolvem em uma consulta.
+
+Duas consequências disso são regra de código e não de texto, porque as duas já
+produziram número fabricado em teste: a subexecução só é medida quando a
+vigência inteira cabe na janela de pagamentos coletada (senão o "pago = 0" é a
+janela de coleta, não o contrato), e quando o nome quase não casa entre as duas
+bases o módulo troca a lista de acusações por UM achado sobre a junção.
+"""
 from __future__ import annotations
 
 import pandas as pd
 
 from .. import analytics as A
 from .. import config
+from .. import taxonomia as T
 from ..findings import Finding
 from ..utils import coluna, fmt_brl
 from .common import df
 
 FRENTE = "Contratos e licitações"
+
+# Limiares da razão pago/contratado. Ficam aqui porque este módulo é o único
+# consumidor; se outra frente passar a usá-los, migram para config.py junto de
+# PISO_ANALISE_FORNECEDOR (que é o piso de materialidade reaproveitado abaixo).
+#
+# 2,0 e não 1,25: o teto legal de aditivo (25%) mede o INSTRUMENTO, não a
+# execução, e a diferença entre caixa e contabilidade produz sozinha desvios
+# de dezenas de pontos. Dobrar o valor contratado é outra ordem de coisa.
+RAZAO_EXECUCAO_ALTA = 2.0
+RAZAO_EXECUCAO_BAIXA = 0.5
+
+# Abaixo desta taxa de contratadas com ALGUM pagamento casado pelo nome, o que
+# a razão mede é a junção, não a execução: publicar "N contratadas não
+# executaram o contrato" nesse cenário é publicar campo vazio como achado.
+TAXA_MINIMA_CASAMENTO_NOME = 25.0
 
 
 def _valor_implausivel(ctr: pd.DataFrame) -> pd.DataFrame:
@@ -43,12 +89,237 @@ def _valor_implausivel(ctr: pd.DataFrame) -> pd.DataFrame:
     return d[d["_valor"] > 4 * segundo]
 
 
+def _janela_pagamentos(pg: pd.DataFrame) -> tuple[pd.Timestamp | None,
+                                                  pd.Timestamp]:
+    """Entre que datas os dados enxergam execução — o piso e o teto da janela.
+
+    TETO. Usar `hoje` como referência de "vigência encerrada" mente nos dois
+    sentidos: a coleta costuma parar antes de hoje, e aí um contrato encerrado
+    no último exercício apareceria como "não executado" só porque os
+    pagamentos dele ainda não foram publicados. A referência honesta é a data
+    do ÚLTIMO pagamento conhecido — depois dela, os dados simplesmente não
+    veem execução nenhuma.
+
+    PISO. Faltava, e era o buraco maior: o rol de contratos vem por VIGÊNCIA,
+    então um contrato assinado em 2008 entra na coleta enquanto estiver
+    vigente, mas os pagamentos dele são anteriores ao primeiro exercício
+    coletado. Sem o piso, TODA contratada cuja vigência acabou antes do
+    primeiro pagamento conhecido sai com "pago = 0" — e esse zero é produto da
+    janela de coleta, não medição de contrato não executado. Num teste com um
+    contrato de 2008-2012 e pagamentos a partir de 2013, o módulo publicava
+    R$ 9 milhões "contratados e não pagos" que ninguém deixou de pagar.
+    """
+    if not pg.empty and "DATA" in pg.columns:
+        d = pd.to_datetime(pg["DATA"], errors="coerce")
+        if d.notna().any():
+            return d.min(), d.max()
+    return None, pd.Timestamp.today().normalize()
+
+
+def _pago_vs_contratado(ctr: pd.DataFrame, adt: pd.DataFrame, pg: pd.DataFrame,
+                        inicio: pd.Timestamp | None, corte: pd.Timestamp
+                        ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Uma linha por contratada: quanto foi contratado e quanto foi pago.
+
+    Devolve também os dois conjuntos que geraram a tabela — contratos e
+    pagamentos JÁ FILTRADOS — para que a série anual do relatório seja
+    construída sobre exatamente o mesmo material. Recontar a partir das bases
+    cruas faria o gráfico somar um total diferente do da tabela logo abaixo
+    dele, que é o tipo de incoerência que destrói a confiança no achado.
+
+    As decisões abaixo mudam o resultado e são todas conservadoras — ou seja,
+    reduzem o número de achados em vez de aumentá-lo:
+
+    * **Aditivo de valor entra no contratado.** Sem isso todo contrato
+      aditivado apareceria como "pago além do instrumento", quando o aditivo é
+      justamente o que autoriza pagar mais. O aditivo único com valor idêntico
+      ao do contrato é o caso ambíguo do achado
+      `contratos-aditivo-indeterminado` (acréscimo de 100% ou valor global
+      republicado?) e por isso saem DUAS colunas: `contratado`, com a leitura
+      mais provável (não soma o ambíguo), e `contratado_teto`, com a leitura
+      mais favorável ao órgão (soma tudo). O achado que acusa excesso usa o
+      TETO — a divergência tem de sobreviver à interpretação mais generosa —,
+      e o que aponta contrato não executado usa a estimativa menor. As duas
+      escolhas erram para o mesmo lado: o de não acusar.
+    * **Contratada com vários contratos soma todos antes de dividir.** Dividir
+      o pagamento total por um contrato só produz razão inventada.
+    * **Pagamento anterior ao início da primeira vigência conhecida não é
+      execução** — por definição ele quita contrato que não está na janela
+      coletada. O valor excluído volta na coluna `pago_antes_da_vigencia`,
+      para que a decisão seja auditável em vez de invisível.
+    * **Diária, jeton e locomoção só contam como execução de contrato quando o
+      favorecido é COMPROVADAMENTE pessoa jurídica.** Uma pessoa física com
+      contrato que também recebe diária apareceria recebendo muitas vezes o
+      contratado. A MESMA conta paga a uma agência de viagem ou locadora
+      permanece: aí é execução de contrato, não verba. O teste é `TIPO_PESSOA
+      == "PJ"`, e não `!= "PF"`, porque documento ausente vira INDEFINIDO e
+      não PJ (é a regra de `utils.classificar_pessoa`, escrita depois de um
+      rótulo agregado sem CPF contaminar o ranking de fornecedores). Com o
+      teste ao contrário, a diária de um favorecido sem documento voltava a
+      contar como execução e produzia um achado de gravidade alta — 9,0× o
+      contratado — sobre uma verba pessoal.
+    * **Vigência fora da janela de pagamentos não é execução medível.** A
+      coluna `execucao_observavel` marca a contratada cuja primeira vigência
+      começa dentro da janela coletada; só ela pode ser avaliada por
+      subexecução.
+    """
+    vazio = pd.DataFrame()
+    if ctr.empty or "CONTRATADA_NORM" not in ctr.columns:
+        return vazio, vazio, vazio
+
+    c = ctr.copy()
+    c["_nome"] = c["CONTRATADA_NORM"].fillna("").astype(str)
+    c = c[c["_nome"].str.len() > 2]
+    if c.empty:
+        return vazio, vazio, vazio
+    c["_valor"] = pd.to_numeric(coluna(c, "VALOR", 0), errors="coerce").fillna(0.0)
+    for col in ("INI", "FIM"):
+        c[col] = (pd.to_datetime(c[col], errors="coerce") if col in c.columns
+                  else pd.Series(pd.NaT, index=c.index, dtype="datetime64[ns]"))
+
+    c["_aditivo"] = 0.0
+    c["_aditivo_teto"] = 0.0
+    if (not adt.empty and {"NUMERO_CONTRATO", "VALOR"} <= set(adt.columns)
+            and "NUMERO_CONTRATO" in c.columns):
+        av = adt.copy()
+        av["_v"] = pd.to_numeric(av["VALOR"], errors="coerce").fillna(0.0)
+        av = av[av["_v"] > 0]              # aditivo de prazo não muda o valor
+        if not av.empty:
+            soma = av.groupby("NUMERO_CONTRATO")["_v"].agg(["sum", "size"])
+            total = c["NUMERO_CONTRATO"].map(soma["sum"]).fillna(0.0)
+            n_adt = c["NUMERO_CONTRATO"].map(soma["size"]).fillna(0)
+            indeterminado = ((n_adt == 1) &
+                             ((total - c["_valor"]).abs() < 0.005) &
+                             (c["_valor"] > 0))
+            c["_aditivo_teto"] = total
+            c["_aditivo"] = total.where(~indeterminado, 0.0)
+
+    g = (c.groupby("_nome")
+         .agg(contratos=("_valor", "size"),
+              valor_contratado=("_valor", "sum"),
+              aditivos=("_aditivo", "sum"),
+              _aditivos_teto=("_aditivo_teto", "sum"),
+              vigencia_de=("INI", "min"),
+              vigencia_ate=("FIM", "max"),
+              _sem_fim=("FIM", lambda s: int(s.isna().sum()))))
+
+    p = (pg.copy() if not pg.empty and "FAVORECIDO_NORM" in pg.columns
+         else pd.DataFrame())
+    if not p.empty:
+        p["_nome"] = p["FAVORECIDO_NORM"].fillna("").astype(str)
+        p = p[p["_nome"].isin(g.index)]
+    if not p.empty:
+        p["_valor"] = pd.to_numeric(coluna(p, "VALOR", 0),
+                                    errors="coerce").fillna(0.0)
+        p["_data"] = (pd.to_datetime(p["DATA"], errors="coerce")
+                      if "DATA" in p.columns
+                      else pd.Series(pd.NaT, index=p.index,
+                                     dtype="datetime64[ns]"))
+        # Classificação pelo NOME DA CONTA (nunca por regex crua sobre texto
+        # acentuado): T.classificar_texto normaliza antes de casar, e roda
+        # sobre os valores distintos, não linha a linha.
+        conta = coluna(p, "CONTA_EMPENHO", "").fillna("").astype(str)
+        natureza = conta.map({v: T.classificar_texto(v) for v in conta.unique()})
+        # Evidência POSITIVA de pessoa jurídica, nunca a ausência de evidência
+        # de pessoa física: INDEFINIDO (documento não publicado) fica do lado
+        # da verba, que é o lado que não acusa.
+        eh_pj = (p["TIPO_PESSOA"].eq("PJ") if "TIPO_PESSOA" in p.columns
+                 else coluna(p, "PJ", False).astype(bool))
+        p = p[~(~eh_pj & natureza.eq("VERBAS_PESSOAIS"))]
+
+    anteriores = pd.Series(dtype=float)
+    tot = pd.DataFrame(columns=["pago", "pagamentos"], dtype=float)
+    if not p.empty:
+        p = p.join(g["vigencia_de"].rename("_ini"), on="_nome")
+        antes = (p["_data"].notna() & p["_ini"].notna() &
+                 (p["_data"] < p["_ini"]))
+        if antes.any():
+            anteriores = p[antes].groupby("_nome")["_valor"].sum()
+        p = p[~antes]
+    if not p.empty:
+        tot = p.groupby("_nome")["_valor"].agg(pago="sum", pagamentos="size")
+
+    out = g.copy()
+    out["pago"] = (tot["pago"] if "pago" in tot else pd.Series(dtype=float)
+                   ).reindex(out.index).fillna(0.0).astype(float)
+    out["pagamentos"] = ((tot["pagamentos"] if "pagamentos" in tot
+                          else pd.Series(dtype=float))
+                         .reindex(out.index).fillna(0).astype(int))
+    out["pago_antes_da_vigencia"] = (anteriores.reindex(out.index)
+                                     .fillna(0.0).astype(float))
+    out["contratado"] = out["valor_contratado"] + out["aditivos"]
+    out["contratado_teto"] = out["valor_contratado"] + out["_aditivos_teto"]
+    denom = out["contratado"].where(out["contratado"] > 0)
+    out["razao_pago_contratado"] = (out["pago"] / denom).round(3)
+    teto = out["contratado_teto"].where(out["contratado_teto"] > 0)
+    out["razao_no_teto"] = (out["pago"] / teto).round(3)
+    out["divergencia"] = out["pago"] - out["contratado"]
+    out["divergencia_no_teto"] = out["pago"] - out["contratado_teto"]
+    out["divergencia_abs"] = out["divergencia"].abs()
+    # Só é "vigência encerrada" quando TODOS os contratos da contratada têm fim
+    # conhecido e anterior ao último pagamento visto. Contrato sem data de fim
+    # publicada não pode ser dado como executado nem como abandonado.
+    out["encerrada"] = (out["vigencia_ate"].notna() &
+                        (out["vigencia_ate"] < corte) & (out["_sem_fim"] == 0))
+    # E só é execução MEDÍVEL quando a vigência inteira cai dentro da janela de
+    # pagamentos coletada. Se a primeira vigência começa antes do primeiro
+    # pagamento conhecido, parte da execução aconteceu fora do alcance dos
+    # dados e o que sobra não distingue "não executou" de "executou antes da
+    # janela". Sem esta coluna o achado de subexecução publicava a janela de
+    # coleta como se fosse achado.
+    if inicio is None:
+        out["execucao_observavel"] = False
+    else:
+        out["execucao_observavel"] = (out["vigencia_de"].notna() &
+                                      (out["vigencia_de"] >= inicio))
+    for col in ("valor_contratado", "aditivos", "contratado", "contratado_teto",
+                "pago", "divergencia", "divergencia_no_teto", "divergencia_abs",
+                "pago_antes_da_vigencia"):
+        out[col] = out[col].round(2)
+    tabela = (out.drop(columns=["_sem_fim", "_aditivos_teto"]).reset_index()
+              .rename(columns={"_nome": "fornecedor"})
+              .sort_values("divergencia_abs", ascending=False))
+    c["_contratado"] = c["_valor"] + c["_aditivo"]
+    return tabela, c, p
+
+
+_COLS_RAZAO = ["fornecedor", "contratos", "valor_contratado", "aditivos",
+               "contratado", "contratado_teto", "pago", "pagamentos",
+               "razao_pago_contratado", "divergencia", "vigencia_de",
+               "vigencia_ate", "encerrada", "execucao_observavel",
+               "pago_antes_da_vigencia"]
+# O achado de excesso mostra o denominador que usou (o teto), e não a
+# estimativa central — quem confere a lista precisa ver a conta que a gerou.
+_COLS_EXCESSO = ["fornecedor", "contratos", "valor_contratado", "aditivos",
+                 "contratado_teto", "pago", "pagamentos", "razao_no_teto",
+                 "divergencia_no_teto", "vigencia_de", "vigencia_ate",
+                 "encerrada", "pago_antes_da_vigencia"]
+
+# Repetido em todos os achados desta análise porque cada um é lido isolado no
+# dashboard e nenhum deles pode circular sem o seu limite.
+_RESSALVA = (
+    "**O que estes números não provam.** Contrato e pagamento são bases "
+    "diferentes: o contrato é o instrumento (compromisso, muitas vezes "
+    "plurianual, às vezes com valor apenas estimado, como em ata de registro "
+    "de preço) e o pagamento é fluxo de caixa do exercício. A junção entre os "
+    "dois é feita pelo NOME normalizado da contratada, não pelo CNPJ — o "
+    "portal nem sempre publica o CNPJ no contrato —, e razão social parecida "
+    "ou grafia diferente separa ou funde fornecedores indevidamente. Um "
+    "pagamento pode quitar contrato de exercício anterior à janela coletada, "
+    "que esta ferramenta não enxerga. Cada linha é uma divergência a "
+    "explicar, não uma irregularidade demonstrada.")
+
+
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
     ctr = df(staged, "contratos")
     adt = df(staged, "aditivos")
     pg = df(staged, "pagamentos")
     pncp = df(staged, "pncp_contratos")
+
+    # Contratadas que perdem um contrato na limpeza de valor implausível ficam
+    # com denominador MENOR do que o cadastro publica — ver o bloco abaixo.
+    sem_carteira_confiavel: set[str] = set()
 
     # ---------------------------------------- sanidade de valor, ANTES de somar
     implausiveis = _valor_implausivel(ctr)
@@ -85,6 +356,15 @@ def run(staged) -> list[Finding]:
                            "efetivamente pago à contratada no período.",
         ))
         ctr = ctr[~ctr.index.isin(implausiveis.index)]
+        # A exclusão acima protege as somas de carteira e ENVENENA a razão
+        # pago/contratado: a contratada continua com todos os pagamentos dela
+        # no numerador e perde do denominador justo o maior contrato. Num teste
+        # com uma contratada de R$ 1 mi + R$ 400 mi (este implausível) e
+        # R$ 300 mi pagos, o módulo publicava, com gravidade alta, "R$ 299
+        # milhões pagos além dos instrumentos" — número inteiramente produzido
+        # por este filtro. Quem cai aqui sai inteiro da razão.
+        sem_carteira_confiavel = set(
+            coluna(implausiveis, "CONTRATADA_NORM").dropna().astype(str)) - {""}
 
     # -------------------------------------------------- aditivos acima do limite
     if not ctr.empty and not adt.empty and "NUMERO_CONTRATO" in adt:
@@ -369,4 +649,321 @@ def run(staged) -> list[Finding]:
                 evidencia=infl[["numeroContrato", "fornecedor_nome", "objeto",
                                 "valorGlobal", "valorAcumulado"]],
             ))
+
+    # ------------------------------------ razão pago/contratado por fornecedor
+    achados.extend(_achados_razao(ctr, adt, pg, sem_carteira_confiavel))
+    return achados
+
+
+def _achados_razao(ctr: pd.DataFrame, adt: pd.DataFrame, pg: pd.DataFrame,
+                   sem_carteira_confiavel: set[str] | None = None
+                   ) -> list[Finding]:
+    """O contrato diz quanto foi comprometido; o pagamento, quanto saiu."""
+    achados: list[Finding] = []
+    piso = config.PISO_ANALISE_FORNECEDOR
+
+    # Fonte ausente não vira estimativa nem silêncio: vira um achado que diz
+    # que a medida não pôde ser feita (e por quê).
+    if ctr.empty or pg.empty or "FAVORECIDO_NORM" not in pg.columns:
+        achados.append(Finding(
+            id="contratos-razao-pago-indisponivel", frente=FRENTE,
+            gravidade="info",
+            titulo=("Razão pago/contratado por fornecedor: análise "
+                    f"INDISPONÍVEL ({len(ctr)} contrato(s) e {len(pg)} "
+                    "pagamento(s) coletados)"),
+            descricao=(
+                "A comparação entre o valor contratado e o valor efetivamente "
+                "pago a cada fornecedor exige as DUAS fontes: o rol de "
+                "contratos e o rol de pagamentos. Pelo menos uma delas veio "
+                "vazia nesta coleta, e por isso a medida não foi feita — "
+                "nenhum número foi estimado no lugar dela. **A ausência desta "
+                "análise não é sinal de regularidade**: é sinal de que o "
+                "portal não entregou o insumo."),
+            metricas={"contratos": int(len(ctr)), "pagamentos": int(len(pg))},
+            como_verificar=("Pedir a relação de contratos e a de pagamentos do "
+                            "período em formato aberto, com CNPJ da contratada "
+                            "em ambas."),
+        ))
+        return achados
+
+    inicio, corte = _janela_pagamentos(pg)
+    razao, contratos_base, pagos_base = _pago_vs_contratado(
+        ctr, adt, pg, inicio, corte)
+    if razao.empty:
+        return achados
+    fora_por_valor = 0
+    if sem_carteira_confiavel:
+        antes = len(razao)
+        razao = razao[~razao["fornecedor"].isin(sem_carteira_confiavel)]
+        fora_por_valor = antes - len(razao)
+    if razao.empty:
+        return achados
+    # Piso de materialidade: fornecedor pequeno faz a razão explodir sem que a
+    # diferença signifique nada (R$ 1.000 contratados e R$ 50 mil pagos dão 50x
+    # e R$ 49 mil de divergência).
+    base = razao[(razao["contratado"] >= piso) | (razao["pago"] >= piso)]
+    if base.empty:
+        return achados
+
+    # A qualidade da JUNÇÃO antes de qualquer acusação: a única chave entre as
+    # duas bases é o nome normalizado, e quando ele quase não casa, "pago = 0"
+    # deixa de medir execução e passa a medir a chave. Isso é um achado de
+    # metodologia — UM —, não uma lista de contratadas a explicar. É a mesma
+    # decisão já tomada em `contratos-vinculo-certame-ausente`.
+    casadas = int((base["pagamentos"] > 0).sum())
+    taxa_casamento = 100.0 * casadas / len(base)
+    juncao_confiavel = taxa_casamento >= TAXA_MINIMA_CASAMENTO_NOME
+    if not juncao_confiavel:
+        achados.append(Finding(
+            id="contratos-juncao-por-nome-sem-correspondencia", frente=FRENTE,
+            gravidade="media",
+            titulo=(f"Só {taxa_casamento:.1f}% das contratadas ({casadas} de "
+                    f"{len(base)}) têm algum pagamento localizável pelo nome"),
+            descricao=(
+                "A única chave que liga o rol de contratos ao rol de "
+                "pagamentos é o nome normalizado da contratada — o portal não "
+                "publica o CNPJ nos dois lados. Quando esse nome casa em "
+                "quase nenhum caso, o zero da coluna `pago` não mede execução "
+                "contratual: mede a chave.\n\n"
+                "Por isso **a lista de contratos não executados não foi "
+                "emitida nesta rodada**. Publicá-la seria apresentar "
+                f"{len(base) - casadas} contratadas como quem recebeu contrato "
+                "e não executou, quando o que os dados mostram é que a "
+                "ferramenta não conseguiu encontrar os pagamentos delas.\n\n"
+                "Este achado é mais grave que a lista que ele substitui: sem "
+                "identificador comum entre contrato e pagamento, a execução "
+                "contratual do conselho não é auditável a partir dos dados "
+                "abertos por ninguém, nem por esta ferramenta.\n\n" + _RESSALVA),
+            evidencia=base[_COLS_RAZAO].head(200),
+            metricas={"taxa_casamento_pct": round(taxa_casamento, 1),
+                      "contratadas_com_pagamento": casadas,
+                      "contratadas": int(len(base))},
+            base_legal="Lei 12.527/2011, art. 8º, §3º, II e III (dados abertos "
+                       "em formato que permita cruzamento).",
+            como_verificar=("Pedir o rol de contratos e o de pagamentos com o "
+                            "CNPJ da contratada em AMBOS, ou o relatório de "
+                            "execução contratual por fornecedor."),
+        ))
+
+    # ---------------------------------------- 1. pago muito acima do contratado
+    # Denominador pelo TETO: com o aditivo ambíguo somado, que é a leitura mais
+    # favorável ao órgão. Quem sobra recebeu o dobro sob qualquer interpretação.
+    excesso = base[(base["contratado_teto"] > 0) &
+                   (base["razao_no_teto"] >= RAZAO_EXECUCAO_ALTA) &
+                   (base["divergencia_no_teto"] >= piso)]
+    if not excesso.empty:
+        alem = float(excesso["divergencia_no_teto"].sum())
+        maior = excesso.sort_values("divergencia_no_teto", ascending=False).iloc[0]
+        achados.append(Finding(
+            id="contratos-pago-acima-do-contratado", frente=FRENTE,
+            gravidade="alta",
+            titulo=(f"{len(excesso)} fornecedor(es) com pagamento de pelo menos "
+                    f"o dobro do que foi contratado — {fmt_brl(alem)} pagos "
+                    "além dos instrumentos"),
+            descricao=(
+                "Somando todos os contratos de cada fornecedor **e todos os "
+                "aditivos de valor**, e comparando com o que lhe foi pago a "
+                "partir do início da primeira vigência conhecida, estes "
+                "fornecedores receberam pelo menos o dobro do contratado. O "
+                f"maior caso é {maior['fornecedor']}: "
+                f"{fmt_brl(float(maior['contratado_teto']))} contratados e "
+                f"{fmt_brl(float(maior['pago']))} pagos "
+                f"({maior['razao_no_teto']:.1f}x).\n\n"
+                "Três explicações cabem no mesmo número, e só o extrato "
+                "resolve qual é: aditivo celebrado e não publicado no portal; "
+                "contrato anterior à janela coletada ainda em execução; ou "
+                "pagamento sem cobertura contratual. As três são perguntas "
+                "legítimas, e a terceira é a que a Lei 4.320 proíbe.\n\n"
+                "A lista está ordenada pela DIVERGÊNCIA EM REAIS, não pela "
+                "razão: um contrato de R$ 1.000 pago 50 vezes lidera qualquer "
+                "ranking por razão e não move o orçamento. A coluna usada é "
+                "`contratado_teto` — o valor contratado somado a TODOS os "
+                "aditivos, inclusive os de valor ambíguo, que é a leitura mais "
+                "favorável ao órgão. Quem aparece aqui recebeu o dobro sob "
+                "qualquer interpretação do cadastro.\n\n" + _RESSALVA),
+            evidencia=(excesso[_COLS_EXCESSO]
+                       .sort_values("divergencia_no_teto",
+                                    ascending=False).head(200)),
+            base_legal=("Lei 14.133/2021, art. 95, §2º (é nulo o contrato "
+                        "verbal com a Administração) e art. 125 (acréscimo "
+                        "limitado a 25%, 50% para reforma); Lei 8.666/1993, "
+                        "art. 60, parágrafo único, e art. 65, §1º; Lei "
+                        "4.320/1964, arts. 60 a 63 (despesa exige empenho "
+                        "prévio e liquidação regular antes do pagamento)."),
+            como_verificar=(
+                "Pedir, para cada fornecedor da lista, a relação completa de "
+                "contratos e termos aditivos vigentes no período e o extrato "
+                "de empenhos que lastreiam os pagamentos. Um contrato anterior "
+                "à janela coletada explica parte dos casos; o que sobrar é "
+                "pagamento a justificar."),
+            # A chave é `contratado_teto` e não `contratado`: o número somado é
+            # o do denominador que o achado usou, e o nome tem de dizer isso —
+            # senão ele é lido contra o `contratado_total` do panorama, que é
+            # outra conta.
+            metricas={"fornecedores": int(len(excesso)),
+                      "pago_alem_do_contratado": round(alem, 2),
+                      "contratado_teto": round(
+                          float(excesso["contratado_teto"].sum()), 2),
+                      "pago": round(float(excesso["pago"].sum()), 2),
+                      "razao_maxima": round(
+                          float(excesso["razao_no_teto"].max()), 2)},
+        ))
+
+    # ------------------------- 2. contrato encerrado com execução muito abaixo
+    ociosos = base[base["encerrada"] & base["execucao_observavel"] &
+                   (base["contratado"] >= piso) &
+                   (base["razao_pago_contratado"] <= RAZAO_EXECUCAO_BAIXA) &
+                   ((base["contratado"] - base["pago"]) >= piso)].copy()
+    if not juncao_confiavel:
+        ociosos = ociosos.iloc[0:0]
+    if not ociosos.empty:
+        ociosos["nao_executado"] = (ociosos["contratado"] -
+                                    ociosos["pago"]).round(2)
+        reservado = float(ociosos["nao_executado"].sum())
+        sem_pagamento = int((ociosos["pagamentos"] == 0).sum())
+        achados.append(Finding(
+            id="contratos-contratado-nao-executado", frente=FRENTE,
+            gravidade="media",
+            titulo=(f"{len(ociosos)} contratada(s) com vigência encerrada e "
+                    "menos da metade do contrato executada — "
+                    f"{fmt_brl(reservado)} contratados e não pagos"),
+            descricao=(
+                "Só entram aqui contratadas cujos contratos JÁ TERMINARAM "
+                "(todos com data final publicada e anterior ao último "
+                "pagamento conhecido) — contrato em curso tem execução menor "
+                "por construção, e incluí-lo seria fabricar achado. E só "
+                "entram as que cabem INTEIRAS na janela de pagamentos "
+                "coletada: um contrato que começou antes do primeiro "
+                "pagamento publicado teve parte da execução fora do alcance "
+                "destes dados, e o zero dele seria a janela de coleta "
+                "aparecendo como se fosse achado.\n\n"
+                "Contrato muito acima do que se executou não é ilegal por si. "
+                "Ele importa por três consequências práticas: o valor "
+                "contratado é o que define a modalidade de licitação e a "
+                "exigência de qualificação econômica — superdimensionar "
+                "restringe quem pode disputar; ele vira referência de preço "
+                "para as contratações seguintes; e imobiliza dotação que "
+                "poderia custear outra coisa. Ata de registro de preço é a "
+                "exceção legítima e frequente: ali o valor é estimativa e não "
+                "compromisso — vale conferir a natureza do instrumento antes "
+                "de cobrar explicação."
+                + (f"\n\nDe {len(ociosos)} contratada(s), {sem_pagamento} não "
+                   "tiveram NENHUM pagamento casado pelo nome. Isso reforça a "
+                   "hipótese de contrato não executado, mas também é "
+                   "exatamente o que aconteceria se a razão social estivesse "
+                   "grafada de outro jeito na folha de pagamentos."
+                   if sem_pagamento else "")
+                + "\n\n" + _RESSALVA),
+            evidencia=(ociosos[_COLS_RAZAO + ["nao_executado"]]
+                       .sort_values("nao_executado", ascending=False).head(200)),
+            base_legal=("Lei 14.133/2021, art. 18, §1º, IV (estimativa das "
+                        "quantidades com memória de cálculo) e art. 23 "
+                        "(estimativa do valor da contratação); Lei 8.666/1993, "
+                        "art. 7º, §4º (vedados quantitativos que não "
+                        "correspondam às previsões reais)."),
+            como_verificar=(
+                "Para os contratos listados, pedir as medições/ordens de "
+                "serviço efetivamente executadas, o termo de encerramento com "
+                "o saldo não executado e a memória de cálculo que sustentou a "
+                "estimativa original. Conferir também se o instrumento é ata "
+                "de registro de preço, em que o valor é estimado."),
+            metricas={"fornecedores": int(len(ociosos)),
+                      "contratado": round(float(ociosos["contratado"].sum()), 2),
+                      "pago": round(float(ociosos["pago"].sum()), 2),
+                      "nao_executado": round(reservado, 2),
+                      "sem_pagamento_correspondente": sem_pagamento},
+        ))
+
+    # ----------------------------------------------------- 3. panorama da razão
+    contratado_total = float(base["contratado"].sum())
+    pago_total = float(base["pago"].sum())
+    sem_valor = int((base["contratado"] <= 0).sum())
+    observaveis = int(base["execucao_observavel"].sum())
+    nomes = set(base["fornecedor"])
+
+    def _serie_anual(d: pd.DataFrame, data_col: str, valor_col: str):
+        if d.empty or valor_col not in d.columns:
+            return pd.Series(dtype=float)
+        x = d[d["_nome"].isin(nomes)].copy()
+        if x.empty:
+            return pd.Series(dtype=float)
+        x["_ano"] = pd.to_datetime(coluna(x, data_col, pd.NaT),
+                                   errors="coerce").dt.year
+        s = A.serie_anual(x, valor_col)
+        return s[valor_col] if not s.empty else pd.Series(dtype=float)
+
+    # As duas curvas correm em relógios DIFERENTES — contrato pelo ano em que a
+    # vigência começa, pagamento pelo ano em que o dinheiro saiu. Um contrato
+    # plurianual assinado em 2021 aparece inteiro em 2021 e é pago até 2024.
+    # É por isso que a comparação vale como acumulado do período, não ano a ano.
+    serie = pd.DataFrame({
+        "contratado (ano de início da vigência)":
+            _serie_anual(contratos_base, "INI", "_contratado"),
+        "pago (ano do pagamento)":
+            _serie_anual(pagos_base, "_data", "_valor"),
+    }).fillna(0.0)
+    serie.index.name = "_ano"
+    achados.append(Finding(
+        id="contratos-pago-vs-contratado", frente=FRENTE, gravidade="info",
+        titulo=(f"{len(base)} fornecedor(es) acima de {fmt_brl(piso)}: "
+                f"{fmt_brl(pago_total)} pagos contra {fmt_brl(contratado_total)} "
+                "contratados"),
+        descricao=(
+            "A razão entre o que se paga e o que se contrata, fornecedor a "
+            "fornecedor, é a medida mais direta de execução contratual que os "
+            "dados abertos permitem — e não é publicada por ninguém. Esta é a "
+            "tabela completa que sustenta os demais achados desta análise, "
+            "ordenada pela divergência em reais: aditivos de valor já somados "
+            "ao contratado, contratos da mesma contratada agregados antes da "
+            "divisão, e pagamentos anteriores ao início da primeira vigência "
+            "conhecida separados na coluna `pago_antes_da_vigencia` (eles "
+            "pertencem a contrato que a janela coletada não alcança). A coluna "
+            "`contratado_teto` repete o contratado somando também os aditivos "
+            "de valor ambíguo — é a leitura mais favorável ao órgão, e é ela "
+            "que o achado de excesso usa como denominador.\n\n"
+            "A leitura útil é por extremos: razão perto de 1 é execução "
+            "normal; muito acima de 1 é execução além do instrumento; muito "
+            "abaixo, com a vigência encerrada, é contrato que reservou mais do "
+            "que consumiu."
+            + (f" Em {sem_valor} fornecedor(es) a razão nem pode ser "
+               "calculada, porque o portal não publica valor no contrato — "
+               "ausência que é, por si, falha de transparência."
+               if sem_valor else "")
+            + (f"\n\nDe {len(base)} fornecedor(es), {casadas} têm algum "
+               f"pagamento localizado pelo nome ({taxa_casamento:.1f}%) e "
+               f"{observaveis} têm a vigência inteira dentro da janela de "
+               "pagamentos coletada (coluna `execucao_observavel`) — só estes "
+               "podem ser avaliados por subexecução. Nos demais, o `pago` "
+               "baixo pode ser execução anterior ao primeiro exercício "
+               "coletado, e não contrato ocioso."
+               )
+            + (f"\n\n{fora_por_valor} contratada(s) ficaram FORA desta tabela "
+               "por terem contrato de valor fora de ordem de grandeza (achado "
+               "`contratos-valor-implausivel`): com o contrato suspeito "
+               "excluído da carteira, o denominador delas ficaria menor que o "
+               "que o portal publica e a razão acusaria um excesso produzido "
+               "por esta ferramenta, não pelos dados."
+               if fora_por_valor else "")
+            + "\n\n" + _RESSALVA),
+        evidencia=base[_COLS_RAZAO].head(200),
+        serie=serie, grafico="bar",
+        tabela_anual=serie.round(2).reset_index(),
+        metricas={"fornecedores": int(len(base)),
+                  "contratado_total": round(contratado_total, 2),
+                  "pago_total": round(pago_total, 2),
+                  "razao_global": (round(pago_total / contratado_total, 3)
+                                   if contratado_total > 0 else None),
+                  "pago_antes_da_vigencia":
+                      round(float(base["pago_antes_da_vigencia"].sum()), 2),
+                  "fornecedores_sem_pagamento":
+                      int((base["pagamentos"] == 0).sum()),
+                  "fornecedores_sem_valor_contratado": sem_valor,
+                  "taxa_casamento_pct": round(taxa_casamento, 1),
+                  "fornecedores_execucao_observavel": observaveis,
+                  "fornecedores_fora_por_valor_implausivel": fora_por_valor},
+        como_verificar=("Pedir o relatório de execução contratual por "
+                        "fornecedor (empenhado, liquidado e pago por "
+                        "contrato), que é o documento que fecha esta conta "
+                        "sem aproximação por nome."),
+    ))
     return achados

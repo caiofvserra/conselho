@@ -2,11 +2,22 @@
 
 A sondagem retroativa tenta anos cada vez mais antigos (meta do usuário:
 alcançar exercícios pré-2016) e para após N anos vazios consecutivos.
+
+Retomada em dois níveis. O grosso (`--retomar`) pula ETAPAS que já têm CSV em
+`data/staged`. O fino, implementado aqui, pula JANELAS dentro da etapa: cada
+exercício coletado vira um checkpoint em `data/raw/checkpoints/<etapa>/`, e a
+etapa só vai à rede pelas janelas que faltam. É o que separa "a sessão do Colab
+caiu em 2019 e voltamos de 2019" de "caiu em 2019 e a etapa inteira recomeça de
+2026" — que é o que acontecia antes.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
+import time
+from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -17,6 +28,17 @@ from .utils import (classificar_pessoa, coluna, norm_nome, parse_data,
 
 log = logging.getLogger("queda.pipeline")
 
+# ---------------------------------------------------------------- constantes
+# MIGRAR PARA config.py: estas três não estão lá porque config.py pertence a
+# outro agente nesta rodada. São parâmetros de operação, não de análise.
+CHECKPOINT_SUBDIR = "checkpoints"
+# Exercício ainda EM CURSO muda todo dia: um checkpoint dele vale poucas horas.
+# Exercício encerrado não muda mais e o checkpoint vale para sempre.
+CHECKPOINT_TTL_HORAS = 12.0
+# Escotilha de emergência: QUEDA_CHECKPOINT=0 desliga leitura e gravação, para
+# o caso de um checkpoint ruim precisar ser contornado sem apagar nada à mão.
+_ENV_CHECKPOINT = "QUEDA_CHECKPOINT"
+
 
 # ---------------------------------------------------------------- helpers
 # Registro do que cada dataset trouxe. Um "0 linhas" no log some no scroll e
@@ -24,6 +46,12 @@ log = logging.getLogger("queda.pipeline")
 # que ninguém perceba (foi o caso de quadro_pessoal e mandatarios na primeira
 # rodada real). Vira uma frente própria no dashboard.
 _DIAGNOSTICO: list[dict] = []
+
+# Contabilidade das janelas por etapa, consumida por `_salvar` para que o
+# relatório de diagnóstico diga QUANTAS janelas ficaram sem coleta — não só
+# quantas linhas vieram. Uma etapa com 40.000 linhas e três exercícios
+# faltando parece saudável no total e não é.
+_JANELAS: dict[str, dict] = {}
 
 
 def _salvar(nome: str, df: pd.DataFrame) -> pd.DataFrame:
@@ -43,6 +71,7 @@ def _salvar(nome: str, df: pd.DataFrame) -> pd.DataFrame:
         "anos_faltando": (", ".join(str(a) for a in
                                     range(anos[0], anos[-1] + 1)
                                     if a not in set(anos)) if anos else ""),
+        **_JANELAS.pop(nome, {}),
     })
     if df is None or df.empty:
         # DataFrame sem colunas grava um CSV vazio que pd.read_csv rejeita com
@@ -65,14 +94,322 @@ def salvar_diagnostico() -> pd.DataFrame:
     return d
 
 
-def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None):
-    """Itera anos de `ate` para trás. Se desde=None, sonda até esvaziar."""
-    frames = []
+def salvar_ledger_http() -> pd.DataFrame:
+    """Grava em `staged/_coleta_http.csv` o registro das requisições da rodada.
+
+    Quantas chamadas foram feitas, a que host, com que status: é o que separa
+    "o conselho não publica este dado" de "a coleta não conseguiu perguntar".
+    Sem esse registro, um 403 em rajada e uma ausência real de publicação
+    chegam ao relatório com a mesma cara — zero linhas.
+
+    O ledger é OPCIONAL. `queda.http` é a camada mais baixa do projeto e pode
+    não expô-lo (numa versão anterior, ou numa instalação parcial); nesse caso
+    a coleta segue sem ele, porque perder o registro de rede é um prejuízo
+    pequeno perto de perder a coleta. Quando `http.salvar_ledger` existe, é ele
+    que grava — a formatação do ledger é assunto de quem o mantém, não daqui.
+    """
+    destino = config.STAGED_DIR / "_coleta_http.csv"
+    try:
+        from . import http
+        try:
+            return http.salvar_ledger(destino)
+        except AttributeError:
+            bruto = http.ledger() if callable(http.ledger) else http.ledger
+    except (ImportError, AttributeError):
+        log.debug("queda.http não expõe ledger — sem _coleta_http.csv")
+        return pd.DataFrame()
+    except Exception as e:                 # forma inesperada não derruba nada
+        log.warning("ledger HTTP ilegível (%s: %s) — seguindo sem ele",
+                    type(e).__name__, e)
+        return pd.DataFrame()
+    d = (bruto if isinstance(bruto, pd.DataFrame)
+         else pd.DataFrame(list(bruto.values()) if isinstance(bruto, dict)
+                           else list(bruto or [])))
+    if d.empty:
+        return d                           # nada a dizer: não cria arquivo vazio
+    config.STAGED_DIR.mkdir(parents=True, exist_ok=True)
+    d.to_csv(destino, index=False)
+    log.info("staged/_coleta_http.csv: %d requisição(ões) registrada(s)", len(d))
+    return d
+
+
+# ------------------------------------------------- checkpoint por janela
+# Por que CSV e não parquet: parquet só existe com pyarrow ou fastparquet
+# instalados, e nenhum dos dois está em requirements.txt (o Colab traz pyarrow,
+# uma máquina limpa não). Um checkpoint que às vezes existe e às vezes não é
+# pior do que não ter checkpoint. CSV também é auditável no meio de uma queda:
+# o operador abre o arquivo e vê o que já veio.
+#
+# O preço do CSV é perder o tipo. Ele é pago na LEITURA, não na gravação: tudo
+# volta como texto (`dtype=str`), e é isso que se quer, porque assim CPF/CNPJ
+# com zero à esquerda e número de contrato zero-preenchido não são convertidos
+# em inteiro pelo inferidor do pandas. `parse_valor` e `parse_data` já recebem
+# texto no caminho normal, então nada muda para eles.
+#
+# A ÚNICA exceção é o booleano: "False" lido como texto é VERDADEIRO num
+# `astype(bool)`, e é exatamente por `ANALITICA`/`_folha` que a ferramenta
+# separa conta analítica de totalizador. Um checkpoint que devolvesse "False"
+# reintroduziria, em silêncio, a soma da árvore contábil inteira — o bug que
+# multiplicava a despesa por 3-4x. Por isso `_do_texto` restaura o booleano.
+def _checkpoint_ligado() -> bool:
+    return str(os.environ.get(_ENV_CHECKPOINT, "1")).strip().lower() not in (
+        "0", "nao", "não", "false", "off")
+
+
+def _checkpoint_dir(etapa: str) -> Path:
+    """Pasta da etapa. `etapa` pode conter barra e virar subpasta — é como o
+    PNCP separa as janelas de cada órgão (`pncp_contratos/<cnpj>/202401.csv`),
+    já que o mesmo mês é buscado uma vez por CNPJ."""
+    return config.RAW_DIR / CHECKPOINT_SUBDIR / etapa
+
+
+def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path]:
+    """(csv com linhas, marcador de janela vazia).
+
+    São dois arquivos porque um CSV de zero linhas é ambíguo: pode ser "o
+    servidor respondeu que não há nada neste exercício" ou "a gravação foi
+    interrompida". O marcador `.vazio` afirma a primeira coisa e só é escrito
+    quando o servidor de fato respondeu.
+    """
+    base = _checkpoint_dir(etapa) / "".join(
+        c if c.isalnum() or c in "-_" else "_" for c in str(janela))
+    return base.with_suffix(".csv"), base.with_suffix(".vazio")
+
+
+def _exercicio_encerrado(ano: int | None) -> bool:
+    """Exercício já fechado — o dado dele não muda mais.
+
+    Usa o relógio, não `config.ANO_ATUAL`: quando a virada de ano chegar sem
+    que ninguém edite o config, o exercício novo continua sendo tratado como
+    aberto (e portanto recoletado), que é o comportamento seguro.
+    """
+    try:
+        return int(ano) < datetime.now().year
+    except (TypeError, ValueError):
+        return False
+
+
+def _checkpoint_utilizavel(caminho: Path, ano: int | None) -> bool:
+    """Checkpoint de exercício encerrado vale sempre; do exercício em curso,
+    só por algumas horas — senão a rodada de dezembro continuaria mostrando o
+    exercício como ele estava em janeiro."""
+    if not caminho.exists():
+        return False
+    if _exercicio_encerrado(ano):
+        return True
+    idade_h = (time.time() - caminho.stat().st_mtime) / 3600.0
+    if idade_h <= CHECKPOINT_TTL_HORAS:
+        return True
+    log.info("checkpoint %s tem %.1fh e o exercício ainda está em curso — "
+             "será recoletado", caminho.name, idade_h)
+    return False
+
+
+def _do_texto(v: str):
+    """Desfaz o que o CSV fez com os tipos que importam (ver bloco acima)."""
+    if v == "":
+        return None                       # ausência: era None/NaN antes do CSV
+    if v == "True":
+        return True
+    if v == "False":
+        return False
+    return v
+
+
+def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
+    """Linhas já coletadas desta janela.
+
+    Devolve `None` para "ainda não tentamos" e `[]` para "tentamos, e o
+    servidor respondeu que está vazio". A distinção não é cosmética: é ela que
+    impede um checkpoint de encerrar a sondagem retroativa cedo demais.
+    """
+    if not _checkpoint_ligado():
+        return None
+    csv, vazio = _checkpoint_arquivos(etapa, janela)
+    if _checkpoint_utilizavel(csv, ano):
+        try:
+            d = pd.read_csv(csv, dtype=str, keep_default_na=False,
+                            low_memory=False)
+        except (pd.errors.EmptyDataError, ValueError, OSError) as e:
+            log.warning("checkpoint %s ilegível (%s) — será recoletado",
+                        csv.name, type(e).__name__)
+            return None
+        return [{k: _do_texto(v) for k, v in r.items()}
+                for r in d.to_dict("records")]
+    if _checkpoint_utilizavel(vazio, ano):
+        return []
+    return None
+
+
+def _plano_para_csv(rows: list) -> bool:
+    """Só vira checkpoint o payload PLANO.
+
+    Uma lista ou um dicionário aninhado dentro da linha viram texto no CSV
+    (`"[{'NOME_ITEM': ...}]"`) e voltam como esse texto — é o formato de
+    ProcessosComprasServicos, que carrega os ITENS dentro de cada processo.
+    Melhor ficar sem checkpoint do que ter um que corrompe em silêncio.
+
+    A checagem é por amostra (payload de API é homogêneo) para não varrer
+    100.000 linhas a cada exercício.
+    """
+    amostra = rows[:100] + rows[-100:]
+    for r in amostra:
+        if not isinstance(r, dict):
+            return False
+        if any(isinstance(v, (list, dict, tuple, set)) for v in r.values()):
+            return False
+    return True
+
+
+def _checkpoint_gravar(etapa: str, janela: str, rows: list) -> None:
+    """Grava a janela. NUNCA é chamada para janela que falhou — checkpoint de
+    falha viraria falha permanente."""
+    if not _checkpoint_ligado():
+        return
+    csv, vazio = _checkpoint_arquivos(etapa, janela)
+    try:
+        csv.parent.mkdir(parents=True, exist_ok=True)
+        if not rows:
+            vazio.write_text(f"{datetime.now().isoformat(timespec='seconds')}\n")
+            csv.unlink(missing_ok=True)
+            return
+        if not _plano_para_csv(rows):
+            log.debug("%s/%s: payload aninhado — sem checkpoint", etapa, janela)
+            return
+        # `_ano` é reposto pelo chamador como inteiro a cada leitura; gravá-lo
+        # faria o rótulo do exercício voltar como texto e quebrar toda
+        # comparação numérica de ano nos checks.
+        limpos = [{k: v for k, v in r.items() if k != "_ano"} for r in rows]
+        # Gravação atômica: uma queda de sessão no meio do `to_csv` deixaria um
+        # CSV truncado que a rodada seguinte leria como se fosse completo.
+        parcial = csv.with_suffix(".csv.parcial")
+        pd.DataFrame(limpos).to_csv(parcial, index=False)
+        os.replace(parcial, csv)
+        vazio.unlink(missing_ok=True)
+    except OSError as e:
+        # Disco cheio ou Drive desmontado não podem derrubar a coleta: o
+        # checkpoint é otimização, não requisito.
+        log.warning("não foi possível gravar checkpoint %s/%s (%s) — a coleta "
+                    "segue, só não haverá retomada fina desta janela",
+                    etapa, janela, e)
+
+
+def _registrar_janelas(dataset: str, falhas: list, do_disco: int,
+                       coletadas: int) -> None:
+    """Fecha a contabilidade de janelas de uma etapa: log + diagnóstico.
+
+    Acumula em vez de sobrescrever porque uma etapa pode ter mais de um laço de
+    janelas (o PNCP tem um por órgão) e o que interessa ao operador é o total
+    que ficou de fora do dataset.
+    """
+    log.info("%s: %d janela(s) do checkpoint, %d coletada(s) agora, "
+             "%d sem coleta", dataset, do_disco, coletadas, len(falhas))
+    if falhas:
+        log.warning("%s: %d janela(s) ficaram FORA desta rodada (%s). Rode de "
+                    "novo: as janelas já gravadas em checkpoint não são "
+                    "refeitas e só estas voltam à rede.",
+                    dataset, len(falhas), ", ".join(str(f) for f in falhas[:12]))
+    d = _JANELAS.setdefault(dataset, {"janelas_sem_coleta": 0})
+    d["janelas_sem_coleta"] += len(falhas)
+    if falhas:
+        texto = ", ".join(str(f) for f in falhas)
+        d["janelas_falhas"] = ", ".join(x for x in (d.get("janelas_falhas"),
+                                                    texto) if x)
+
+
+def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None):
+    """Percorre janelas arbitrárias com checkpoint, tolerando falhas.
+
+    `janelas` é um iterável de `(rótulo, ano, *args)` e `buscar(*args)` devolve
+    as linhas da janela (ou None, quando o host não respondeu). Serve aos laços
+    que não são "um exercício por vez" — hoje, os meses do PNCP, que são a
+    outra varredura longa da coleta (66 janelas paginadas para 2021-2026).
+    """
+    out: list[dict] = []
+    falhas: list[str] = []
+    do_disco = coletadas = 0
+    for rotulo, ano, *args in janelas:
+        rows = _checkpoint_ler(etapa, rotulo, ano)
+        if rows is not None:
+            do_disco += 1
+        else:
+            try:
+                rows = buscar(*args)
+            except RateLimited:
+                raise
+            except Exception as e:
+                log.warning("%s/%s: janela falhou (%s: %s) — sem checkpoint",
+                            etapa, rotulo, type(e).__name__, e)
+                falhas.append(rotulo)
+                continue
+            if not isinstance(rows, list):
+                log.warning("%s/%s: sem resposta utilizável", etapa, rotulo)
+                falhas.append(rotulo)
+                continue
+            _checkpoint_gravar(etapa, rotulo, rows)
+            coletadas += 1
+        out.extend(rows)
+    _registrar_janelas(dataset or etapa, falhas, do_disco, coletadas)
+    return out
+
+
+def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
+    """Itera anos de `ate` para trás. Se desde=None, sonda até esvaziar.
+
+    Cada exercício é uma janela com checkpoint próprio: o que já veio não é
+    buscado de novo. Três estados, e a diferença entre eles é o que sustenta a
+    sondagem retroativa:
+
+    * checkpoint com linhas   -> usa o disco, não vai à rede;
+    * checkpoint `.vazio`     -> o servidor JÁ respondeu que não há nada neste
+                                 exercício; conta para encerrar a sondagem;
+    * sem checkpoint          -> ainda não sabemos; vai à rede.
+
+    Janela que falha (exceção, 4xx, payload não-lista) não vira checkpoint, não
+    conta como exercício vazio e ainda ZERA o contador de vazios — porque com
+    uma janela desconhecida no meio não dá para afirmar que dois exercícios
+    vazios foram consecutivos. O custo de errar para este lado é sondar até
+    `ANO_PISO` (no máximo ~17 requisições, quase todas cacheadas); o custo de
+    errar para o outro é truncar a série histórica por causa de uma oscilação
+    de rede e nunca mais tentar aqueles anos.
+    """
+    frames: list[dict] = []
     vazios = 0
+    falhas: list[int] = []
+    do_disco = coletadas = 0
     ano = ate
     piso = desde or config.ANO_PISO
     while ano >= piso:
-        rows = fetch_ano(ano)
+        rows = _checkpoint_ler(etapa, str(ano), ano)
+        if rows is not None:
+            do_disco += 1
+        else:
+            try:
+                rows = fetch_ano(ano)
+            except RateLimited:
+                raise                     # bloqueio por ritmo: parar tudo
+            except Exception as e:
+                log.warning("%s/%d: janela falhou (%s: %s) — sem checkpoint, "
+                            "seguindo para o exercício anterior",
+                            etapa, ano, type(e).__name__, e)
+                falhas.append(ano)
+                vazios = 0
+                ano -= 1
+                continue
+            if not isinstance(rows, list):
+                # None = o host não devolveu dado utilizável (404, 4xx, payload
+                # nulo). Isso NÃO é "o exercício está vazio" — tratar como
+                # vazio congelaria um erro de parâmetro num `.vazio` e
+                # encerraria a série histórica pelo motivo errado.
+                log.warning("%s/%d: sem resposta utilizável (%s) — não conta "
+                            "como exercício vazio", etapa, ano,
+                            type(rows).__name__)
+                falhas.append(ano)
+                vazios = 0
+                ano -= 1
+                continue
+            _checkpoint_gravar(etapa, str(ano), rows)
+            coletadas += 1
         if rows:
             vazios = 0
             for r in rows:
@@ -83,12 +420,15 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None):
             if desde is None and vazios >= config.SONDAGEM_VAZIOS:
                 break
         ano -= 1
+
+    _registrar_janelas(etapa, sorted(falhas, reverse=True), do_disco, coletadas)
     return frames
 
 
 # ---------------------------------------------------------------- datasets
 def stage_empenhos(desde, ate):
-    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Empenhos", a), ate, desde)
+    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Empenhos", a), ate,
+                              desde, etapa="empenhos")
     df = pd.DataFrame(rows)
     if not df.empty:
         df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
@@ -111,7 +451,8 @@ def stage_empenhos(desde, ate):
 
 
 def stage_pagamentos(desde, ate):
-    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Pagamentos", a), ate, desde)
+    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Pagamentos", a), ate,
+                              desde, etapa="pagamentos")
     df = pd.DataFrame(rows)
     if not df.empty:
         df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
@@ -132,7 +473,8 @@ def stage_contratos(desde, ate):
     mantemos a ocorrência do PRIMEIRO ano de vigência, que traz o valor
     original — manter a mais recente fazia o percentual de aditivo explodir."""
     rows = _anos_com_sondagem(
-        lambda a: clients.implanta_ano("Contratos", a, formato="vigencia"), ate, desde)
+        lambda a: clients.implanta_ano("Contratos", a, formato="vigencia"),
+        ate, desde, etapa="contratos")
     df = pd.DataFrame(rows)
     if not df.empty:
         df["VALOR"] = df["VALOR"].map(parse_valor) if "VALOR" in df else 0.0
@@ -153,7 +495,8 @@ def stage_contratos(desde, ate):
 
 def stage_aditivos(desde, ate):
     rows = _anos_com_sondagem(
-        lambda a: clients.implanta_ano("ContratosAditivos", a, formato="vigencia"), ate, desde)
+        lambda a: clients.implanta_ano("ContratosAditivos", a, formato="vigencia"),
+        ate, desde, etapa="aditivos")
     df = pd.DataFrame(rows)
     if not df.empty:
         df["VALOR"] = coluna(df, "VALOR", 0).map(parse_valor)
@@ -162,12 +505,14 @@ def stage_aditivos(desde, ate):
 
 
 def stage_licitacoes(desde, ate):
-    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Licitacoes", a), ate, desde)
+    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Licitacoes", a), ate,
+                              desde, etapa="licitacoes")
     return _salvar("licitacoes", pd.DataFrame(rows))
 
 
 def stage_convenios(desde, ate):
-    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Convenios", a), ate, desde)
+    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Convenios", a), ate,
+                              desde, etapa="convenios")
     df = pd.DataFrame(rows)
     if not df.empty:
         df["VALOR_TOTAL"] = coluna(df, "VALOR_TOTAL", 0).map(parse_valor)
@@ -175,7 +520,9 @@ def stage_convenios(desde, ate):
 
 
 def stage_comparativo_despesa(desde, ate):
-    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("ComparativoDespesa", a), ate, desde)
+    rows = _anos_com_sondagem(
+        lambda a: clients.implanta_ano("ComparativoDespesa", a), ate, desde,
+        etapa="comparativo_despesa")
     df = pd.DataFrame(rows)
     if not df.empty:
         for c in ("VALOR_ORCADO", "REALIZADO_EXERCICIO", "TOTAL_EXERCICIO"):
@@ -188,7 +535,8 @@ def stage_despesas_centro_custo(desde, ate):
     """Despesa por CENTRO DE CUSTO — base para separar despesa-meio de
     despesa-fim (fiscalização, câmaras, atendimento vs administração)."""
     rows = _anos_com_sondagem(
-        lambda a: clients.implanta_ano("DespesasCentroCusto", a), ate, desde)
+        lambda a: clients.implanta_ano("DespesasCentroCusto", a), ate, desde,
+        etapa="despesas_centro_custo")
     df = pd.DataFrame(rows)
     if not df.empty:
         meses = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
@@ -203,29 +551,42 @@ def stage_despesas_centro_custo(desde, ate):
     return _salvar("despesas_centro_custo", df)
 
 
+def _fetch_demonstrativo(ano: int):
+    """Um exercício do demonstrativo, já achatado.
+
+    O achatamento acontece ANTES do checkpoint de propósito: o payload original
+    é uma árvore (campo DETALHES) e árvore não cabe em CSV. Devolve None — e
+    não lista vazia — quando o host não respondeu, para que a janela conte como
+    falha e não como exercício sem despesa.
+    """
+    rows = clients.implanta_ano("DemonstrativoEmpenhosPagamentos", ano)
+    if not isinstance(rows, list):
+        return None
+    return clients.achatar_demonstrativo(rows)
+
+
 def stage_demonstrativo(desde, ate):
     """Orçado × empenhado × liquidado × pago por conta/centro de custo."""
-    frames = []
-    piso = desde or config.ANO_PISO
-    vazios = 0
-    for ano in range(ate, piso - 1, -1):
-        rows = clients.implanta_ano("DemonstrativoEmpenhosPagamentos", ano)
-        achatado = clients.achatar_demonstrativo(rows)
-        if achatado:
-            vazios = 0
-            for r in achatado:
-                r["_ano"] = ano
-            frames.extend(achatado)
-        else:
-            vazios += 1
-            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
-                break
+    frames = _anos_com_sondagem(_fetch_demonstrativo, ate, desde,
+                                etapa="demonstrativo")
     df = pd.DataFrame(frames)
     if not df.empty:
         for c in ("ORCADO", "EMPENHADOEXERCICIO", "LIQUIDADO_EXERCICIO",
                   "PAGO_EXERCICIO", "SALDO_ORCAMENTARIO", "EMPENHA_PERIODO"):
             if c in df:
                 df[c] = df[c].map(parse_valor)
+        # Marcas da árvore, restauradas explicitamente porque é por elas que o
+        # check de orçamento soma SÓ as folhas. Vindas de um checkpoint em CSV,
+        # `_nivel` volta como texto ("10" < "9" na comparação de string) e a
+        # soma da execução passaria a incluir a sintética junto com as filhas —
+        # o mesmo real contado duas vezes.
+        if "_folha" in df:
+            df["_folha"] = df["_folha"].map(
+                lambda v: v if isinstance(v, bool) else str(v).strip().lower()
+                in ("true", "1", "sim"))
+        if "_nivel" in df:
+            df["_nivel"] = (pd.to_numeric(df["_nivel"], errors="coerce")
+                            .fillna(0).astype(int))
     return _salvar("demonstrativo", df)
 
 
@@ -246,11 +607,19 @@ def stage_plano_contas(ate):
 def stage_processos_compras(desde, ate):
     """Processos de compra com ITENS (quantidade, valor unitário, melhor cotação)
     — permite detectar sobrepreço e manipulação de cotação."""
+    # Sem checkpoint por janela, e de propósito: cada processo carrega a lista
+    # ITENS aninhada dentro de si, e o que um CSV faz com uma lista aninhada é
+    # transformá-la em texto irreversível. Aqui a retomada continua sendo a do
+    # cache HTTP (uma requisição por exercício, já gravada em data/raw).
     processos, itens = [], []
     piso = desde or config.ANO_PISO
     vazios = 0
     for ano in range(ate, piso - 1, -1):
         rows = clients.implanta_ano("ProcessosComprasServicos", ano)
+        if rows is None:
+            # sem resposta ≠ exercício vazio: não encerra a sondagem
+            log.warning("processos_compras/%d: sem resposta utilizável", ano)
+            continue
         if not rows:
             vazios += 1
             if desde is None and vazios >= config.SONDAGEM_VAZIOS:
@@ -284,27 +653,17 @@ def stage_processos_compras(desde, ate):
 
 def stage_atas(desde, ate):
     """Atas de colegiado: deliberações (texto) + participantes."""
-    rows = []
-    piso = desde or config.ANO_PISO
-    vazios = 0
-    for ano in range(ate, piso - 1, -1):
-        got = clients.implanta_datas("AtasColegiados", ano)
-        if got:
-            vazios = 0
-            for r in got:
-                r["_ano"] = ano
-            rows.extend(got)
-        else:
-            vazios += 1
-            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
-                break
+    rows = _anos_com_sondagem(
+        lambda a: clients.implanta_datas("AtasColegiados", a), ate, desde,
+        etapa="atas")
     return _salvar("atas", pd.DataFrame(rows))
 
 
 def stage_orcamento(desde, ate):
     """Balanço orçamentário e comparativo de receita (denominadores)."""
     orc = _anos_com_sondagem(
-        lambda a: clients.implanta_ano("BalancoOrcamentario", a), ate, desde)
+        lambda a: clients.implanta_ano("BalancoOrcamentario", a), ate, desde,
+        etapa="balanco_orcamentario")
     dfo = pd.DataFrame(orc)
     if not dfo.empty:
         for c in ("DOTACOES", "DOTACOES_ATUALIZADAS", "RECEITAS_REALIZADAS",
@@ -314,7 +673,8 @@ def stage_orcamento(desde, ate):
     _salvar("balanco_orcamentario", dfo)
 
     rec = _anos_com_sondagem(
-        lambda a: clients.implanta_ano("ComparativoReceita", a), ate, desde)
+        lambda a: clients.implanta_ano("ComparativoReceita", a), ate, desde,
+        etapa="comparativo_receita")
     dfr = pd.DataFrame(rec)
     if not dfr.empty:
         for c in ("VALOR_ORCADO", "REALIZADO_EXERCICIO", "TOTAL_EXERCICIO"):
@@ -405,6 +765,32 @@ def stage_indenizacoes(desde, ate):
     return df
 
 
+def _pncp_contrato_linha(o: dict, r: dict) -> dict:
+    """Projeta um contrato do PNCP nas colunas que a análise usa."""
+    return {
+        "orgao_cnpj": o["cnpj"], "orgao_papel": o["papel"],
+        "orgao_nome": o.get("razaoSocial"),
+        "numeroControlePNCP": r.get("numeroControlePNCP"),
+        "fornecedor_ni": so_digitos(r.get("niFornecedor")),
+        "fornecedor_nome": r.get("nomeRazaoSocialFornecedor"),
+        "tipoPessoa": r.get("tipoPessoa"),
+        "objeto": r.get("objetoContrato"),
+        "valorGlobal": parse_valor(r.get("valorGlobal")),
+        "valorAcumulado": parse_valor(r.get("valorAcumulado")),
+        "dataAssinatura": r.get("dataAssinatura"),
+        "vigenciaInicio": r.get("dataVigenciaInicio"),
+        "vigenciaFim": r.get("dataVigenciaFim"),
+        "anoContrato": r.get("anoContrato"),
+        "numeroContrato": r.get("numeroContratoEmpenho"),
+        # O contrato não expõe edital nem termo de referência; a COMPRA de
+        # origem sim. É por este número que se chega aos documentos do certame
+        # — e o portal do próprio Crea não publica nenhum número de licitação
+        # em 965 contratos.
+        "numeroControlePNCPCompra": r.get("numeroControlePNCPCompra"),
+        "processo": r.get("processo"),
+    }
+
+
 def stage_pncp(desde, ate):
     """Contratos PNCP do Crea-SP e dos órgãos relacionados (rede de influência)."""
     ini = max(desde or 2021, 2021)   # PNCP só existe desde ago/2021
@@ -428,30 +814,24 @@ def stage_pncp(desde, ate):
 
     contratos, cobrancas = [], []
     for o in orgaos:
-        rows = clients.pncp_contratos(o["cnpj"], ini, ate)
-        for r in rows:
-            contratos.append({
-                "orgao_cnpj": o["cnpj"], "orgao_papel": o["papel"],
-                "orgao_nome": o.get("razaoSocial"),
-                "numeroControlePNCP": r.get("numeroControlePNCP"),
-                "fornecedor_ni": so_digitos(r.get("niFornecedor")),
-                "fornecedor_nome": r.get("nomeRazaoSocialFornecedor"),
-                "tipoPessoa": r.get("tipoPessoa"),
-                "objeto": r.get("objetoContrato"),
-                "valorGlobal": parse_valor(r.get("valorGlobal")),
-                "valorAcumulado": parse_valor(r.get("valorAcumulado")),
-                "dataAssinatura": r.get("dataAssinatura"),
-                "vigenciaInicio": r.get("dataVigenciaInicio"),
-                "vigenciaFim": r.get("dataVigenciaFim"),
-                "anoContrato": r.get("anoContrato"),
-                "numeroContrato": r.get("numeroContratoEmpenho"),
-                # O contrato não expõe edital nem termo de referência; a COMPRA
-                # de origem sim. É por este número que se chega aos documentos
-                # do certame — e o portal do próprio Crea não publica nenhum
-                # número de licitação em 965 contratos.
-                "numeroControlePNCPCompra": r.get("numeroControlePNCPCompra"),
-                "processo": r.get("processo"),
-            })
+        # Mês a mês com checkpoint: o PNCP devolve 503 em janela anual, então
+        # são ~66 janelas paginadas por órgão entre 2021 e hoje. Sem
+        # checkpoint, uma queda no último órgão obrigava a refazer as janelas
+        # de todos eles.
+        def buscar_mes(jini, jfim, orgao=o):
+            linhas = clients.pncp_contratos_mes(orgao["cnpj"], jini, jfim)
+            if not isinstance(linhas, list):
+                return None
+            # A projeção vem ANTES do checkpoint porque o DTO do PNCP traz
+            # objetos aninhados (órgão, unidade, tipo de contrato) e aninhado
+            # não sobrevive a um CSV. Projetado, o registro é plano.
+            return [_pncp_contrato_linha(orgao, r) for r in linhas]
+
+        contratos.extend(_janelas_nomeadas(
+            f"pncp_contratos/{o['cnpj']}",
+            ((jini[:6], int(jini[:4]), jini, jfim)
+             for jini, jfim in clients.pncp_meses(ini, ate)),
+            buscar_mes, dataset="pncp_contratos"))
         if o["papel"] == "alvo":
             for r in clients.pncp_instrumentos_cobranca(o["cnpj"], ini, ate):
                 nfe = r.get("notaFiscalEletronica") or {}
@@ -467,8 +847,14 @@ def stage_pncp(desde, ate):
                 })
     df_c = pd.DataFrame(contratos)
     if not df_c.empty:
-        df_c["fornecedor_norm"] = df_c["fornecedor_nome"].map(norm_nome)
+        df_c["fornecedor_norm"] = coluna(df_c, "fornecedor_nome").map(norm_nome)
         df_c["_ano"] = pd.to_numeric(coluna(df_c, "anoContrato"), errors="coerce")
+        # Janela vinda do checkpoint devolve texto. Sem reconverter, `sum()`
+        # sobre valorGlobal CONCATENARIA em vez de somar, e o ranking de
+        # fornecedores do PNCP sairia sem sentido. `parse_valor` aceita as duas
+        # formas, então a coerção é idempotente para a janela vinda da rede.
+        for c in ("valorGlobal", "valorAcumulado"):
+            df_c[c] = coluna(df_c, c, 0).map(parse_valor)
     _salvar("pncp_contratos", df_c)
     _salvar("pncp_cobrancas", pd.DataFrame(cobrancas))
     return df_c
@@ -504,6 +890,12 @@ def build_staged(desde: int | None, ate: int, *,
     `retomar=True` pula as etapas que já têm dado em disco — é o que torna
     barata a volta depois de uma queda de sessão. Com os diretórios apontados
     para o Google Drive, a coleta continua de onde parou em vez de recomeçar.
+
+    Abaixo disso há a retomada FINA, que não depende de `--retomar`: cada
+    exercício (e cada mês, no PNCP) já coletado ficou gravado como checkpoint
+    em `data/raw/checkpoints/`, e a etapa refeita só vai à rede pelas janelas
+    que faltam. É a diferença entre reprocessar dezessete exercícios e
+    reprocessar o exercício em que a sessão caiu.
     """
     etapas = [
         ("empenhos", lambda: stage_empenhos(desde, ate)),
@@ -557,13 +949,17 @@ def build_staged(desde: int | None, ate: int, *,
     finally:
         # Grava o inventário mesmo se a coleta abortar no meio: sem isso, uma
         # queda no meio do caminho deixaria o operador sem saber o que já veio.
+        # O ledger HTTP entra aqui pelo mesmo motivo: é justamente na rodada
+        # que abortou por bloqueio que ele tem mais a explicar.
         config.STAGED_DIR.mkdir(parents=True, exist_ok=True)
         with open(config.STAGED_DIR / "_resumo.json", "w") as f:
             json.dump({k: len(v) for k, v in staged.items()}, f,
                       indent=2, ensure_ascii=False)
         salvar_diagnostico()
+        salvar_ledger_http()
 
     staged["_coleta_diagnostico"] = salvar_diagnostico()
+    staged["_coleta_http"] = salvar_ledger_http()
     return staged
 
 

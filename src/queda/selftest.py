@@ -177,6 +177,42 @@ def _pagamentos() -> pd.DataFrame:
                      "HISTORICO": "parcela", "VALOR": 33333.33, "VALOR_LIQUIDO": 0,
                      "DATA_PAGAMENTO": f"{i * 7 + 1:02d}/04/2024",
                      "NUMERO_EMPENHO": 7000 + i, "NUMERO_PAGAMENTO": 7000 + i})
+
+    # --- família contábil inteira que a nossa taxonomia não alcança
+    # Valores DETERMINÍSTICOS de propósito: `random` é semeado uma vez por
+    # execução e qualquer chamada nova aqui deslocaria toda a sequência que as
+    # fixtures forenses consomem depois.
+    for ano in range(2013, 2026):
+        for i, (conta, base, cnpj, quem) in enumerate((
+                ("6.5.1.01.001-Restituições de Anuidades", 1_500_000.0,
+                 "12345678000199", "DIVERSOS PROFISSIONAIS"),
+                ("6.5.2.01.001-Custas Processuais", 1_200_000.0,
+                 "23456789000188", "TRIBUNAL DE JUSTICA DO ESTADO DE SAO PAULO"),
+                ("6.5.2.02.001-Obrigações Tributárias e Contributivas",
+                 1_800_000.0, "34567890000177", "SECRETARIA DA RECEITA FEDERAL"))):
+            rows.append({
+                "_ano": ano, "NOME_RAZAO_SOCIAL": quem, "CPF_CNPJ": cnpj,
+                "CONTA_EMPENHO": conta, "HISTORICO": "recolhimento",
+                "VALOR": base + 37_000 * ((ano + i * 3) % 7),
+                "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"2{i}/06/{ano}",
+                "NUMERO_EMPENHO": 12000 + i, "NUMERO_PAGAMENTO": 12000 + i})
+    # conta MAIS analítica que o plano coletado: casa pelo prefixo (o pai
+    # existe), e é o caso que distingue "conta nova" de "conta inexistente"
+    rows.append({"_ano": 2025, "NOME_RAZAO_SOCIAL": "DIVERSOS FUNCIONARIOS",
+                 "CPF_CNPJ": "",
+                 "CONTA_EMPENHO": "6.2.2.1.1.01.04.05.009-Diárias Eventuais",
+                 "HISTORICO": "diaria", "VALOR": 240_000.0, "VALOR_LIQUIDO": 0,
+                 "DATA_PAGAMENTO": "12/04/2025", "NUMERO_EMPENHO": 12500,
+                 "NUMERO_PAGAMENTO": 12500})
+    # código cuja árvore inteira é desconhecida: execução fora do plano
+    for ano, valor in ((2015, 260_000.0), (2016, 310_000.0), (2025, 180_000.0)):
+        rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": "BETA SUPRIMENTOS LTDA",
+                     "CPF_CNPJ": "45678901000166",
+                     "CONTA_EMPENHO": "7.1.1.01.001-Despesas de Exercícios Anteriores",
+                     "HISTORICO": "exercicio anterior", "VALOR": valor,
+                     "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"09/11/{ano}",
+                     "NUMERO_EMPENHO": 12600, "NUMERO_PAGAMENTO": 12600})
+
     df = pd.DataFrame(rows)
     df["DATA"] = pd.to_datetime(df["DATA_PAGAMENTO"], dayfirst=True, errors="coerce")
     # espelha exatamente o que o pipeline de produção grava
@@ -187,6 +223,134 @@ def _pagamentos() -> pd.DataFrame:
     df["FAVORECIDO_NORM"] = df["NOME_RAZAO_SOCIAL"].map(norm_nome)
     df["FAVORECIDO_CNPJ"] = df["CPF_CNPJ"].map(so_digitos)
     return df
+
+
+# Plano de contas oficial em ÁRVORE, já achatado como
+# `clients.achatar_plano_contas` devolve: codigo, nome, nivel, pai, folha.
+# Espelha o desenho real do Sistema Confea/Crea — raiz única e vários níveis de
+# agregação antes de abrir — porque é esse formato que faz a leitura "por nível
+# 2" degenerar numa família só. A classe 1 (ativo) está aqui de propósito: o
+# endpoint devolve o plano INTEIRO, e nenhum pagamento pode cair nela; é o que
+# prova que o denominador de `plano-contas-sem-lancamento` exclui as classes
+# sem execução em vez de publicar "99% sem lançamento".
+_PLANO = {
+    "6": "DESPESA",
+    "6.2": "VARIAÇÕES PATRIMONIAIS DIMINUTIVAS",
+    "6.2.2": "DESPESA CORRENTE",
+    "6.2.2.1": "PESSOAL E ENCARGOS",
+    "6.2.2.1.1": "REMUNERAÇÃO E BENEFÍCIOS",
+    "6.2.2.1.1.01": "Pessoal",
+    "6.2.2.1.1.01.01": "Remuneração",
+    "6.2.2.1.1.01.01.01": "Salários e Vencimentos",
+    "6.2.2.1.1.01.01.01.001": "Salários",
+    "6.2.2.1.1.01.01.01.002": "Horas Extras",
+    "6.2.2.1.1.01.04": "Verbas e Indenizações",
+    "6.2.2.1.1.01.04.02": "Auxílios",
+    "6.2.2.1.1.01.04.02.001": "Auxílio Educação e Creche",
+    "6.2.2.1.1.01.04.05": "Diárias",
+    "6.2.2.1.1.01.04.05.001": "Diarias com Funcionários",
+    "6.2.2.1.1.01.04.05.002": "Diarias com Conselheiros",
+    "6.2.2.1.1.01.04.05.003": "Diarias com Colaboradores",
+    "6.2.2.1.1.01.04.05.004": "Diarias com Inspetores",
+    "6.2.2.1.1.01.04.05.005": "Pagamento de Jeton",
+    "6.2.2.1.1.01.04.05.006": "Diárias no País",
+    "6.2.2.1.1.01.04.05.007": "Jetons a Conselheiros",
+    "6.2.2.1.1.01.04.08": "Locomoção",
+    "6.2.2.1.1.01.04.08.001": "Locomoção de Funcionários",
+    "6.2.2.1.1.01.04.08.002": "Locomoção de Conselheiros",
+    "6.2.2.1.1.01.04.08.008": "Locomoção de Inspetores",
+    "6.2.2.2": "USO DE BENS E SERVIÇOS",
+    "6.2.2.2.1": "Serviços de Terceiros",
+    "6.2.2.2.1.01": "Serviços contratados",
+    "6.2.2.2.1.01.001": "Serviços de Terceiros PJ",
+    "6.2.2.2.1.01.002": "Serviços Advocatícios",
+    "6.2.2.2.1.01.003": "Serviços de Informática",
+    "6.2.2.2.1.01.004": "Serviços de Publicidade",
+    "6.2.2.2.2": "Material de Consumo e Almoxarifado",
+    "6.2.2.2.2.01": "Materiais",
+    "6.2.2.2.2.01.001": "Material de Consumo",
+    "6.2.2.2.3": "Utilização de Bens de Terceiros",
+    "6.2.2.2.3.01": "Locações",
+    "6.2.2.2.3.01.001": "Locação de Imóveis",
+    "6.4": "INVESTIMENTOS",
+    "6.4.1": "Bens Imóveis",
+    "6.4.1.01": "Obras",
+    "6.4.1.01.001": "Obras e Instalações",
+    "6.4.1.01.002": "Reforma de Imóveis",
+    # Família inteira que a taxonomia do projeto NÃO classifica: é o buraco
+    # nosso que a frente do plano de contas tem de localizar e nomear.
+    "6.5": "TRIBUTÁRIAS, RESTITUIÇÕES E JUDICIAIS",
+    "6.5.1": "Restituições",
+    "6.5.1.01": "Restituições a Profissionais",
+    "6.5.1.01.001": "Restituições de Anuidades",
+    "6.5.1.01.002": "Restituições de Taxas de Expediente",
+    "6.5.2": "Custas e Obrigações",
+    "6.5.2.01": "Judiciais",
+    "6.5.2.01.001": "Custas Processuais",
+    "6.5.2.02": "Tributárias",
+    "6.5.2.02.001": "Obrigações Tributárias e Contributivas",
+    # classe de ativo: nenhum pagamento cai aqui, por construção contábil
+    "1": "ATIVO",
+    "1.1": "Ativo Circulante",
+    "1.1.01": "Caixa e Equivalentes de Caixa",
+    "1.1.01.001": "Caixa",
+    "1.1.01.002": "Bancos Conta Movimento",
+    "1.1.02": "Créditos a Receber",
+    "1.1.02.001": "Anuidades a Receber",
+    "1.1.02.002": "Dívida Ativa a Receber",
+}
+
+
+def _plano_contas() -> pd.DataFrame:
+    pais = {c.rsplit(".", 1)[0] for c in _PLANO if "." in c}
+    return pd.DataFrame([
+        {"codigo": cod, "nome": nome, "nivel": cod.count("."),
+         "pai": cod.rsplit(".", 1)[0] if "." in cod else "",
+         "folha": cod not in pais, "_ano": 2025}
+        for cod, nome in _PLANO.items()])
+
+
+def _coleta_http() -> pd.DataFrame:
+    """Ledger HTTP da coleta — o que `http.salvar_ledger` grava por rodada.
+
+    Sem ele, "0 linhas" é indistinguível entre bloqueio do WAF e o órgão não
+    publicar o dado. Os três datasets vazios desta fixture cobrem os três
+    vereditos: licitações responde 200 com lista vazia (falta de publicação),
+    os endpoints de diárias devolvem 403 (limitação nossa) e as cobranças do
+    PNCP devolvem 404 (indeterminado).
+    """
+    linhas = []
+    for ano in range(2013, 2026):
+        linhas.append({"caminho": "/portalTransparencia/api/v1.0/Licitacoes",
+                       "host": "crea-sp.implanta.net.br",
+                       "params": f"referenciaInicio=01/{ano}&referenciaTermino=12/{ano}",
+                       "status": 200, "resultado": "vazio", "tentativa": 1,
+                       "cache": False, "itens": 0, "duracao_s": 0.4})
+    for ep in ("Diarias", "DiariasDeslocamentos", "Indenizacoes"):
+        for tentativa in (1, 2):
+            linhas.append({"caminho": f"/portalTransparencia/api/v1.0/{ep}",
+                           "host": "crea-sp.implanta.net.br",
+                           "params": "referenciaInicio=01/2024&referenciaTermino=12/2024",
+                           "status": 403, "resultado": "bloqueio",
+                           "tentativa": tentativa, "cache": False,
+                           "itens": None, "duracao_s": 1.2})
+    for ano in (2023, 2024):
+        linhas.append({"caminho": "/api/consulta/v1/instrumentoscobranca/inclusao",
+                       "host": "pncp.gov.br",
+                       "params": f"dataInicial={ano}0101&dataFinal={ano}1231",
+                       "status": 404, "resultado": "inexistente", "tentativa": 1,
+                       "cache": False, "itens": 0, "duracao_s": 0.3})
+    # fonte que veio COM dados: o ledger de uma rodada real não é só de falhas,
+    # e uma linha servida do cache também tem de aparecer nele
+    for ano in range(2013, 2026):
+        linhas.append({"caminho": "/portalTransparencia/api/v1.0/Pagamentos",
+                       "host": "crea-sp.implanta.net.br",
+                       "params": f"referenciaInicio=01/{ano}&referenciaTermino=12/{ano}",
+                       "status": 200, "resultado": "ok", "tentativa": 1,
+                       "cache": True, "itens": 4200, "duracao_s": 0.1})
+    d = pd.DataFrame(linhas)
+    d["ts"] = "2026-01-01T00:00:00"
+    return d
 
 
 def _staged() -> dict[str, pd.DataFrame]:
@@ -264,6 +428,32 @@ def _staged() -> dict[str, pd.DataFrame]:
         {"NUMERO_CONTRATO": "CT-01/2022", "CONTRATADA": _FORN_REDE, "VALOR": 500000.0,
          "NUMERO_LICITACAO": None,
          "DATA_INICIO_VIGENCIA": "2022-01-01", "DATA_FINAL_VIGENCIA": "2022-12-31"},
+        # pago muito acima do contratado: a obra da nova sede recebe
+        # R$ 12 mi/ano de 2022 a 2025 (R$ 48 mi no período) contra um contrato
+        # de R$ 5 mi — 9,6× o instrumento. Sem esta linha o achado de
+        # gravidade alta `contratos-pago-acima-do-contratado` nunca dispara e
+        # a regressão dele passa despercebida.
+        {"NUMERO_CONTRATO": "CT-04/2022",
+         "CONTRATADA": "77.888.999/0001-22 - CONSTRUTORA NOVA SEDE LTDA",
+         "VALOR": 5_000_000.0, "NUMERO_LICITACAO": None,
+         "DATA_INICIO_VIGENCIA": "2022-01-01", "DATA_FINAL_VIGENCIA": "2025-12-31"},
+        # CNAE × objeto: empresa de LIMPEZA contratada para sistema de gestão.
+        # A linha seguinte é o contra-exemplo que impede a lista de virar 100%
+        # — sem ela o achado deixa de medir incompatibilidade e passa a medir
+        # "todo fornecedor tem CNAE diferente do objeto".
+        {"NUMERO_CONTRATO": "CT-02/2024",
+         "CONTRATADA": "99.888.777/0001-55 - ALFA SERVICOS LTDA",
+         "OBJETO": "Contratação de sistema de gestão de processos e "
+                   "licenciamento de uso de software",
+         "VALOR": 600_000.0, "NUMERO_LICITACAO": None,
+         "DATA_INICIO_VIGENCIA": "2024-01-01",
+         "DATA_FINAL_VIGENCIA": "2024-12-31"},
+        {"NUMERO_CONTRATO": "CT-03/2024",
+         "CONTRATADA": "11.222.333/0001-81 - OMEGA ENGENHARIA LTDA",
+         "OBJETO": "Reforma e impermeabilização da cobertura do prédio sede",
+         "VALOR": 900_000.0, "NUMERO_LICITACAO": None,
+         "DATA_INICIO_VIGENCIA": "2024-02-01",
+         "DATA_FINAL_VIGENCIA": "2024-12-31"},
     ])
     contratos["INI"] = pd.to_datetime(contratos["DATA_INICIO_VIGENCIA"])
     contratos["FIM"] = pd.to_datetime(contratos["DATA_FINAL_VIGENCIA"])
@@ -373,9 +563,49 @@ def _staged() -> dict[str, pd.DataFrame]:
         ("UGI Ribeirão Preto - Atendimento", "Vencimentos e Salários", 1.2e6, 1.03),
         ("UGI Santos - Atendimento", "Locação de Imóveis", 0.9e6, 1.03),
     )
+    # As doze colunas VALOR_JAN..VALOR_DEZ são o único eixo MENSAL que a coleta
+    # real entrega, e é sobre elas que a frente de sazonalidade trabalha. Os
+    # perfis abaixo são deliberados, um por cenário que a frente tem de pegar:
+    #   _MES_UNIFORME — um doze avos por mês (unidade sem sazonalidade)
+    #   _MES_DEZEMBRO — 45% do ano em dezembro (corrida de fim de exercício)
+    #   _MES_LOTE     — o ano inteiro em três meses (verba paga em lote, não
+    #                   em viagem: é o padrão que separa diária de acerto)
+    #   _MES_PARCIAL  — 2025 para em agosto. Faz duas coisas de uma vez: a soma
+    #                   dos meses deixa de fechar com VALOR_TOTAL (achado
+    #                   `sazonalidade-meses-nao-fecham`) e o exercício é
+    #                   excluído das estatísticas por calendário incompleto,
+    #                   que é o caminho onde um `NOME_MES[0]` já derrubou a
+    #                   frente inteira. VALOR_TOTAL NÃO é tocado, então nenhuma
+    #                   outra frente muda de número.
+    _MESES_CC = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN",
+                 "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+    _MES_UNIFORME = [1 / 12] * 12
+    _MES_DEZEMBRO = [0.05] * 11 + [0.45]
+    _MES_LOTE = [0.0, 0.0, 0.34, 0.0, 0.0, 0.0,
+                 0.33, 0.0, 0.0, 0.0, 0.0, 0.33]
+    _MES_PARCIAL = [1 / 12] * 8 + [0.0] * 4
+    _ANO_PARCIAL = 2025
+    _PERFIL_MENSAL = {
+        ("Gabinete da Presidência", "Diárias no País"): _MES_LOTE,
+        ("Câmaras Especializadas", "Jetons a Conselheiros"): _MES_LOTE,
+        ("Gerência de Tecnologia da Informação",
+         "Serviços de Terceiros PJ"): _MES_DEZEMBRO,
+        ("Superintendência Regional de Bauru",
+         "Material de Consumo"): _MES_DEZEMBRO,
+    }
+
+    def _linha_centro_custo(a, cc, conta, base, cresc):
+        total = base * (cresc ** (a - 2013))
+        pesos = (_MES_PARCIAL if a == _ANO_PARCIAL
+                 else _PERFIL_MENSAL.get((cc, conta), _MES_UNIFORME))
+        linha = {"_ano": a, "NOME_CENTRO_CUSTO": cc, "NOME_CONTA": conta,
+                 "ANALITICO": True, "VALOR_TOTAL": total}
+        linha.update({f"VALOR_{m}": total * p
+                      for m, p in zip(_MESES_CC, pesos)})
+        return linha
+
     centro_custo = pd.DataFrame([
-        {"_ano": a, "NOME_CENTRO_CUSTO": cc, "NOME_CONTA": conta,
-         "ANALITICO": True, "VALOR_TOTAL": base * (cresc ** (a - 2013))}
+        _linha_centro_custo(a, cc, conta, base, cresc)
         for a in range(2013, 2026)
         for cc, conta, base, cresc in _CENTROS])
 
@@ -436,20 +666,47 @@ def _staged() -> dict[str, pd.DataFrame]:
         "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
+        "plano_contas": _plano_contas(), "_coleta_http": _coleta_http(),
     }
 
+
+_CNPJ_FRACIONA = "99888777000155"   # já recebe 5 × 15k em 2024 nos pagamentos
+_CNPJ_ASSOC = "28097358000101"      # já recebe 5 mi/ano nos pagamentos
 
 _FICHAS_FIXTURE = {
     _CNPJ_REDE: {"razao_social": _FORN_REDE, "descricao_situacao_cadastral": "ATIVA",
                  "data_inicio_atividade": "2023-03-01",
+                 "cnae_fiscal": 4120400,
                  "cnae_fiscal_descricao": "Obras de engenharia",
+                 "municipio": "São Paulo", "uf": "SP", "codigo_porte": 5,
                  "qsa": [{"nome_socio": _COMISSIONADO},
                          {"nome_socio": "PEDRO HENRIQUE RAMOS"}]},
+    # situação só pelo CÓDIGO (8 = baixada), sem descrição: é assim que a
+    # minhareceita devolve parte das fichas. Ler o código como texto ("8" não
+    # contém "ATIVA") acusava de baixa TODA ficha que viesse só com o número.
     _CNPJ_BAIXADO: {"razao_social": "DELTA COMERCIO LTDA",
-                    "descricao_situacao_cadastral": "BAIXADA",
+                    "situacao_cadastral": 8,
                     "data_inicio_atividade": "2010-01-01",
+                    "cnae_fiscal": 4649499,
                     "cnae_fiscal_descricao": "Comércio varejista",
+                    "municipio": "Rio de Janeiro", "uf": "RJ",
+                    "codigo_porte": "03",
                     "qsa": [{"nome_socio": "PEDRO HENRIQUE RAMOS"}]},
+    # ME no interior: sem ela, "quanto chega a micro e pequena" mede zero
+    _CNPJ_FRACIONA: {"razao_social": "ALFA SERVICOS LTDA",
+                     "descricao_situacao_cadastral": "ATIVA",
+                     "data_inicio_atividade": "2011-06-01",
+                     "cnae_fiscal": "8121-4/00",
+                     "cnae_fiscal_descricao": "Limpeza em prédios e domicílios",
+                     "municipio": "Ribeirão Preto", "uf": "SP",
+                     "codigo_porte": 1},
+    _CNPJ_ASSOC: {"razao_social": "ASSOCIACAO DOS PROCURADORES DO CREA-SP",
+                  "descricao_situacao_cadastral": "ATIVA",
+                  "data_inicio_atividade": "1995-04-01",
+                  "cnae_fiscal": 9430800,
+                  "cnae_fiscal_descricao": "Atividades de associações de "
+                                           "defesa de direitos sociais",
+                  "municipio": "São Paulo", "uf": "SP", "codigo_porte": 5},
 }
 
 ESPERADOS = [
@@ -503,7 +760,11 @@ ESPERADOS = [
     "empenhos-fracionamento",
     "empenhos-pago-maior-que-empenhado",
     "empenhos-fantasma",               # taxa, com a rotina de abertura separada
+    "empenhos-vinculo-empenho-ausente",  # art. 60: a chave não é publicada — um
+                                         # achado de metodologia, não 7.059 acusações
     "contratos-aditivos-limite",
+    "contratos-pago-acima-do-contratado",   # 48 mi pagos contra 5 mi contratados
+    "contratos-contratado-nao-executado",   # vigência encerrada, nada pago
     # rede
     "rede-fornecedores-compartilhados",
     "rede-socio-homonimo",             # sócia = comissionada
@@ -528,6 +789,24 @@ ESPERADOS = [
     # fornecedores
     "fornecedores-situacao-irregular", # DELTA baixada
     "fornecedores-empresa-recente",    # OMEGA aberta em 2023-03, pagamento 2023-05
+    "fornecedores-geografia",          # 3 municípios, quase tudo num só
+    "fornecedores-fora-de-sp",         # DELTA sediada no RJ
+    "fornecedores-porte",              # quanto do valor chega a ME/EPP
+    "fornecedores-cnae-x-objeto",      # empresa de limpeza contratada para TI
+    # sazonalidade: o único eixo MENSAL que a coleta entrega
+    "sazonalidade-dezembro",
+    "sazonalidade-dezembro-concentrada",
+    "sazonalidade-verbas-em-lote",     # o ano inteiro de verba em três meses
+    "sazonalidade-perfil-atipico",
+    "sazonalidade-meses-nao-fecham",   # os 12 meses não somam o VALOR_TOTAL
+    # plano de contas oficial
+    "plano-despesa-por-no",
+    "plano-cobertura-taxonomia",
+    "plano-familias-nao-cobertas",     # família 6.5 inteira sem regra na taxonomia
+    "plano-contas-sem-lancamento",
+    "plano-execucao-fora-do-plano",    # código 7.1.1.01.001 fora do plano
+    # diagnóstico: a causa de cada fonte vazia, lida do status HTTP
+    "diagnostico-porque-vazio",
 ]
 
 
@@ -591,6 +870,61 @@ def _confere_metricas(achados) -> list[str]:
     # funcionários + colaboradores
     exige("diarias-politico-vs-quadro", "quadro_contratado",
           (2_600_000 + 670_000 + 570_000) * 13)
+
+    # art. 60: a fixture de empenhos não publica NUMERO_EMPENHO e o par
+    # credor+valor não coincide — o esperado é a guarda de metodologia, com
+    # 100% e nenhum casamento, não 7.059 acusações de ilegalidade.
+    exige("empenhos-vinculo-empenho-ausente", "taxa_pct", 100.0)
+    f = por_id.get("empenhos-vinculo-empenho-ausente")
+    if f is not None and f.metricas.get("casados_por_numero") not in (0, 0.0):
+        erros.append("empenhos-vinculo-empenho-ausente.casados_por_numero = "
+                     f"{f.metricas.get('casados_por_numero')}, esperado 0")
+
+    # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
+    # publica o denominador do TETO — se alguém trocar de volta pela estimativa
+    # central, o valor muda e o teste pega.
+    exige("contratos-pago-acima-do-contratado", "contratado_teto", 5_000_000)
+    exige("contratos-pago-acima-do-contratado", "pago", 48_000_000)
+    exige("contratos-pago-acima-do-contratado", "pago_alem_do_contratado",
+          43_000_000)
+    # Subexecução, três casos com vigência encerrada e a soma discriminada —
+    # um total agregado esconderia a troca de um componente por outro:
+    #   ASSOCIACAO DOS ENGENHEIROS X  1,2 mi contratados, zero pago
+    #   OMEGA ENGENHARIA  1,4 mi em dois contratos + 200k de aditivo, 800k pagos
+    #   ALFA SERVICOS     600k contratados, 75k pagos (5 × 15k de 2024)
+    exige("contratos-contratado-nao-executado", "nao_executado",
+          1_200_000 + (1_600_000 - 800_000) + (600_000 - 75_000))
+    exige("contratos-contratado-nao-executado", "fornecedores", 3)
+    exige("contratos-contratado-nao-executado",
+          "sem_pagamento_correspondente", 1)
+
+    # Plano de contas. `total_conciliado` confere que o casamento por código E
+    # por nome funcionam ao mesmo tempo: se o casamento por nome quebrar,
+    # "Diárias no País"/"Jetons a Conselheiros"/"Serviços de Terceiros PJ" saem
+    # da conta e o número despenca sem o achado desaparecer.
+    exige("plano-despesa-por-no", "total_conciliado", 451_466_962.55)
+    exige("plano-despesa-por-no", "total_executado", 452_216_962.55)
+    # família 6.5 inteira: 3 contas × 13 exercícios, com o jitter determinístico
+    _familia_65 = sum(
+        base + 37_000 * ((ano + i * 3) % 7)
+        for ano in range(2013, 2026)
+        for i, base in enumerate((1_500_000.0, 1_200_000.0, 1_800_000.0)))
+    exige("plano-cobertura-taxonomia", "valor_nao_classificado", _familia_65)
+    exige("plano-familias-nao-cobertas", "familias", 1)
+    exige("plano-execucao-fora-do-plano", "valor_fora",
+          260_000 + 310_000 + 180_000)
+    # O denominador tem de EXCLUIR as 4 folhas de ativo (classe 1): contar o
+    # plano inteiro publicava 67% de contas "sem lançamento" numa prova em que
+    # 100% das contas de despesa estavam movimentadas.
+    exige("plano-contas-sem-lancamento", "contas_analiticas", 25)
+    exige("plano-contas-sem-lancamento", "contas_analiticas_plano_inteiro", 29)
+
+    # A fixture do ledger tem UM vazio de cada tipo. Se a atribuição
+    # tentativa -> dataset deixar de casar (mudança de caminho no clients.py),
+    # o veredito migra em silêncio e o achado continua "detectado".
+    exige("diagnostico-porque-vazio", "sem_publicacao", 1)
+    exige("diagnostico-porque-vazio", "falha_da_coleta", 1)
+    exige("diagnostico-porque-vazio", "indeterminadas", 1)
     return erros
 
 

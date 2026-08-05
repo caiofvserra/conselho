@@ -80,6 +80,21 @@ A célula 1 do notebook faz isso. Reconectando, rode a mesma célula de coleta:
 rajada (403), e 403 nunca é cacheado. O inventário da coleta é gravado mesmo
 quando a rodada aborta no meio, então dá para ver o que já veio.
 
+A retomada tem **dois níveis**. O grosso é o `--retomar` acima, que pula
+etapas inteiras. O fino é o checkpoint por **janela**: cada exercício coletado
+vira um arquivo em `data/raw/checkpoints/<etapa>/`, e a etapa só vai à rede
+pelas janelas que faltam. É a diferença entre "a sessão caiu em 2019 e
+voltamos de 2019" e "caiu em 2019 e a etapa recomeça de 2026". Como
+`data/raw` está no Drive, os checkpoints sobrevivem à desconexão. O exercício
+ainda em curso tem checkpoint com validade curta (12h), porque ele muda todo
+dia. Para ignorar checkpoints numa rodada, `QUEDA_CHECKPOINT=0`.
+
+Toda requisição da rodada é registrada em `data/staged/_coleta_http.csv`:
+host, caminho, status, tentativa, se veio do cache e quantos itens vieram. É
+o que permite dizer **por que** um dataset veio vazio — 403 do WAF, 404 de
+endpoint inexistente, ou 200 com lista vazia, que é o único caso em que a
+ausência é do órgão e não nossa.
+
 ### Camada opcional de IA — modelo **local**, via Ollama
 
 Nada do que o relatório afirma depende do modelo: todo número sai de regra
@@ -175,7 +190,12 @@ intermediação na rede — sem ele, a métrica cai para o grau de ligação.
    fantasma, corrida de dezembro, reempenho no ano seguinte), pago > empenhado.
 10. **Contratos e licitações** — aditivos de valor acima do limite legal
    (separados dos de prazo), pagamento após vigência, contratação direta,
-   cross-check Implanta × PNCP.
+   cross-check Implanta × PNCP, e a **razão pago ÷ contratado por fornecedor**:
+   pagar muito acima do instrumento sugere execução sem cobertura contratual;
+   contrato de vigência encerrada com quase nada pago sugere valor inflado na
+   origem. Contrato é compromisso e pagamento é caixa — a frente diz isso em
+   cada achado, e a junção é por nome normalizado, não por CNPJ, porque o
+   portal nem sempre publica o CNPJ da contratada.
 11. **Rede de influência** — fornecedores compartilhados com Confea/Mútua/outros
    CREAs, sócios homônimos de conselheiros e funcionários, **grupos econômicos
    de fato** (componente conexa fornecedor–sócio: empresas ligadas por uma
@@ -189,11 +209,41 @@ intermediação na rede — sem ele, a métrica cai para o grau de ligação.
     dezembro, estornos.
 14. **Fornecedores** — situação cadastral não-ativa na Receita ponderada pela
     distância até o último pagamento, empresa criada às vésperas do primeiro
-    pagamento.
-15. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
-    o que faltou, que exercícios ficaram fora e **qual análise está desligada
-    por falta de qual fonte**. Poucos achados numa frente cuja fonte veio vazia
-    não é sinal de regularidade.
+    pagamento, concentração geográfica dos fornecedores contra o alcance
+    estadual do conselho, quanto do valor chega a micro e pequena empresa, e
+    CNAE declarado sem relação com o objeto contratado. Toda métrica publica a
+    **cobertura** (que fatia do valor tem ficha cadastral consultada) — sem
+    isso o percentual engana.
+15. **Receita e cobertura** — de onde vem o dinheiro (anuidade compulsória,
+    ART, multa, dívida ativa) e, principalmente, a receita de **ART como
+    denominador**: cada ART é uma obra ou serviço técnico registrado, então o
+    gasto de fiscalização dividido por ela mede **cobertura**, não esforço
+    absoluto. A multa de fiscalização tem leitura dupla e explícita — é produto
+    da fiscalização e é incentivo perverso.
+16. **Sazonalidade** — as doze colunas `VALOR_JAN..VALOR_DEZ` da despesa por
+    centro de custo são o único eixo mensal que a coleta entrega: concentração
+    em dezembro por unidade e por conta (Lei 4.320/1964, arts. 35 e 38), verba
+    a pessoas paga em lote em vez de distribuída ao longo do ano, unidade com
+    perfil mensal atípico, e divergência entre a soma dos meses e o total do
+    exercício.
+17. **Plano de contas oficial** — a despesa relida pela hierarquia que o
+    próprio conselho declara, em vez da nossa taxonomia por regex: cobertura da
+    taxonomia contra a estrutura oficial (uma família inteira caindo em "não
+    classificado" é buraco nosso e aparece nomeada), contas desenhadas que
+    nunca receberam lançamento, e execução sob rótulo sem correspondência no
+    plano.
+18. **Empenho prévio (Lei 4.320/1964, art. 60)** — pagamento sem empenho
+    correspondente nos dados publicados. Quando a chave de ligação entre as duas
+    bases simplesmente não é publicada, a frente troca a lista de acusações por
+    **um** achado de metodologia: 100% "sem empenho" não são milhares de
+    ilegalidades, é campo vazio.
+19. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
+    o que faltou, que exercícios ficaram fora, **qual análise está desligada
+    por falta de qual fonte** e, lido do registro de status HTTP, **por que**
+    cada fonte vazia veio vazia — separando "o órgão não publica" (achado de
+    transparência, Lei 12.527/2011, art. 8º) de "não conseguimos coletar"
+    (limitação nossa). Poucos achados numa frente cuja fonte veio vazia não é
+    sinal de regularidade.
 
 Thresholds (teto de diária, limites de dispensa por ano, jetons por mês,
 janelas, anos eleitorais) são parâmetros em `src/queda/config.py`.

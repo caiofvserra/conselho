@@ -12,8 +12,22 @@ log = logging.getLogger("queda.clients")
 
 # ================================================================ Implanta
 def implanta(endpoint: str, params: dict | None = None):
-    """GET em um endpoint do Portal da Transparência (Implanta)."""
+    """GET em um endpoint do Portal da Transparência (Implanta).
+
+    Devolve a lista de linhas; `[]` quando o servidor RESPONDEU que não há
+    nada; e **None** quando não houve resposta utilizável (404, 4xx
+    determinístico, payload nulo).
+
+    Separar `[]` de None não é preciosismo de tipo: é o que impede a sondagem
+    retroativa de encerrar a série histórica no ano errado. Antes, um 400 por
+    formato de parâmetro chegava ao pipeline como "exercício vazio"; dois anos
+    assim em sequência truncavam a série sem uma linha de erro. Pior ainda com
+    checkpoint por janela, que gravaria esse engano em disco e o repetiria em
+    todas as rodadas seguintes.
+    """
     data = get_json(f"{config.IMPLANTA_BASE}/{endpoint}", params)
+    if data is None:
+        return None
     return data if isinstance(data, list) else (data or [])
 
 
@@ -350,6 +364,25 @@ def _meses(ano_ini: int, ano_fim: int):
             yield f"{ano}{mes:02d}01", f"{ano}{mes:02d}{ultimo:02d}"
 
 
+def pncp_meses(ano_ini: int, ano_fim: int):
+    """Janelas mensais do PNCP, para quem precisa iterar mês a mês por fora
+    (o pipeline, que grava um checkpoint por janela)."""
+    return _meses(ano_ini, ano_fim)
+
+
+def pncp_contratos_mes(cnpj: str, ini: str, fim: str) -> list:
+    """Contratos do órgão em UMA janela mensal (AAAAMMDD, AAAAMMDD).
+
+    Exposta separadamente para que o chamador possa gravar checkpoint por mês:
+    são ~66 janelas paginadas entre 2021 e 2026, e refazer todas depois de uma
+    queda de sessão é a parte mais cara da etapa do PNCP.
+    """
+    return pncp_paginado("/v1/contratos", {
+        "dataInicial": ini, "dataFinal": fim,
+        "cnpjOrgao": cnpj, "tamanhoPagina": 500,
+    }, retries=6, espera_base=4.0)
+
+
 def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:
     """Contratos do órgão no PNCP, mês a mês.
 
@@ -360,10 +393,7 @@ def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:
     falhas: list[str] = []
     for ini, fim in _meses(ano_ini, ano_fim):
         try:
-            rows = pncp_paginado("/v1/contratos", {
-                "dataInicial": ini, "dataFinal": fim,
-                "cnpjOrgao": cnpj, "tamanhoPagina": 500,
-            }, retries=6, espera_base=4.0)
+            rows = pncp_contratos_mes(cnpj, ini, fim)
         except Exception as e:
             falhas.append(f"{ini[:6]} ({type(e).__name__})")
             continue
