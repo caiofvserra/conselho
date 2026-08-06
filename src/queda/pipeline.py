@@ -353,6 +353,68 @@ def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None
     return out
 
 
+# ------------------------------------------------- ingestão manual
+# Seis datasets voltam vazios da coleta automática — não porque o órgão não os
+# publique, mas porque o WAF barra o cliente. O portal serve os mesmos dados a
+# um navegador logado, e o operador consegue baixá-los à mão.
+#
+# Este é o caminho para trazê-los. Basta salvar o arquivo como
+# `<QUEDA_DATA_DIR>/manual/<dataset>.json` (ou `.csv`) e rodar de novo: a etapa
+# usa o arquivo e NÃO vai à rede. Os nomes válidos são os das etapas em
+# `build_staged` — `mandatarios`, `quadro_pessoal`, `atas`, `licitacoes`,
+# `processos_itens`, `indenizacoes_endpoint`.
+#
+# O JSON pode vir cru (lista) ou dentro do envelope que o portal usa
+# (`{"result": true, "data": [...]}`) — as duas formas são aceitas, porque o
+# operador salva o que o navegador mostrou, não o que seria conveniente para
+# nós.
+#
+# A procedência é registrada no diagnóstico: um número obtido à mão não pode
+# se confundir com um número que a ferramenta coletou sozinha, porque ele não
+# é reproduzível por quem só rodar o código.
+MANUAL_SUBDIR = "manual"
+
+
+def manual_rows(nome: str) -> list[dict] | None:
+    """Registros de `data/manual/<nome>.json|csv`, ou None se não houver."""
+    pasta = config.DATA_DIR / MANUAL_SUBDIR
+    alvo_json, alvo_csv = pasta / f"{nome}.json", pasta / f"{nome}.csv"
+    try:
+        if alvo_json.exists():
+            bruto = json.loads(alvo_json.read_text(encoding="utf-8"))
+            rows = bruto
+            if isinstance(bruto, dict):
+                for chave in ("data", "result", "items", "content", "registros"):
+                    if isinstance(bruto.get(chave), list):
+                        rows = bruto[chave]
+                        break
+                else:
+                    rows = [bruto]
+            if not isinstance(rows, list):
+                log.warning("manual/%s.json: formato não reconhecido", nome)
+                return None
+            log.info("manual/%s.json: %d registro(s) — a etapa não vai à rede",
+                     nome, len(rows))
+            return rows
+        if alvo_csv.exists():
+            d = pd.read_csv(alvo_csv, dtype=str, low_memory=False)
+            log.info("manual/%s.csv: %d registro(s) — a etapa não vai à rede",
+                     nome, len(d))
+            return d.to_dict("records")
+    except Exception as e:
+        # Arquivo manual ilegível não pode derrubar a coleta: ela segue pela
+        # rede, que é o comportamento de antes.
+        log.warning("manual/%s ilegível (%s: %s) — seguindo pela rede",
+                    nome, type(e).__name__, e)
+    return None
+
+
+def _marcar_manual(nome: str, n: int) -> None:
+    """Anota no diagnóstico que este dataset veio à mão, não pela coleta."""
+    _JANELAS[nome] = {**_JANELAS.get(nome, {}), "fonte": "manual",
+                      "registros_manuais": int(n)}
+
+
 def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
     """Itera anos de `ate` para trás. Se desde=None, sonda até esvaziar.
 
@@ -505,6 +567,10 @@ def stage_aditivos(desde, ate):
 
 
 def stage_licitacoes(desde, ate):
+    manual = manual_rows("licitacoes")
+    if manual is not None:
+        _marcar_manual("licitacoes", len(manual))
+        return _salvar("licitacoes", pd.DataFrame(manual))
     rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Licitacoes", a), ate,
                               desde, etapa="licitacoes")
     return _salvar("licitacoes", pd.DataFrame(rows))
@@ -611,6 +677,10 @@ def stage_processos_compras(desde, ate):
     # ITENS aninhada dentro de si, e o que um CSV faz com uma lista aninhada é
     # transformá-la em texto irreversível. Aqui a retomada continua sendo a do
     # cache HTTP (uma requisição por exercício, já gravada em data/raw).
+    manual = manual_rows("processos_itens")
+    if manual is not None:
+        _marcar_manual("processos_itens", len(manual))
+        return _salvar("processos_itens", pd.DataFrame(manual))
     processos, itens = [], []
     piso = desde or config.ANO_PISO
     vazios = 0
@@ -653,6 +723,10 @@ def stage_processos_compras(desde, ate):
 
 def stage_atas(desde, ate):
     """Atas de colegiado: deliberações (texto) + participantes."""
+    manual = manual_rows("atas")
+    if manual is not None:
+        _marcar_manual("atas", len(manual))
+        return _salvar("atas", pd.DataFrame(manual))
     rows = _anos_com_sondagem(
         lambda a: clients.implanta_datas("AtasColegiados", a), ate, desde,
         etapa="atas")
@@ -698,11 +772,15 @@ def stage_quadro_pessoal(ate=None):
     O Implanta responde mesmo quando o host de Dados Abertos está barrado — é
     o caminho que mantém viva a frente de pessoal.
     """
-    rows = clients.dados_abertos("quadro-colaboradores")
-    df = pd.DataFrame(rows)
-    if df.empty:
-        linhas, _ = clients.implanta_variantes("QuadrosPessoas", ate)
-        df = pd.DataFrame(linhas)
+    manual = manual_rows("quadro_pessoal")
+    if manual is not None:
+        df = pd.DataFrame(manual)
+        _marcar_manual("quadro_pessoal", len(df))
+    else:
+        df = pd.DataFrame(clients.dados_abertos("quadro-colaboradores"))
+        if df.empty:
+            linhas, _ = clients.implanta_variantes("QuadrosPessoas", ate)
+            df = pd.DataFrame(linhas)
     if not df.empty:
         df["nome"] = _primeira_coluna(df, "nome", "NOME", "NOME_PESSOA")
         df["vinculo"] = _primeira_coluna(df, "vinculo", "VINCULO", "TIPO_VINCULO",
@@ -726,11 +804,15 @@ def stage_mandatarios(ate=None):
     representado; sem ela não há como ligar composição do plenário a
     beneficiário de repasse.
     """
-    rows = clients.dados_abertos("mandatarios")
-    df = pd.DataFrame(rows)
-    if df.empty:
-        linhas, _ = clients.implanta_variantes("Conselheiros", ate)
-        df = pd.DataFrame(linhas)
+    manual = manual_rows("mandatarios")
+    if manual is not None:
+        df = pd.DataFrame(manual)
+        _marcar_manual("mandatarios", len(df))
+    else:
+        df = pd.DataFrame(clients.dados_abertos("mandatarios"))
+        if df.empty:
+            linhas, _ = clients.implanta_variantes("Conselheiros", ate)
+            df = pd.DataFrame(linhas)
     if not df.empty:
         df["nome"] = _primeira_coluna(df, "nomeMandatario", "NOME_MANDATARIO",
                                       "NOME_CONSELHEIRO", "NOME")
@@ -740,12 +822,51 @@ def stage_mandatarios(ate=None):
             "INSTITUICAO", "NOME_INSTITUICAO", "REPRESENTACAO", "_grupo_TITULO")
         df["NOME_NORM"] = df["nome"].map(norm_nome)
         df["ENTIDADE_NORM"] = df["entidade"].map(norm_nome)
+        # Datas do mandato: são elas que dizem se o rol é uma FOTO do momento
+        # ou uma série histórica — e o portal devolve a foto. Sem isso, cruzar
+        # o mandato de hoje com uma diária de 2015 seria anacronismo.
+        for col, orig in (("POSSE", ("dataPosse", "DATA_POSSE")),
+                          ("FIM_PREVISTO", ("dataPrevistaFim", "DATA_FIM")),
+                          ("EXONERACAO", ("dataExoneracao", "DATA_EXONERACAO"))):
+            df[col] = pd.to_datetime(_primeira_coluna(df, *orig),
+                                     dayfirst=True, errors="coerce")
+        # O DOMÍNIO do e-mail, nunca o e-mail. O endereço é dado pessoal e não
+        # entra em relatório nenhum; o domínio é o que carrega informação
+        # pública — `unesp.br` diz representante de instituição de ensino,
+        # `construtora*.com.br` diz vínculo com empresa do setor fiscalizado.
+        # Este é o único proxy da entidade representada quando o portal não
+        # publica o campo de entidade, que é exatamente o caso.
+        email = _primeira_coluna(df, "enderecoEletronico", "EMAIL", "E_MAIL")
+        df["EMAIL_DOMINIO"] = (email.astype(str).str.strip().str.lower()
+                               .str.rsplit("@", n=1).str[-1]
+                               .where(email.astype(str).str.contains("@"), ""))
+        # O endereço completo é descartado aqui, depois de extraído o domínio.
+        # O relatório e os CSVs de evidência são feitos para serem
+        # compartilhados; e-mail pessoal de 2.455 pessoas não tem por que
+        # viajar junto. O arquivo original continua em `data/manual/` para
+        # quem precisar conferir.
+        df = df.drop(columns=[c for c in ("enderecoEletronico", "EMAIL",
+                                          "E_MAIL") if c in df.columns])
+        # O CPF vem MASCARADO pela fonte (431.xxx.xxx-00): seis dígitos
+        # visíveis. Não serve de chave — no rol real há mais nomes distintos
+        # que CPFs mascarados distintos, ou seja, máscaras diferentes colidem.
+        # Fica só como coluna de conferência manual.
+        df["CPF_MASCARA"] = _primeira_coluna(df, "cpfMandatario", "CPF")
     return _salvar("mandatarios", df)
 
 
 def stage_indenizacoes(desde, ate):
     """Endpoints dedicados de indenizações/diárias (podem estar vazios —
     o próprio vazio vira achado de transparência no check)."""
+    manual = manual_rows("indenizacoes_endpoint")
+    if manual is not None:
+        df = pd.DataFrame(manual)
+        _marcar_manual("indenizacoes_endpoint", len(df))
+        if not df.empty:
+            df["valor"] = coluna(df, "valorBrutoPagamento", 0).map(parse_valor)
+            df["FAVORECIDO_NORM"] = coluna(df,
+                                           "nomeFavorecidoPagamento").map(norm_nome)
+        return _salvar("indenizacoes_endpoint", df)
     frames = []
     for ano in range((desde or 2015), ate + 1):
         for r in clients.dados_abertos("indenizacoes", {"exercicio": str(ano)}):

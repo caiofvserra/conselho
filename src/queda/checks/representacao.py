@@ -177,10 +177,297 @@ def _entidades_pagas(staged) -> pd.DataFrame:
     return d
 
 
+# --------------------------------------------------------------- mandatários
+# Provedores de e-mail gratuito: o domínio não diz nada sobre vínculo, é só
+# onde a pessoa abriu uma conta. Fora desta lista, o domínio é do empregador,
+# da própria empresa ou da instituição — e aí ele informa.
+DOMINIOS_LIVRES = {
+    "gmail.com", "gmail.con", "hotmail.com", "hotmail.com.br", "yahoo.com",
+    "yahoo.com.br", "ymail.com", "outlook.com", "outlook.com.br", "live.com",
+    "msn.com", "uol.com.br", "bol.com.br", "terra.com.br", "ig.com.br",
+    "globo.com", "icloud.com", "me.com", "aol.com", "protonmail.com",
+    "proton.me", "zipmail.com.br", "globomail.com", "r7.com", "itelefonica.com.br",
+}
+
+# Datas-sentinela que o portal usa quando não há data real. Não são datas: são
+# a ausência de data com aparência de dado, e por isso precisam de teste
+# próprio — uma posse "em 1900" passa por qualquer filtro de período.
+_ANO_MIN_PLAUSIVEL = 1950
+_ANO_MAX_PLAUSIVEL = 2100
+
+
+def _nucleo_dominio(dominio: str) -> str:
+    """`construtoratucanos.com.br` -> `CONSTRUTORATUCANOS`.
+
+    Só as letras da primeira parte, para poder procurar como pedaço contínuo
+    dentro da razão social comprimida do fornecedor.
+    """
+    base = str(dominio or "").split(".")[0]
+    return re.sub(r"[^A-Za-z]", "", base).upper()
+
+
+def _mandatarios(staged) -> pd.DataFrame:
+    m = df(staged, "mandatarios")
+    if m.empty or "NOME_NORM" not in m.columns:
+        return pd.DataFrame()
+    d = m.copy()
+    d["cargo"] = coluna(d, "cargo").fillna("").astype(str).str.strip()
+    # `nome` é criado pelo staging, mas indexar coluna que pode não existir
+    # derruba a frente inteira — e uma frente que estoura some do relatório
+    # sem dizer que sumiu. O nome normalizado sempre existe e serve de reserva.
+    nome = coluna(d, "nome").fillna("").astype(str)
+    d["nome"] = nome.where(nome.str.len() > 0, d["NOME_NORM"])
+    for c in ("POSSE", "FIM_PREVISTO"):
+        if c in d.columns:
+            d[c] = pd.to_datetime(d[c], errors="coerce")
+    return d
+
+
+def _recebedores(staged) -> pd.DataFrame:
+    """TODO mundo que recebeu dinheiro do conselho — não só entidade de classe.
+
+    Universo diferente do de `_entidades_pagas` de propósito, e a confusão
+    entre os dois é fácil de cometer: para o cruzamento por domínio, a
+    construtora e o escritório de engenharia são exatamente o que interessa,
+    e são justamente eles que o filtro de entidade coletiva descarta.
+    """
+    frames = []
+    pg = df(staged, "pagamentos")
+    if not pg.empty and "NOME_RAZAO_SOCIAL" in pg:
+        p = pg[pg.get("TIPO_PESSOA", "PJ") != "PF"] if "TIPO_PESSOA" in pg else pg
+        frames.append(pd.DataFrame({
+            "nome": coluna(p, "NOME_RAZAO_SOCIAL").fillna("").astype(str),
+            "valor": pd.to_numeric(p["VALOR"], errors="coerce").fillna(0),
+            "canal": "pagamento"}))
+    ctr = df(staged, "contratos")
+    if not ctr.empty:
+        nome = coluna(ctr, "CONTRATADA_NOME")
+        if nome.fillna("").astype(str).str.len().sum() == 0:
+            nome = coluna(ctr, "CONTRATADA")
+        frames.append(pd.DataFrame({
+            "nome": nome.fillna("").astype(str),
+            "valor": pd.to_numeric(coluna(ctr, "VALOR", 0),
+                                   errors="coerce").fillna(0),
+            "canal": "contrato"}))
+    conv = df(staged, "convenios")
+    if not conv.empty and "BENEFICIARIO" in conv:
+        frames.append(pd.DataFrame({
+            "nome": conv["BENEFICIARIO"].fillna("").astype(str),
+            "valor": pd.to_numeric(coluna(conv, "VALOR_TOTAL", 0),
+                                   errors="coerce").fillna(0),
+            "canal": "convênio"}))
+    if not frames:
+        return pd.DataFrame()
+    d = pd.concat(frames, ignore_index=True)
+    d = d[(d["valor"] > 0) & (d["nome"].str.len() > 3)]
+    if d.empty:
+        return d
+    d["nome_norm"] = d["nome"].map(norm_nome)
+    return (d.groupby("nome_norm")
+            .agg(valor=("valor", "sum"), canais=("canal", lambda s: ", ".join(sorted(set(s)))))
+            .reset_index())
+
+
+def _achados_mandatarios(staged, pagos: pd.DataFrame) -> list[Finding]:
+    """O que o rol de mandatários permite medir por si só.
+
+    Este bloco existe porque o rol chegou sem o campo de ENTIDADE — que é o
+    elo entre assento e interesse. Sem ele, `repr-composicao` não roda. Mas o
+    rol traz outras três coisas que ninguém publica junto: quantos mandatos
+    existem e de que tipo, quais deles não têm início nem fim, e o domínio do
+    e-mail de contato, que é o único proxy público do vínculo de cada um.
+    """
+    achados: list[Finding] = []
+    d = _mandatarios(staged)
+    if d.empty:
+        return achados
+
+    pessoas = int(d["NOME_NORM"].nunique())
+    por_cargo = (d.groupby("cargo")
+                 .agg(mandatos=("NOME_NORM", "size"),
+                      pessoas=("NOME_NORM", "nunique")).reset_index()
+                 .sort_values("mandatos", ascending=False))
+    por_cargo["share_pct"] = (100 * por_cargo["mandatos"] / len(d)).round(1)
+    rx_conselheiro = re.compile(r"titular|suplente|conselheir", re.I)
+    rx_inspetor = re.compile(r"inspetor", re.I)
+    n_cons = int(d[d["cargo"].str.contains(rx_conselheiro)]["NOME_NORM"].nunique())
+    n_insp = int(d[d["cargo"].str.contains(rx_inspetor)]["NOME_NORM"].nunique())
+
+    # ------------------------------------------------ 1. o tamanho da estrutura
+    achados.append(Finding(
+        id="repr-mandatarios-composicao", frente=FRENTE,
+        gravidade="media" if n_insp > 4 * max(n_cons, 1) else "info",
+        titulo=(f"{pessoas} pessoas ocupam mandato no conselho: {n_cons} "
+                f"conselheiro(s) e {n_insp} inspetor(es)"),
+        descricao=(
+            "Este é o denominador que faltava. A frente de verbas mostra "
+            "quanto o conselho paga em diárias e locomoção a conselheiros e a "
+            "inspetores, mas sem saber **quantos são** não se sabe se o valor "
+            "é grande ou se a estrutura é grande.\n\n"
+            "Inspetor não é empregado: é profissional com mandato, que atua "
+            "no município e recebe por diária e deslocamento, não por salário. "
+            "Uma estrutura de inspetoria numerosa é uma decisão institucional "
+            "legítima — e é também o que explica o volume de verba "
+            "indenizatória. As duas leituras precisam do mesmo número, e ele "
+            "só existe aqui.\n\n"
+            "O rol é uma **foto do momento**, não uma série histórica: o "
+            "portal devolve os mandatos vigentes. Ele não serve para dizer "
+            "quem era inspetor em 2015."),
+        evidencia=por_cargo,
+        grafico="bar", unidade="mandatos",
+        base_legal=("Lei 5.194/1966, arts. 30 a 34 e 45 (câmaras "
+                    "especializadas e inspetorias); Lei 12.514/2011."),
+        como_verificar=("Dividir a verba paga em 'Diárias/Locomoção com "
+                        "Inspetores' pelo número de inspetores do exercício "
+                        "correspondente — o que exige o rol POR ANO, que o "
+                        "portal não publica."),
+        metricas={"pessoas": pessoas, "mandatos": int(len(d)),
+                  "conselheiros": n_cons, "inspetores": n_insp,
+                  "cargos_distintos": int(d["cargo"].nunique())},
+    ))
+
+    # ------------------------------------------------ 2. mandato sem termo
+    if {"POSSE", "FIM_PREVISTO"} <= set(d.columns):
+        sem_termo = d[(d["POSSE"].dt.year < _ANO_MIN_PLAUSIVEL) |
+                      (d["FIM_PREVISTO"].dt.year > _ANO_MAX_PLAUSIVEL)]
+        if not sem_termo.empty:
+            # Quem tem OUTRO registro com data real está apenas duplicado; quem
+            # não tem, está no rol sem nenhuma data de mandato.
+            com_par = set(sem_termo["NOME_NORM"]) & set(
+                d[~d.index.isin(sem_termo.index)]["NOME_NORM"])
+            so_sentinela = int(sem_termo["NOME_NORM"].nunique() - len(com_par))
+            achados.append(Finding(
+                id="repr-mandato-sem-termo", frente=FRENTE,
+                gravidade="media" if so_sentinela else "info",
+                titulo=(f"{len(sem_termo)} mandato(s) registrados com posse em "
+                        f"01/01/1900 e término em 31/12/9999"),
+                descricao=(
+                    "Não são datas: são o preenchimento automático que o "
+                    "sistema usa quando não há data. Publicadas como se datas "
+                    "fossem, elas atravessam qualquer filtro de período — um "
+                    "mandato assim está vigente em todos os exercícios de "
+                    "qualquer consulta.\n\n"
+                    f"De {sem_termo['NOME_NORM'].nunique()} pessoas nessa "
+                    f"situação, **{so_sentinela}** não têm nenhum outro "
+                    "registro com data real: para elas, o portal não informa "
+                    "quando o mandato começou nem quando termina. As demais "
+                    "aparecem duas vezes, uma com data e outra sem.\n\n"
+                    "Mandato tem prazo por lei. A ausência de termo no registro "
+                    "público impede conferir se quem exerce a função ainda tem "
+                    "mandato válido."),
+                evidencia=(sem_termo[["nome", "cargo", "POSSE", "FIM_PREVISTO"]]
+                           .sort_values("nome").head(200)),
+                base_legal=("Lei 5.194/1966, art. 32 (mandato dos conselheiros); "
+                            "Lei 12.527/2011, art. 8º, §1º, II."),
+                como_verificar=("Pedir, por ato de nomeação, a data de posse e "
+                                "o termo final de cada mandato listado."),
+                metricas={"registros": int(len(sem_termo)),
+                          "pessoas": int(sem_termo["NOME_NORM"].nunique()),
+                          "so_com_data_sentinela": so_sentinela},
+            ))
+
+    # ------------------------------------------------ 3. o domínio como vínculo
+    if "EMAIL_DOMINIO" in d.columns:
+        dom = d[d["EMAIL_DOMINIO"].fillna("").astype(str).str.contains(r"\.")]
+        corp = dom[~dom["EMAIL_DOMINIO"].str.lower().isin(DOMINIOS_LIVRES)]
+        if not corp.empty:
+            tabela = (corp.groupby("EMAIL_DOMINIO")
+                      .agg(pessoas=("NOME_NORM", "nunique"),
+                           cargos=("cargo", lambda s: ", ".join(sorted(set(s)))))
+                      .reset_index().sort_values("pessoas", ascending=False))
+            pct = 100 * len(corp) / len(dom) if len(dom) else 0
+
+            # Cruzamento com quem recebe dinheiro do conselho — fornecedor,
+            # contratada e conveniada, não só entidade de classe.
+            #
+            # O núcleo tem de ter 8 letras ou mais: abaixo disso o pedaço
+            # aparece dentro de razão social por acaso ("eng", "sp", "tec"), e
+            # a lista vira ruído. Erra para o lado de achar menos.
+            batidas = pd.DataFrame()
+            alvo = _recebedores(staged)
+            if not alvo.empty:
+                nucleos = {n: _nucleo_dominio(n)
+                           for n in corp["EMAIL_DOMINIO"].unique()}
+                nucleos = {k: v for k, v in nucleos.items() if len(v) >= 8}
+                if nucleos:
+                    alvo = alvo.copy()
+                    alvo["_compacto"] = alvo["nome_norm"].str.replace(
+                        r"[^A-Za-z]", "", regex=True).str.upper()
+                    linhas = []
+                    for dominio, nucleo in nucleos.items():
+                        bate = alvo[alvo["_compacto"].str.contains(nucleo,
+                                                                   regex=False)]
+                        for _, r in bate.iterrows():
+                            quem = corp[corp["EMAIL_DOMINIO"] == dominio]
+                            linhas.append({
+                                "dominio": dominio,
+                                "recebedor": r["nome_norm"],
+                                "valor_recebido": float(r["valor"]),
+                                "canais": r["canais"],
+                                "mandatarios": int(quem["NOME_NORM"].nunique()),
+                                "nomes": ", ".join(sorted(quem["nome"].unique())[:5]),
+                                "cargos": ", ".join(sorted(set(quem["cargo"]))),
+                            })
+                    batidas = (pd.DataFrame(linhas)
+                               .sort_values("valor_recebido", ascending=False)
+                               if linhas else pd.DataFrame())
+
+            tem_batida = not batidas.empty
+            val = float(batidas["valor_recebido"].sum()) if tem_batida else 0.0
+            achados.append(Finding(
+                id="repr-mandatario-dominio", frente=FRENTE,
+                gravidade="alta" if tem_batida else "info",
+                titulo=((f"{len(batidas)} vínculo(s) entre o domínio de contato "
+                         f"de um mandatário e quem recebe do conselho — "
+                         f"{fmt_brl(val)}") if tem_batida else
+                        (f"{int(corp['NOME_NORM'].nunique())} mandatários usam "
+                         f"e-mail de domínio próprio ({pct:.0f}% dos com "
+                         "e-mail), em {n} domínios".format(
+                             n=int(corp['EMAIL_DOMINIO'].nunique())))),
+                descricao=(
+                    "O portal não publica a entidade que indicou cada "
+                    "mandatário — que é justamente o elo entre assento e "
+                    "interesse. O domínio do e-mail de contato é o substituto "
+                    "possível: quem usa `unesp.br` está ligado a uma "
+                    "instituição de ensino, quem usa o domínio de uma "
+                    "construtora está ligado a uma empresa do setor que o "
+                    "conselho fiscaliza.\n\n"
+                    + ("O cruzamento abaixo é o que interessa: domínio de "
+                       "mandatário que coincide com o nome de quem recebe "
+                       "dinheiro do conselho. **Coincidência de nome não é "
+                       "prova de nada** — pode ser homonímia, pode ser empresa "
+                       "distinta com nome parecido, e mesmo o vínculo real não "
+                       "é irregular por si. É o ponto de partida da verificação "
+                       "de impedimento e suspeição, não a conclusão dela.\n\n"
+                       if tem_batida else
+                       "Nenhum domínio coincidiu com nome de recebedor de "
+                       "recurso do conselho. A tabela fica publicada como "
+                       "mapa do vínculo declarado.\n\n")
+                    + "Os endereços de e-mail não são publicados aqui: só o "
+                    "domínio, que é o que carrega informação pública."),
+                evidencia=batidas if tem_batida else tabela.head(200),
+                base_legal=("Lei 9.784/1999, arts. 18 a 21 (impedimento e "
+                            "suspeição); Lei 14.133/2021, art. 9º; Lei "
+                            "5.194/1966, art. 34."),
+                como_verificar=("Para cada linha, conferir no cadastro da "
+                                "empresa (QSA na Receita) se o mandatário é "
+                                "sócio ou administrador, e nas atas se ele "
+                                "participou de deliberação sobre o contrato."),
+                metricas={"dominios_proprios": int(corp["EMAIL_DOMINIO"].nunique()),
+                          "mandatarios_com_dominio_proprio":
+                              int(corp["NOME_NORM"].nunique()),
+                          "pct_dominio_proprio": round(pct, 1),
+                          "vinculos_com_recebedor": int(len(batidas)),
+                          "valor_recebido": round(val, 2)},
+            ))
+    return achados
+
+
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
     mand = df(staged, "mandatarios")
     d = _entidades_pagas(staged)
+    achados.extend(_achados_mandatarios(staged, d))
 
     # ------------------------------------------------ 1. composição do plenário
     if not mand.empty and "ENTIDADE_NORM" in mand and \
@@ -226,16 +513,27 @@ def run(staged) -> list[Finding]:
     else:
         achados.append(Finding(
             id="repr-sem-mandatarios", frente=FRENTE, gravidade="alta",
-            titulo="O rol de conselheiros e das entidades que os indicaram não "
-                   "está disponível",
+            titulo=("O rol de mandatários não informa por qual entidade cada um "
+                    "tem assento" if not mand.empty else
+                    "O rol de conselheiros e das entidades que os indicaram não "
+                    "está disponível"),
             descricao=(
-                "Sem saber quem ocupa o plenário e por qual entidade, é "
-                "impossível ligar decisão a interesse — e é justamente essa "
-                "ligação que a transparência ativa deveria permitir. A "
-                "indisponibilidade não é detalhe técnico: é o que impede o "
-                "controle social sobre o conflito de interesses. Os repasses "
-                "às entidades continuam medidos abaixo, mas sem o outro lado "
-                "da equação."),
+                ("O rol de mandatários existe e está medido acima — nome, "
+                 "cargo, datas de mandato. O que ele **não** traz é a entidade "
+                 "que indicou cada um, e é exatamente esse campo que liga o "
+                 "assento ao interesse representado.\n\n"
+                 "A distinção importa para o pedido de acesso: não se trata de "
+                 "publicar o rol, que já é publicado, e sim de acrescentar a "
+                 "ele uma coluna que o próprio conselho necessariamente possui "
+                 "— ninguém toma posse sem que se saiba quem o indicou.\n\n"
+                 if not mand.empty else
+                 "Sem saber quem ocupa o plenário e por qual entidade, é "
+                 "impossível ligar decisão a interesse — e é justamente essa "
+                 "ligação que a transparência ativa deveria permitir. A "
+                 "indisponibilidade não é detalhe técnico: é o que impede o "
+                 "controle social sobre o conflito de interesses.\n\n")
+                + "Os repasses às entidades continuam medidos abaixo, mas sem "
+                "o outro lado da equação."),
             base_legal="Lei 12.527/2011, art. 8º, §1º, incisos II e III "
                        "(divulgação de informações sobre a estrutura "
                        "organizacional e os repasses); Decreto 8.777/2016.",

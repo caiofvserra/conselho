@@ -139,6 +139,25 @@ Outras variáveis: `QUEDA_OLLAMA_HOST` (padrão `http://localhost:11434`),
 `networkx` (opcional, `pip install networkx`) dá a medida exata de
 intermediação na rede — sem ele, a métrica cai para o grau de ligação.
 
+### Quando a API barra: ingestão manual
+
+Seis datasets voltam vazios da coleta automática — não porque o conselho não
+os publique, mas porque o WAF barra o cliente. O portal serve os mesmos dados
+a um navegador comum, e dá para baixá-los à mão.
+
+Salve o arquivo como `<QUEDA_DATA_DIR>/manual/<dataset>.json` (ou `.csv`) e
+rode de novo: a etapa usa o arquivo e **não vai à rede**. Nomes válidos:
+`mandatarios`, `quadro_pessoal`, `atas`, `licitacoes`, `processos_itens`,
+`indenizacoes_endpoint`. O JSON pode vir cru ou dentro do envelope do portal
+(`{"result": true, "data": [...]}`) — as duas formas são aceitas.
+
+A procedência fica registrada no diagnóstico da coleta: um número obtido à mão
+não é reproduzível por quem só rodar o código, e o relatório precisa dizer isso.
+
+Dado pessoal que venha nesses arquivos não sai do seu disco: `data/` é
+gitignored, e o endereço de e-mail dos mandatários é descartado logo após a
+extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
+
 ## Frentes de análise
 
 1. **Para onde vai o dinheiro** — taxonomia de dois eixos: a **natureza** (o
@@ -157,8 +176,15 @@ intermediação na rede — sem ele, a métrica cai para o grau de ligação.
    atividade-fim; e compara o ritmo de crescimento da despesa total com o da
    fiscalização. Quando o quadro de pessoal vem com lotação, mostra também onde
    estão as pessoas, não só o dinheiro.
-3. **Representação e interesses** — quem indica os conselheiros e para onde vai
-   o repasse institucional. As entidades de classe indicam o plenário e formam
+3. **Representação e interesses** — quem ocupa o mandato e para onde vai
+   o repasse institucional. Quando o rol de mandatários está disponível, mede
+   **quantos são** — o denominador que falta para saber se a verba paga a
+   conselheiros e inspetores é grande ou se a estrutura é grande —, isola os
+   mandatos registrados sem data de início nem de fim (que atravessam qualquer
+   filtro de período) e usa o **domínio do e-mail de contato** como único proxy
+   público do vínculo de cada mandatário, cruzando-o com quem recebe dinheiro
+   do conselho. Coincidência de domínio não é prova de nada: é ponto de partida
+   para verificar impedimento e suspeição. As entidades de classe indicam o plenário e formam
    o colégio eleitoral que elege a diretoria; a frente classifica cada uma por
    interesse representado (patronal/empresarial, profissional, ensino, sistema
    Confea/Crea), mede o dinheiro que cada grupo recebe ano a ano, isola quem

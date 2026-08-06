@@ -385,9 +385,45 @@ def _staged() -> dict[str, pd.DataFrame]:
          "entidade": "ASSOCIACAO DOS ENGENHEIROS X"},
         {"nomeMandatario": "TEREZA CRISTINA MELO", "cargo": "Conselheira",
          "entidade": "UNIVERSIDADE ESTADUAL PAULISTA"},
+        # A inspetoria é o grosso do rol real (2.124 de 2.455 na coleta manual)
+        # e é ela que recebe "Diárias/Locomoção com Inspetores". Sem inspetores
+        # aqui, o denominador da verba política nunca é exercitado.
+        *[{"nomeMandatario": f"INSPETOR MUNICIPAL {i:02d}", "cargo": "Inspetor",
+           "entidade": ""} for i in range(30)],
+        # Domínio próprio que coincide com FORNECEDOR do conselho: é o único
+        # elo público entre mandatário e quem recebe, já que o portal não
+        # publica a entidade que indicou cada um.
+        {"nomeMandatario": "SERGIO MENDES OMEGA", "cargo": "Inspetor Especial",
+         "entidade": "", "enderecoEletronico": "sergio@omegaengenharia.com.br"},
+        # Datas-sentinela: mandato sem início nem fim, que atravessa qualquer
+        # filtro de período. Um deles TEM registro paralelo com data real (só
+        # duplicata), o outro NÃO tem — e é esse que o achado tem de isolar.
+        {"nomeMandatario": "ROBERTO ALVES LIMA", "cargo": "Conselheiro",
+         "entidade": "SINDUSCON SP", "dataPosse": "01/01/1900",
+         "dataPrevistaFim": "31/12/9999"},
+        {"nomeMandatario": "ANTONIO SEM TERMO", "cargo": "Inspetor",
+         "entidade": "", "dataPosse": "01/01/1900",
+         "dataPrevistaFim": "31/12/9999"},
     ])
+    mandatarios["nome"] = mandatarios["nomeMandatario"]
     mandatarios["NOME_NORM"] = mandatarios["nomeMandatario"].map(norm_nome)
     mandatarios["ENTIDADE_NORM"] = mandatarios["entidade"].map(norm_nome)
+    # espelha stage_mandatarios: datas do mandato e DOMÍNIO do e-mail (o
+    # endereço completo é descartado na coleta e nunca chega ao relatório)
+    mandatarios["dataPosse"] = mandatarios.get(
+        "dataPosse", pd.Series(dtype=str)).fillna("15/01/2024")
+    mandatarios["dataPrevistaFim"] = mandatarios.get(
+        "dataPrevistaFim", pd.Series(dtype=str)).fillna("31/12/2026")
+    mandatarios["POSSE"] = pd.to_datetime(mandatarios["dataPosse"],
+                                          dayfirst=True, errors="coerce")
+    mandatarios["FIM_PREVISTO"] = pd.to_datetime(mandatarios["dataPrevistaFim"],
+                                                 dayfirst=True, errors="coerce")
+    _email = mandatarios.get("enderecoEletronico",
+                             pd.Series(dtype=str)).fillna("")
+    mandatarios["EMAIL_DOMINIO"] = _email.str.rsplit("@", n=1).str[-1].where(
+        _email.str.contains("@"), "gmail.com")
+    mandatarios = mandatarios.drop(columns=["enderecoEletronico"],
+                                   errors="ignore")
 
     # Série anual coerente com o demonstrativo: sem ela a conferência de
     # reconciliação acusaria divergência na própria fixture.
@@ -742,6 +778,9 @@ ESPERADOS = [
     "repr-assento-e-dinheiro",         # entidade com assento que recebe
     "repr-duplo-canal",                # convênio E contrato (não convênio E pagamento)
     "repr-concentracao",
+    "repr-mandatarios-composicao",     # quantos são — o denominador da verba
+    "repr-mandato-sem-termo",          # posse 01/01/1900, fim 31/12/9999
+    "repr-mandatario-dominio",         # domínio do e-mail = fornecedor do órgão
     # receita: de onde vem o dinheiro e o que ele deveria comprar
     "receita-composicao",
     "receita-cobertura-por-art",       # ART cresce 12%/ano, fiscalização 1-2%
@@ -918,6 +957,21 @@ def _confere_metricas(achados) -> list[str]:
     # 100% das contas de despesa estavam movimentadas.
     exige("plano-contas-sem-lancamento", "contas_analiticas", 25)
     exige("plano-contas-sem-lancamento", "contas_analiticas_plano_inteiro", 29)
+
+    # Mandatários: 7 conselheiros nomeados + 30 inspetores + 1 inspetor com
+    # domínio próprio + 1 sem termo = 39 pessoas. Se o regex de cargo parar de
+    # separar inspetor de conselheiro, o denominador da verba política sai
+    # errado sem o achado desaparecer.
+    exige("repr-mandatarios-composicao", "pessoas", 39)
+    exige("repr-mandatarios-composicao", "conselheiros", 6)
+    exige("repr-mandatarios-composicao", "inspetores", 32)
+    # dois registros-sentinela; só um deles NÃO tem registro paralelo com data
+    exige("repr-mandato-sem-termo", "registros", 2)
+    exige("repr-mandato-sem-termo", "so_com_data_sentinela", 1)
+    # OMEGA ENGENHARIA: 800k em pagamento + 500k e 900k em contrato
+    exige("repr-mandatario-dominio", "vinculos_com_recebedor", 1)
+    exige("repr-mandatario-dominio", "valor_recebido",
+          800_000 + 500_000 + 900_000)
 
     # A fixture do ledger tem UM vazio de cada tipo. Se a atribuição
     # tentativa -> dataset deixar de casar (mudança de caminho no clients.py),
