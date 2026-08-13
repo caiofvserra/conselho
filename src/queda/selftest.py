@@ -116,6 +116,24 @@ def _pagamentos() -> pd.DataFrame:
                      "HISTORICO": "assessoria juridica", "VALOR": 5_000_000.0,
                      "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"15/03/{ano}",
                      "NUMERO_EMPENHO": 8000 + ano, "NUMERO_PAGAMENTO": 8000 + ano})
+    # --- transferência LEGAL OBRIGATÓRIA ao Confea e à Mútua
+    # Estas não são escolha do conselho (Lei 5.194/1966, arts. 34 e 44) e não
+    # podem entrar no repasse discricionário a entidades de classe. Note que a
+    # "ASSOCIACAO DOS PROCURADORES DO CREA-SP" acima MENCIONA o Crea e NÃO é
+    # órgão do sistema: é a armadilha que já classificou o maior achado do
+    # relatório como cumprimento de lei e o fez sumir.
+    for ano in range(2013, 2026):
+        for quem, cnpj, v in (
+                ("CONFEA - CONS. FEDERAL DE ENGENHARIA E AGRONOMIA",
+                 "33386261000116", 20_000_000.0),
+                ("MUTUA SP - MUTUA ASSIST. PROF. ENG. ARQ. AGRONOMIA",
+                 "33386261000205", 8_000_000.0)):
+            rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": quem,
+                         "CPF_CNPJ": cnpj,
+                         "CONTA_EMPENHO": "6.2.2.1.1.01.08.01-Cota-Parte Confea",
+                         "HISTORICO": "cota parte", "VALOR": v,
+                         "VALOR_LIQUIDO": 0, "DATA_PAGAMENTO": f"20/01/{ano}",
+                         "NUMERO_EMPENHO": 13000, "NUMERO_PAGAMENTO": 13000})
     # --- obra da nova sede
     for ano in range(2022, 2026):
         rows.append({"_ano": ano, "NOME_RAZAO_SOCIAL": "CONSTRUTORA NOVA SEDE LTDA",
@@ -598,6 +616,15 @@ def _staged() -> dict[str, pd.DataFrame]:
         ("Superintendência Regional de Bauru", "Material de Consumo", 0.6e6, 1.03),
         ("UGI Ribeirão Preto - Atendimento", "Vencimentos e Salários", 1.2e6, 1.03),
         ("UGI Santos - Atendimento", "Locação de Imóveis", 0.9e6, 1.03),
+        # Despesa de NATUREZA finalística — sem ela o eixo macro da frente
+        # "para onde vai o dinheiro" só produzia Pessoal e Administrativo, a
+        # coluna "Finalística" nunca existia e `finalistica-razao-meio-fim`
+        # — a frase mais citável do relatório inteiro — não era exercitada por
+        # nenhum cenário. Deliberadamente pequena: é o denominador minúsculo do
+        # caso real que a guarda de cobertura tem de pegar.
+        ("Departamento de Fiscalização", "Ações de Fiscalização", 1.1e6, 1.02),
+        ("UGI Ribeirão Preto - Atendimento", "Atendimento ao Profissional",
+         0.4e6, 1.02),
     )
     # As doze colunas VALOR_JAN..VALOR_DEZ são o único eixo MENSAL que a coleta
     # real entrega, e é sobre elas que a frente de sazonalidade trabalha. Os
@@ -761,6 +788,7 @@ ESPERADOS = [
     "finalistica-panorama",            # meio × fim
     "finalistica-categorias",
     "finalistica-matriz",              # natureza × função (dois eixos)
+    "finalistica-razao-meio-fim",      # a frase mais citável — guarda de cobertura
     "finalistica-verbas-politicas",    # diárias/jetons na direção e no plenário
     "finalistica-centros-custo",
     # superintendências: onde o dinheiro fica × onde ele chega
@@ -941,8 +969,11 @@ def _confere_metricas(achados) -> list[str]:
     # por nome funcionam ao mesmo tempo: se o casamento por nome quebrar,
     # "Diárias no País"/"Jetons a Conselheiros"/"Serviços de Terceiros PJ" saem
     # da conta e o número despenca sem o achado desaparecer.
-    exige("plano-despesa-por-no", "total_conciliado", 451_466_962.55)
-    exige("plano-despesa-por-no", "total_executado", 452_216_962.55)
+    # +364.000.000 = (20 mi Confea + 8 mi Mútua) x 13 exercícios
+    exige("plano-despesa-por-no", "total_conciliado",
+          451_466_962.55 + (20_000_000 + 8_000_000) * 13)
+    exige("plano-despesa-por-no", "total_executado",
+          452_216_962.55 + (20_000_000 + 8_000_000) * 13)
     # família 6.5 inteira: 3 contas × 13 exercícios, com o jitter determinístico
     _familia_65 = sum(
         base + 37_000 * ((ano + i * 3) % 7)
@@ -957,6 +988,28 @@ def _confere_metricas(achados) -> list[str]:
     # 100% das contas de despesa estavam movimentadas.
     exige("plano-contas-sem-lancamento", "contas_analiticas", 25)
     exige("plano-contas-sem-lancamento", "contas_analiticas_plano_inteiro", 29)
+
+    # Transferência obrigatória (Confea + Mútua, 13 exercícios) NÃO pode entrar
+    # no repasse discricionário, e a Associação dos Procuradores — que menciona
+    # o Crea no nome — TEM de continuar dentro dele. Este par de asserções é o
+    # que impede a regressão que apagaria `casos-entidade-da-casa`.
+    exige("repr-dinheiro-por-interesse", "transferencia_obrigatoria_sistema",
+          (20_000_000 + 8_000_000) * 13)
+    exige("repr-dinheiro-por-interesse", "total", 49_590_000)
+    exige("casos-entidade-da-casa", "total", 40_000_000)
+
+    # A razão meio/fim é a frase mais citável do relatório e a mais frágil: o
+    # denominador é a atividade-fim que NÓS identificamos. Com ela abaixo de 5%
+    # da despesa o achado tem de sair como info, com a cobertura no título —
+    # nunca como manchete de gravidade alta.
+    f = por_id.get("finalistica-razao-meio-fim")
+    if f is not None:
+        if f.gravidade != "info":
+            erros.append(f"finalistica-razao-meio-fim saiu como '{f.gravidade}' "
+                         "com atividade-fim abaixo de 5% — tem de ser info")
+        if not f.cobertura or f.cobertura.get("pct", 100) > 5:
+            erros.append("finalistica-razao-meio-fim sem cobertura declarada "
+                         "ou com cobertura acima do esperado na fixture")
 
     # Mandatários: 7 conselheiros nomeados + 30 inspetores + 1 inspetor com
     # domínio próprio + 1 sem termo = 39 pessoas. Se o regex de cargo parar de

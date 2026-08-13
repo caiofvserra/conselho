@@ -443,6 +443,62 @@ def _pagamentos_pj(staged) -> pd.DataFrame:
     return d
 
 
+def _porque_sem_geografia(staged, base: pd.DataFrame,
+                          perfil: pd.DataFrame) -> dict:
+    """Qual dos elos quebrou: o CNPJ nos pagamentos, a ficha, ou o encontro.
+
+    Três causas produzem o mesmo resultado vazio e pedem providências opostas:
+    o portal não publicar o CNPJ inteiro (nada a fazer na coleta de fichas), a
+    ficha voltar sem município (repetir a consulta resolve), ou os dois lados
+    existirem e não se cruzarem (o piso de consulta pegou outros CNPJs).
+    """
+    pg = df(staged, "pagamentos")
+    total_pago = float(pd.to_numeric(coluna(pg, "VALOR", 0),
+                                     errors="coerce").fillna(0).clip(lower=0).sum())
+    valor_pj = float(base["valor"].sum()) if not base.empty else 0.0
+    com_mun = int((perfil.get("municipio", pd.Series(dtype=str))
+                   .fillna("").astype(str).str.len() > 0).sum()) if not perfil.empty else 0
+    m = {"valor_total_pago": round(total_pago, 2),
+         "valor_pj_com_cnpj_legivel": round(valor_pj, 2),
+         "pct_do_pago_com_cnpj_legivel": (round(100 * valor_pj / total_pago, 2)
+                                          if total_pago else 0.0),
+         "fichas_com_municipio": com_mun}
+    if total_pago > 0 and valor_pj < 0.1 * total_pago:
+        return {
+            "metricas": m, "texto": (
+                f"o portal não publica o CNPJ completo do favorecido na maior "
+                f"parte dos pagamentos. Apenas {fmt_brl(valor_pj)} de "
+                f"{fmt_brl(total_pago)} pagos "
+                f"({m['pct_do_pago_com_cnpj_legivel']:.1f}%) têm um CNPJ de 14 "
+                "dígitos legível, e sem ele não existe chave para consultar a "
+                "Receita. **Repetir a coleta das fichas não resolveria** — o "
+                "elo que falta está do lado do portal, não do nosso."),
+            "como_verificar": (
+                "Pedir a relação de pagamentos com o CNPJ completo do "
+                "favorecido, ou ao menos com os oito primeiros dígitos (raiz), "
+                "que já bastam para identificar a empresa. Lei 12.527/2011, "
+                "art. 8º, §1º, III; Decreto 7.724/2012, art. 7º, §3º, VI — "
+                "pessoa jurídica que recebe recurso público não tem "
+                "expectativa de sigilo sobre o próprio CNPJ.")}
+    if com_mun == 0 and not perfil.empty:
+        return {
+            "metricas": m, "texto": (
+                f"as {len(perfil)} fichas consultadas voltaram sem o campo de "
+                "município. O CNPJ está publicado nos pagamentos; o que faltou "
+                "foi a resposta da API de CNPJ."),
+            "como_verificar": ("Repetir a coleta das fichas (BrasilAPI ou "
+                               "minhareceita) e conferir se `municipio` voltou "
+                               "preenchido.")}
+    return {
+        "metricas": m, "texto": (
+            "os dois lados existem, mas os CNPJs com ficha não são os que "
+            "aparecem nos pagamentos deste recorte — provavelmente o piso de "
+            "materialidade e o teto de consultas selecionaram outro conjunto."),
+        "como_verificar": ("Baixar `fornecedores_fichas.csv` e "
+                           "`pagamentos.csv` de `data/staged` e conferir a "
+                           "interseção de CNPJs entre os dois.")}
+
+
 def _coluna_centro_custo(pg: pd.DataFrame) -> pd.Series | None:
     """A coluna de centro de custo dos pagamentos, se o portal publicar uma.
 
@@ -527,7 +583,7 @@ def _objetos_contratados(staged) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------- achados
-def _achados_geografia(base: pd.DataFrame,
+def _achados_geografia(staged, base: pd.DataFrame,
                        perfil: pd.DataFrame) -> list[Finding]:
     """Concentração geográfica, sede fora de SP e cruzamento com a unidade."""
     achados: list[Finding] = []
@@ -535,22 +591,29 @@ def _achados_geografia(base: pd.DataFrame,
     com_ficha = base[base["municipio"].fillna("") != ""]
     valor_geo = float(com_ficha["valor"].sum())
     if valor_geo <= 0 or total_pj <= 0:
+        # "ou" não serve num relatório de fiscalização: entre duas causas
+        # possíveis, a ferramenta tem os dados para dizer qual é. Na rodada
+        # real o universo PJ inteiro somou R$ 18,5 milhões contra R$ 4,29
+        # bilhões pagos — não foi a ficha que veio vazia, foi o CNPJ que o
+        # portal não publica inteiro, e nesse caso nenhuma consulta à Receita
+        # resolveria. Recomendar "repetir a coleta das fichas" seria mandar o
+        # operador gastar horas no lugar errado.
+        causa = _porque_sem_geografia(staged, base, perfil)
         achados.append(Finding(
             id="fornecedores-geografia-indisponivel", frente=FRENTE,
             gravidade="info",
             titulo="Análise geográfica de fornecedores INDISPONÍVEL nesta rodada",
             descricao=(
-                "As fichas consultadas não trouxeram município e UF, ou nenhum "
-                "dos CNPJs com ficha aparece nos pagamentos do período. Sem "
-                "esses dois lados não há como dizer para onde o dinheiro foi no "
-                "território, e este relatório não estima o que não mediu. A "
-                "ausência aqui não é indício de nada — é falta de dado."),
+                "Sem sede declarada de um lado e pagamento do outro não há como "
+                "dizer para onde o dinheiro foi no território, e este relatório "
+                "não estima o que não mediu. A ausência aqui não é indício de "
+                "nada — é falta de dado.\n\n"
+                f"**Causa apurada:** {causa['texto']}"),
             metricas={"fornecedores_com_ficha": int(perfil.shape[0]),
                       "valor_pj_total": round(total_pj, 2),
-                      "valor_com_sede_na_ficha": round(valor_geo, 2)},
-            como_verificar="Repetir a coleta das fichas de CNPJ (BrasilAPI ou "
-                           "minhareceita) e conferir se o campo `municipio` "
-                           "voltou preenchido.",
+                      "valor_com_sede_na_ficha": round(valor_geo, 2),
+                      **causa["metricas"]},
+            como_verificar=causa["como_verificar"],
         ))
         return achados
 
@@ -1057,7 +1120,7 @@ def run(staged) -> list[Finding]:
     base = (pagamentos.merge(perfil, on="cnpj", how="left")
             if not pagamentos.empty else pd.DataFrame())
     if not base.empty:
-        achados.extend(_achados_geografia(base, perfil))
+        achados.extend(_achados_geografia(staged, base, perfil))
         achados.extend(_achado_porte(base, perfil))
     else:
         achados.append(Finding(

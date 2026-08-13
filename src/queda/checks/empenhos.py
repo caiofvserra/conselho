@@ -405,6 +405,54 @@ def _empenho_previo(staged) -> list[Finding]:
            "exercício, então o efeito de restos a pagar do ano anterior "
            "permanece embutido no número."))
 
+    # ------------------------------------- guarda: a chave existe e não casa
+    #
+    # Na rodada real: 455.262 pagamentos, TODOS declarando número de empenho,
+    # o dataset de empenhos também com número — e `casados_por_numero = 0`.
+    # Isso não é o órgão escondendo o vínculo. Zero casamentos com a chave
+    # presente dos dois lados só acontece se os dois campos não são a mesma
+    # coisa: numeração reiniciada por exercício, prefixo de unidade, ou a
+    # coluna do pagamento apontando para outro documento.
+    #
+    # Acusar aqui seria transformar um defeito do NOSSO cruzamento em achado
+    # de transparência contra o fiscalizado. Numa ferramenta de fiscalização,
+    # errar assim custa mais do que não achar nada — então este caso vira
+    # diagnóstico, com amostra das duas chaves para quem for conferir.
+    if tem_numero and via_numero == 0 and sem_numero_declarado < n_tot * 0.5:
+        amostra_pg = [c for c in k[k.ne("")].unique()[:8]]
+        amostra_emp = sorted(chaves_emp)[:8]
+        return [Finding(
+            id="empenhos-chave-nao-casa", frente=FRENTE, gravidade="media",
+            titulo=("O número de empenho é publicado nos dois datasets e não "
+                    "casa em nenhum dos {n} pagamentos conferidos".format(n=n_tot)),
+            descricao=(
+                "O art. 60 da Lei 4.320/1964 proíbe despesa sem prévio empenho, "
+                "e o teste seria direto: cada pagamento tem de encontrar sua "
+                "nota de empenho.\n\n"
+                f"Os dois datasets publicam número de empenho — apenas "
+                f"{sem_numero_declarado} dos {n_tot} pagamentos não o declaram "
+                "— e ainda assim **nenhum** casou. Zero casamentos com a chave "
+                "presente dos dois lados não é o órgão ocultando o vínculo: é "
+                "sinal de que os dois campos não designam a mesma coisa. As "
+                "causas prováveis são numeração reiniciada a cada exercício, "
+                "prefixo de unidade orçamentária, ou a coluna do pagamento "
+                "apontando para outro documento.\n\n"
+                "**Este achado é sobre a ferramenta, não sobre o conselho.** "
+                "Enquanto a chave não for entendida, o art. 60 não é testável "
+                "aqui, e nenhum número sobre 'pagamento sem empenho' deve ser "
+                "citado a partir desta rodada.\n\n"
+                f"Amostra da chave nos pagamentos: `{'`, `'.join(map(str, amostra_pg))}`.\n\n"
+                f"Amostra da chave nos empenhos: `{'`, `'.join(map(str, amostra_emp))}`."),
+            evidencia=pd.DataFrame({
+                "origem": ["pagamentos"] * len(amostra_pg) + ["empenhos"] * len(amostra_emp),
+                "chave": list(map(str, amostra_pg)) + list(map(str, amostra_emp))}),
+            como_verificar=("Pedir o dicionário de dados dos dois conjuntos: "
+                            "qual campo do pagamento referencia qual campo do "
+                            "empenho, e se a numeração é única ou reiniciada "
+                            "por exercício e por unidade."),
+            metricas={**metricas, "diagnostico": "chave presente, zero casamentos"},
+        )]
+
     # -------------------------------------------------- guarda de metodologia
     if taxa > TAXA_LIMITE_CRUZAMENTO_PCT:
         # Uma taxa desta ordem não são milhares de ilegalidades: é a chave que

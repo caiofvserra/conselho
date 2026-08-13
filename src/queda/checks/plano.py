@@ -647,9 +647,54 @@ def run(staged) -> list[Finding]:
             lambda cam: bool(cam) and cam[0] in raizes).astype(bool)]
     else:
         folhas = folhas_plano
+    # Restringir à CLASSE não bastou no plano real: a classe de despesa do
+    # Crea-SP sozinha tem 15.195 contas analíticas e a execução usa 150. O
+    # achado saía "99,0% das contas nunca receberam lançamento", que não mede
+    # execução nenhuma — mede o tamanho do plano de contas, e publicado como
+    # achado só ensina o leitor a desconfiar do relatório.
+    #
+    # O universo comparável é mais estreito: as FAMÍLIAS (nós de grupo) em que
+    # o órgão de fato executa. Dentro de uma família viva, conta parada diz
+    # alguma coisa; uma família inteira sem uso é desenho do plano, não
+    # execução.
+    familias_vivas = {_familia(c, nivel_grupo, caminhos)
+                      for c in exatas} - {None, ""}
+    if familias_vivas and not folhas.empty:
+        restrito = folhas[folhas["codigo"].map(
+            lambda c: _familia(c, nivel_grupo, caminhos) in familias_vivas
+        ).astype(bool)]
+        if not restrito.empty:
+            folhas = restrito
     com_mov = folhas[folhas["codigo"].isin(exatas)]
     sem_mov = folhas[~folhas["codigo"].isin(exatas)]
-    if not folhas.empty and not sem_mov.empty:
+    # Mesmo depois do estreitamento, se quase tudo continua sem movimento o que
+    # se está medindo é granularidade do plano. Publicar seria vender ruído
+    # como achado — e este relatório existe para ser citado.
+    if not folhas.empty and len(sem_mov) > 0.9 * len(folhas):
+        achados.append(Finding(
+            id="plano-contas-sem-lancamento-inconclusivo", frente=FRENTE,
+            gravidade="info",
+            titulo=("Contas do plano sem lançamento: medida inconclusiva neste "
+                    f"plano ({len(sem_mov)} de {len(folhas)})"),
+            descricao=(
+                "O plano de contas coletado é granular demais para que "
+                "'quantas contas nunca receberam lançamento' signifique alguma "
+                "coisa: mesmo restringindo o universo às famílias em que o "
+                "órgão executa, mais de 90% das contas analíticas seguem sem "
+                "movimento.\n\n"
+                "Isso mede o tamanho e o detalhamento do plano, não a execução. "
+                "Um plano de contas contém, por desenho, uma conta para cada "
+                "situação prevista — inclusive as que nunca ocorrem. "
+                "**Publicar esse percentual como achado seria ruído.**\n\n"
+                f"O que resta útil está nos outros achados desta frente: a "
+                f"despesa relida pelos nós do plano oficial e as famílias que a "
+                "nossa taxonomia não classifica."),
+            metricas={"contas_analiticas_no_universo": int(len(folhas)),
+                      "com_movimento": int(len(com_mov)),
+                      "sem_movimento": int(len(sem_mov)),
+                      "motivo": "granularidade do plano, não execução"},
+        ))
+    elif not folhas.empty and not sem_mov.empty:
         pct_sem = 100 * len(sem_mov) / len(folhas)
         lista = sem_mov[["codigo", "nome"]].copy()
         lista["grupo"] = sem_mov["codigo"].map(

@@ -46,9 +46,40 @@ def run_all(staged) -> list[Finding]:
                 metricas={"traceback": traceback.format_exc()[-2000:]},
             ))
     _rebaixar_vazios(achados)
+    _declarar_cobertura(achados)
     ordem = {"alta": 0, "media": 1, "baixa": 2, "info": 3}
     achados.sort(key=lambda f: ordem[f.gravidade])
     return achados
+
+
+# Um achado que enxerga uma fatia pequena do universo pode estar certíssimo —
+# e ainda assim a frase que ele publica não é verificável por quem lê, porque
+# o denominador não aparece. Estes dois cortes não escondem nada: escrevem no
+# próprio achado o que ele cobre, e só rebaixam a gravidade quando a base é
+# pequena a ponto de a conclusão depender mais da nossa classificação do que
+# do dado do órgão.
+COBERTURA_AVISO = 60.0     # abaixo disto, a cobertura entra no texto
+COBERTURA_REBAIXA = 25.0   # abaixo disto, deixa de ser achado de gravidade alta
+
+
+def _declarar_cobertura(achados: list[Finding]) -> None:
+    for f in achados:
+        pct = f.cobertura_pct
+        if pct is None or pct >= COBERTURA_AVISO:
+            continue
+        o_que = (f.cobertura or {}).get("o_que") or "a base deste achado"
+        aviso = (f"\n\n**Cobertura da base: {pct:.1f}%.** O número acima foi "
+                 f"medido sobre {o_que}, que é essa fração do universo "
+                 "comparável. Isso não invalida a medida, mas significa que "
+                 "ela depende de como essa fração foi delimitada — e a "
+                 "delimitação é da ferramenta, não do órgão. Confira a "
+                 "evidência antes de citar o número.")
+        if aviso not in f.descricao:
+            f.descricao += aviso
+        if pct < COBERTURA_REBAIXA and f.gravidade == "alta":
+            log.info("rebaixando %s de alta para media: cobertura %.1f%%",
+                     f.id, pct)
+            f.gravidade = "media"
 
 
 # "excederam a dotação em 0 de 13 exercícios" saiu com gravidade média na

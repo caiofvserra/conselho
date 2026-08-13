@@ -146,11 +146,45 @@ def run(staged) -> list[Finding]:
     achados: list[Finding] = _verbas_por_categoria(staged)
     ind = pagamentos_indenizacao(staged)
     if ind.empty:
+        # Contradição encontrada na rodada real: este achado dizia "nenhum
+        # pagamento de verba identificado" no mesmo relatório em que
+        # `diarias-politico-vs-quadro` publicava R$ 178,6 milhões. Os dois
+        # medem coisas diferentes e a mensagem não dizia isso.
+        #
+        # `pagamentos_indenizacao` devolve verba **de pessoa física
+        # identificável**; `_verbas_por_categoria` lê a categoria do
+        # beneficiário na CONTA, e por isso enxerga a verba mesmo quando o
+        # favorecido é um rótulo agregado. Quando a primeira volta vazia e a
+        # segunda não, o que aconteceu não é ausência de verba — é ausência de
+        # NOME, que é um achado de transparência e não uma falha de coleta.
+        todas = pagamentos_indenizacao(staged, apenas_pessoa_fisica=False)
+        tem_verba = bool(achados) or not todas.empty
         achados.append(Finding(
             id="diarias-sem-dados", frente=FRENTE, gravidade="info",
-            titulo="Nenhum pagamento de diária/verba identificado por conta contábil",
-            descricao="Nenhuma conta contábil dos pagamentos foi classificada como "
-                      "verba pessoal. Verifique a coleta ou o plano de contas.",
+            titulo=("Nenhuma verba pôde ser atribuída a uma pessoa física "
+                    "identificada" if tem_verba else
+                    "Nenhum pagamento de diária/verba identificado por conta "
+                    "contábil"),
+            descricao=(
+                "As análises por pessoa desta frente — teto por diária, volume "
+                "anual, acumulação no mesmo dia, ranking de beneficiários — "
+                "exigem saber **quem** recebeu, e nenhum pagamento de verba "
+                "traz favorecido pessoa física identificável nesta coleta.\n\n"
+                "Isso não significa que não houve verba: os achados desta "
+                "mesma frente que leem a categoria do beneficiário na conta "
+                "contábil continuam medindo o gasto. O que falta é o nome. "
+                "Enquanto ele faltar, o valor total é auditável e a conduta "
+                "individual não é."
+                if tem_verba else
+                "Nenhuma conta contábil dos pagamentos foi classificada como "
+                "verba pessoal. Verifique a coleta ou o plano de contas — este "
+                "caso é falha de dado, não achado sobre o órgão."),
+            base_legal=("Lei 12.527/2011, art. 8º, §1º, III; Decreto "
+                        "7.724/2012, art. 7º, §3º, VI." if tem_verba else ""),
+            como_verificar=("Pedir a relação nominal de beneficiários de "
+                            "diárias, jetons e auxílio-locomoção por exercício, "
+                            "com CPF parcialmente mascarado."
+                            if tem_verba else ""),
         ))
         return achados
 

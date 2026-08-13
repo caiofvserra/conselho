@@ -76,6 +76,33 @@ INTERESSES: list[tuple[str, str]] = [
 ]
 _INTERESSES = [(k, re.compile(rx, re.IGNORECASE)) for k, rx in INTERESSES]
 
+# Uma entidade cujo nome MENCIONA o Crea não é o Crea. "Associação dos
+# Procuradores do CREA-SP" é associação de pessoas que trabalham no conselho —
+# e é, na rodada real, a maior beneficiária isolada fora do sistema
+# (R$ 41,5 milhões). Sem esta ressalva, `\bcrea\b` a classificava como órgão do
+# sistema Confea/Crea e ela seria contada como transferência legal obrigatória:
+# o achado mais forte do relatório desapareceria dentro de uma linha sobre
+# cumprimento da lei.
+RX_NAO_E_ORGAO_DO_SISTEMA = re.compile(
+    r"\bassociac|\bsindicato|\binstituto\b|\bclube\b|\bsociedade\b|"
+    r"\bcooperativa\b|\bfundacao\b|\bfederacao\b|\bcaixa de previd",
+    re.IGNORECASE)
+
+# Transferência que o conselho é OBRIGADO a fazer, e portanto não é escolha
+# dele: cota-parte ao Confea (Lei 5.194/1966, arts. 34, "e", e 44) e repasse à
+# Mútua. Deliberadamente mais estreita que a categoria SISTEMA — o Crea de
+# outro estado, por exemplo, é do sistema mas não é repasse obrigatório.
+RX_TRANSFERENCIA_OBRIGATORIA = re.compile(
+    r"\bconfea\b|conselho federal de engenharia|\bmutua\b|"
+    r"caixa de assistencia dos profissionais", re.IGNORECASE)
+
+
+def transferencia_obrigatoria(nome: str) -> bool:
+    n = str(nome or "")
+    if RX_NAO_E_ORGAO_DO_SISTEMA.search(n):
+        return False
+    return bool(RX_TRANSFERENCIA_OBRIGATORIA.search(n))
+
 ROTULO = {
     "PATRONAL": "Patronal / empresarial",
     "PROFISSIONAL": "Profissional / trabalhador",
@@ -547,41 +574,79 @@ def run(staged) -> list[Finding]:
         return achados
 
     # ------------------------------------------------ 2. dinheiro por interesse
-    serie = A.serie_anual(d, "valor", by="interesse_rotulo")
-    total = float(d["valor"].sum())
+    #
+    # A cota-parte ao Confea e o repasse à Mútua são OBRIGAÇÃO LEGAL (Lei
+    # 5.194/1966, arts. 34, "e", e 44; Lei 6.496/1977, art. 3º). Somá-los ao
+    # repasse discricionário e dizer "o conselho repassou R$ 1,36 bilhão às
+    # entidades da sua base política" descreve errado o que aconteceu: na
+    # rodada real, R$ 890 milhões desse total — 65% — eram Confea e Mútua, que
+    # o conselho não escolhe repassar.
+    #
+    # Os dois ficam medidos e visíveis, em linha própria. O que muda é a
+    # atribuição: obrigação não é escolha, e um relatório de fiscalização que
+    # confunde as duas coisas perde a razão nas duas.
+    obrig = d["entidade_norm"].map(transferencia_obrigatoria)
+    sistema = d[obrig]
+    disc = d[~obrig]
+    val_sistema = float(sistema["valor"].sum())
+    total_geral = float(d["valor"].sum())
+    if disc.empty:
+        disc = d.iloc[0:0]
+    serie = A.serie_anual(disc, "valor", by="interesse_rotulo")
+    total = float(disc["valor"].sum())
     por_int = (d.groupby("interesse_rotulo")
                .agg(total=("valor", "sum"), entidades=("entidade_norm", "nunique"),
                     repasses=("valor", "size")).reset_index()
                .sort_values("total", ascending=False))
-    pat = float(d.loc[d["interesse"] == "PATRONAL", "valor"].sum())
-    prof = float(d.loc[d["interesse"] == "PROFISSIONAL", "valor"].sum())
+    por_int["obrigatorio"] = por_int["interesse_rotulo"].eq(ROTULO["SISTEMA"])
+    pat = float(disc.loc[disc["interesse"] == "PATRONAL", "valor"].sum())
+    prof = float(disc.loc[disc["interesse"] == "PROFISSIONAL", "valor"].sum())
     achados.append(Finding(
         id="repr-dinheiro-por-interesse", frente=FRENTE,
         gravidade="alta" if pat > prof and pat > 0 else "media",
-        titulo=(f"{fmt_brl(total)} repassados a entidades coletivas — "
-                f"{fmt_brl(pat)} a patronais e {fmt_brl(prof)} a entidades "
+        titulo=(f"{fmt_brl(total)} repassados a entidades de classe por decisão "
+                f"do conselho — {fmt_brl(pat)} a patronais e {fmt_brl(prof)} a "
                 "profissionais"
                 if pat > 0 else
-                f"{fmt_brl(total)} repassados a entidades coletivas; nenhuma "
-                "entidade patronal foi identificada pelo classificador"),
+                f"{fmt_brl(total)} repassados a entidades de classe por decisão "
+                "do conselho; nenhuma entidade patronal foi identificada pelo "
+                "classificador"),
         descricao=(
-            "Todo o dinheiro que saiu do conselho para sindicatos, "
-            "associações, federações, institutos e escolas, somando convênio e "
-            "pagamento direto, separado por qual interesse cada entidade "
-            "representa. Estas são as organizações que indicam conselheiros e "
-            "formam o colégio eleitoral: o repasse vai para a própria base "
-            "política do órgão. A classificação por interesse é heurística, "
-            "feita pelo nome — a lista completa está na evidência para ser "
-            "conferida entidade por entidade."),
+            "Dinheiro que saiu do conselho para sindicatos, associações, "
+            "federações, institutos e escolas, somando convênio e pagamento "
+            "direto, separado por qual interesse cada entidade representa. "
+            "Estas são as organizações que indicam conselheiros e formam o "
+            "colégio eleitoral: o repasse vai para a própria base política do "
+            "órgão.\n\n"
+            + (f"**Fora desta conta, e de propósito:** {fmt_brl(val_sistema)} "
+               "repassados ao Confea e à Mútua, que são **obrigação legal** e "
+               "não decisão do conselho (Lei 5.194/1966, arts. 34 e 44). Eles "
+               "aparecem na tabela abaixo marcados como obrigatórios, e "
+               f"representam {100 * val_sistema / total_geral:.0f}% de tudo o "
+               "que saiu para entidades — somá-los ao repasse discricionário "
+               "inflaria a medida e atribuiria ao conselho uma escolha que ele "
+               "não fez.\n\n"
+               if val_sistema > 0 else "")
+            + "A classificação por interesse é heurística, feita pelo nome — a "
+            "lista completa está na evidência para ser conferida entidade por "
+            "entidade."),
         evidencia=por_int,
         serie=serie, grafico="bar_stacked",
-        tabela_anual=A.ranking_anual(d, "entidade_norm", "valor", top=12),
+        tabela_anual=A.ranking_anual(disc, "entidade_norm", "valor", top=12),
         base_legal="Lei 14.133/2021, art. 9º, III; Decreto 6.170/2007 "
-                   "(convênios); CF, art. 37, caput (impessoalidade).",
+                   "(convênios); Lei 5.194/1966, arts. 34 e 44 (cota-parte "
+                   "obrigatória ao Confea); CF, art. 37, caput.",
         metricas={"total": round(total, 2), "patronal": round(pat, 2),
                   "profissional": round(prof, 2),
-                  "entidades": int(d["entidade_norm"].nunique())},
+                  "transferencia_obrigatoria_sistema": round(val_sistema, 2),
+                  "total_com_obrigatorias": round(total_geral, 2),
+                  "entidades": int(disc["entidade_norm"].nunique())},
     ))
+
+    # A concentração e o ranking passam a medir o repasse DISCRICIONÁRIO pela
+    # mesma razão: com o Confea dentro, "5 entidades concentram 69%" era uma
+    # frase sobre a lei, não sobre o conselho.
+    d = disc if not disc.empty else d
 
     # ---- ranking nominal, para apuração individual
     por_ent = (d.groupby(["entidade_norm", "interesse_rotulo"])

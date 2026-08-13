@@ -119,22 +119,65 @@ def run(staged) -> list[Finding]:
         razao = (meio / fim_s).dropna()
         if not razao.empty:
             piorou = len(razao) > 1 and razao.iloc[-1] > razao.iloc[0]
+            # Esta é a frase mais citável do relatório inteiro, e por isso a
+            # que precisa do denominador mais explícito. Na rodada real ela
+            # saiu como "R$ 14,9 com a máquina para cada R$ 1 na atividade-fim"
+            # — verdadeira dentro da classificação, mas construída sobre uma
+            # atividade-fim de 1,35% da despesa, identificada POR NÓS a partir
+            # do nome do centro de custo. Um denominador dessa ordem torna a
+            # razão extremamente sensível: reclassificar um único centro de
+            # custo grande muda o número inteiro.
+            #
+            # A razão continua publicada, porque a assimetria é real e é o
+            # ponto. O que muda é que ela passa a carregar o tamanho do próprio
+            # denominador — e deixa de ser achado de gravidade média quando o
+            # denominador é pequeno demais para sustentar a frase.
+            fim_ult = float(serie_macro["Finalística"].iloc[-1])
+            tot_ult = float(serie_macro.iloc[-1].sum())
+            pct_fim = 100 * fim_ult / tot_ult if tot_ult else 0.0
+            frágil = pct_fim < 5.0
             achados.append(Finding(
                 id="finalistica-razao-meio-fim", frente=FRENTE,
-                gravidade="media" if float(razao.mean()) > 4 else "info",
-                titulo=f"Para cada R$ 1 na atividade-fim, o conselho gasta "
-                       f"R$ {razao.iloc[-1]:.1f} com a máquina ({int(razao.index[-1])})",
+                gravidade=("info" if frágil else
+                           "media" if float(razao.mean()) > 4 else "info"),
+                titulo=(f"Para cada R$ 1 na atividade-fim, o conselho gasta "
+                        f"R$ {razao.iloc[-1]:.1f} com a máquina "
+                        f"({int(razao.index[-1])}) — atividade-fim identificada: "
+                        f"{pct_fim:.1f}% da despesa"),
+                cobertura={"base": fim_ult, "universo": tot_ult,
+                           "o_que": "a despesa que a ferramenta identificou "
+                                    "como atividade-fim no último exercício, "
+                                    "que é o denominador desta razão"},
                 descricao=(
                     "Razão entre despesa-meio (pessoal, verbas pessoais e custeio "
                     "administrativo) e despesa finalística (fiscalização, "
                     "atendimento, ações institucionais). Quanto maior, menor a "
                     "parcela da anuidade do profissional que retorna como serviço. "
-                    + ("A razão piorou ao longo do período." if piorou else "")),
+                    + ("A razão piorou ao longo do período. " if piorou else "")
+                    + f"\n\nO denominador desta razão é pequeno: a atividade-fim "
+                    f"identificada foi {pct_fim:.1f}% da despesa do exercício. "
+                    "Isso importa porque a razão é aritmeticamente sensível a "
+                    "ele — reclassificar um único centro de custo relevante "
+                    "muda o resultado por inteiro. A identificação é da "
+                    "ferramenta, pelo nome do centro de custo, não uma "
+                    "declaração do conselho."
+                    + ("\n\n**Publicado como informação, não como achado.** Com "
+                       "a atividade-fim abaixo de 5% da despesa, o número não "
+                       "tem estabilidade suficiente para ser citado isolado: "
+                       "use-o junto da tabela de centros de custo, que mostra "
+                       "onde o dinheiro efetivamente está."
+                       if frágil else "")),
                 evidencia=razao.to_frame("razao_meio_fim").round(2).reset_index(),
                 serie=razao.to_frame("R$ de meio por R$ de fim").round(2),
                 grafico="line", unidade="x",
+                como_verificar=("Pedir a classificação funcional da despesa que "
+                                "o próprio conselho usa no seu plano de ação e "
+                                "no relatório de gestão, e refazer a razão com "
+                                "ela — aí o denominador deixa de ser nosso."),
                 metricas={"razao_media": round(float(razao.mean()), 2),
-                          "razao_ultimo": round(float(razao.iloc[-1]), 2)},
+                          "razao_ultimo": round(float(razao.iloc[-1]), 2),
+                          "pct_atividade_fim": round(pct_fim, 2),
+                          "denominador_fragil": bool(frágil)},
             ))
 
     # ------------------------------------------------ 3. detalhe por categoria

@@ -37,10 +37,35 @@ class Finding:
     base_legal: str = ""                   # norma/acórdão que sustenta o achado
     como_verificar: str = ""               # próximo passo concreto de apuração
 
+    # --- cobertura da base -------------------------------------------------
+    # Que fatia do universo o número deste achado enxerga. Preencher SEMPRE que
+    # o achado publicar uma RAZÃO, um PERCENTUAL ou um "X para cada Y", porque
+    # nesses casos o denominador é metade da afirmação e ele costuma ser
+    # invisível para quem lê.
+    #
+    # Na rodada real, "para cada R$ 1 na atividade-fim o conselho gasta R$ 14,9
+    # com a máquina" foi publicado sem dizer que a atividade-fim identificada
+    # era 1,35% da despesa e que essa identificação é NOSSA, por nome de centro
+    # de custo — não do órgão. O número pode estar certo; a frase, do jeito que
+    # saiu, não era verificável. Numa ferramenta de fiscalização isso é pior do
+    # que não publicar.
+    #
+    # Formato: {"base": float, "universo": float, "o_que": str}
+    # `pct` é derivado. `o_que` descreve o que está sendo coberto, em uma linha.
+    cobertura: dict | None = None
+
     def __post_init__(self):
         assert self.gravidade in GRAVIDADES, self.gravidade
         assert self.grafico in TIPOS_GRAFICO, self.grafico
         self.id = re.sub(r"[^a-z0-9\-]", "-", self.id.lower())
+        if self.cobertura and "pct" not in self.cobertura:
+            uni = float(self.cobertura.get("universo") or 0)
+            base = float(self.cobertura.get("base") or 0)
+            self.cobertura["pct"] = round(100 * base / uni, 1) if uni else 0.0
+
+    @property
+    def cobertura_pct(self) -> float | None:
+        return None if not self.cobertura else float(self.cobertura.get("pct", 0))
 
     @property
     def n_linhas(self) -> int:
@@ -67,5 +92,6 @@ class Finding:
             "titulo": self.titulo, "descricao": self.descricao,
             "linhas_evidencia": self.n_linhas, "metricas": self.metricas,
             "base_legal": self.base_legal, "como_verificar": self.como_verificar,
+            "cobertura": self.cobertura,
             "serie": self.serie_json(),
         }

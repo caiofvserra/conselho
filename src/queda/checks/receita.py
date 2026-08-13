@@ -34,14 +34,29 @@ FRENTE = "Receita e cobertura"
 # anuidade" é acessório da anuidade, não produto de fiscalização.
 FONTES: list[tuple[str, str]] = [
     ("DIVIDA_ATIVA", r"divida ativa|execucao fiscal"),
-    ("MULTA_ANUIDADE", r"multa.*(anuidade|mora|atraso)|juros"),
-    ("ART", r"\bart\b|anotacao de responsabilidade"),
+    # `juros` solto capturava "juros de aplicações financeiras" antes de
+    # FINANCEIRA chegar a ser testada: na rodada real a receita financeira
+    # ficou com 4 contas e R$ 26 mi enquanto "multa e juros de anuidade" ficou
+    # com 25. Juros só é acessório de anuidade quando o nome diz isso.
+    ("MULTA_ANUIDADE",
+     r"multa.*(anuidade|mora|atraso)|juros.*(anuidade|mora|atraso)|"
+     r"(anuidade|mora|atraso).*juros"),
     ("MULTA_FISCALIZACAO",
      r"multa.*(infrac|fiscaliza|exercicio ilegal)|auto de infrac"),
+    # ANUIDADE vem ANTES de ART, e a razão é concreta: nome de conta contábil
+    # brasileiro cita artigo de lei o tempo todo ("Repasse Anuidade Técnicos
+    # Industriais - Lei 13.639/2018", que existe neste plano). Com ART na
+    # frente, `\bart\b` casava a citação e a receita de anuidade era
+    # contabilizada como ART — foi o que produziu, na rodada real, ART de
+    # R$ 1,55 bi contra anuidade de R$ 452 mi, proporção impossível num
+    # conselho profissional, onde a anuidade é a fonte principal por lei.
     ("ANUIDADE", r"anuidade"),
+    # E mesmo depois disso, `\bart\b` não pode casar "art. 5º" nem "Lei ...,
+    # art": a ART é o documento, não a citação.
+    ("ART", r"(?<!lei )\bart\b(?!\s*\.?\s*\d)|anotacao de responsabilidade"),
     ("SERVICOS", r"certidao|certidoes|carteira|registro|acervo|\bcat\b|"
                  r"servico(s)? prestado|emolumento|taxa de expediente"),
-    ("FINANCEIRA", r"financeir|aplicac|rendiment|juros de aplicac"),
+    ("FINANCEIRA", r"financeir|aplicac|rendiment|juros"),
     ("TRANSFERENCIA", r"\bconfea\b|cota[- ]parte|transferenc|convenio|subvenc"),
 ]
 _FONTES = [(k, re.compile(rx)) for k, rx in FONTES]
@@ -105,9 +120,30 @@ def run(staged) -> list[Finding]:
                  .sort_values("total", ascending=False))
     por_fonte["share_pct"] = (100 * por_fonte["total"] / total).round(2)
     pct = serie.div(serie.sum(axis=1).replace(0, pd.NA), axis=0) * 100
+
+    # Quanto da receita a classificação NÃO alcançou. Na rodada real foram
+    # R$ 1,74 bi em 432 contas caindo em "outras" — 40% do total. Uma
+    # composição com 40% em "outras" não sustenta frase nenhuma sobre a
+    # natureza do órgão, e o leitor precisa saber disso antes de citar, não
+    # depois. As maiores contas não classificadas saem nomeadas, para que a
+    # correção seja possível — é o mesmo tratamento que a frente do plano de
+    # contas dá ao buraco da taxonomia de despesa, e lá ele funcionou.
+    outras = d[d["fonte"] == "OUTRA"]
+    val_outras = float(outras["valor"].sum())
+    top_outras = pd.DataFrame()
+    if not outras.empty:
+        top_outras = (outras.groupby("conta")["valor"].sum()
+                      .sort_values(ascending=False).head(25).reset_index()
+                      .rename(columns={"conta": "conta não classificada",
+                                       "valor": "total"}))
     achados.append(Finding(
         id="receita-composicao", frente=FRENTE, gravidade="info",
-        titulo=f"De onde vieram os {fmt_brl(total)} arrecadados no período",
+        titulo=(f"De onde vieram os {fmt_brl(total)} arrecadados no período"
+                + (f" — {100 * val_outras / total:.0f}% ainda sem classificação"
+                   if total and val_outras / total > 0.15 else "")),
+        cobertura={"base": total - val_outras, "universo": total,
+                   "o_que": "as contas de receita que a ferramenta conseguiu "
+                            "atribuir a uma fonte conhecida"},
         descricao=(
             "A anuidade é compulsória e existe para custear a fiscalização do "
             "exercício profissional (Lei 12.514/2011). As demais fontes dizem "
@@ -115,13 +151,34 @@ def run(staged) -> list[Finding]:
             "registrada, multa mede autuação, dívida ativa mede inadimplência "
             "cobrada judicialmente. A composição mudando ao longo do tempo é "
             "mudança de natureza do órgão — e costuma acontecer sem decisão "
-            "explícita."),
+            "explícita.\n\n"
+            + (f"**{fmt_brl(val_outras)} em {int(outras['conta'].nunique())} "
+               "contas não foram atribuídos a nenhuma fonte conhecida.** A "
+               "classificação é por nome de conta e é nossa, não do órgão: "
+               "conta com nome que não bate com nenhum padrão cai aqui. As "
+               "maiores estão nomeadas na tabela ao lado para que a regra "
+               "possa ser corrigida — enquanto esse resíduo for grande, os "
+               "percentuais desta composição não devem ser citados como a "
+               "estrutura de receita do conselho.\n\n"
+               if val_outras > 0 else "")
+            + "Uma conferência externa fecha a questão em minutos: o balanço "
+            "orçamentário publicado pelo próprio conselho traz a receita por "
+            "categoria econômica, e os totais têm de bater."),
         evidencia=por_fonte,
         serie=serie, grafico="area_stacked",
-        tabela_anual=pct.round(1).reset_index(),
+        tabela_anual=(top_outras if not top_outras.empty
+                      else pct.round(1).reset_index()),
         base_legal="Lei 12.514/2011 (anuidades); Lei 6.994/1982 (ART); Lei "
                    "5.194/1966, arts. 24 e 34.",
+        como_verificar=("Comparar cada linha com o Balanço Orçamentário do "
+                        "exercício e com a Demonstração das Variações "
+                        "Patrimoniais publicados pelo conselho."),
         metricas={"total": round(total, 2),
+                  "nao_classificado": round(val_outras, 2),
+                  "pct_nao_classificado": (round(100 * val_outras / total, 1)
+                                           if total else 0.0),
+                  "contas_nao_classificadas": int(outras["conta"].nunique())
+                  if not outras.empty else 0,
                   "por_fonte": {r["rotulo"]: round(float(r["total"]), 2)
                                 for _, r in por_fonte.iterrows()}},
     ))
@@ -154,6 +211,17 @@ def run(staged) -> list[Finding]:
                 achados.append(Finding(
                     id="receita-cobertura-por-art", frente=FRENTE,
                     gravidade="alta" if caiu else "media",
+                    # Cobertura NÃO é o share da ART. ART ser 24% da receita
+                    # é um fato sobre o conselho; o que limita esta medida é
+                    # quanto da receita a ferramenta conseguiu classificar —
+                    # se metade das contas cai em "outras", parte da ART pode
+                    # estar lá dentro e o denominador estaria subestimado.
+                    cobertura={"base": float(d.loc[d["fonte"] != "OUTRA",
+                                                   "valor"].sum()),
+                               "universo": float(d["valor"].sum()),
+                               "o_que": "a receita atribuída a alguma fonte "
+                                        "conhecida — ART não classificada "
+                                        "subestimaria o denominador desta razão"},
                     titulo=(f"A receita de ART cresce {cagr_art:.1%} ao ano e o "
                             f"gasto com fiscalização, {cagr_fisc:.1%}"),
                     descricao=(
@@ -235,6 +303,12 @@ def run(staged) -> list[Finding]:
             id="receita-dependencia-anuidade", frente=FRENTE, gravidade="info",
             titulo=(f"{pct_anuid:.0f}% da receita vem da anuidade compulsória "
                     f"paga pelos profissionais"),
+            cobertura={"base": total - float(d.loc[d["fonte"] == "OUTRA",
+                                                   "valor"].sum()),
+                       "universo": total,
+                       "o_que": "as contas de receita atribuídas a uma fonte "
+                                "conhecida — o percentual acima muda se o "
+                                "resíduo for reclassificado"},
             descricao=(
                 "A anuidade é cobrada por lei de quem precisa do registro para "
                 "exercer a profissão — não é preço de serviço escolhido. Isso "

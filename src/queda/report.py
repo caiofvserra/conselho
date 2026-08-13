@@ -210,6 +210,12 @@ padding:2px 8px;border-radius:99px;margin-right:8px;color:#fff}
 .badge.baixa{background:var(--baixa)}.badge.info{background:var(--info)}
 .finding h3{font-size:16.5px;margin:7px 0}
 .finding p.desc{color:#c3ccd4;font-size:13.5px}
+.cobertura{font-size:11.5px;margin:6px 0 8px;padding:6px 9px;border-radius:5px;
+ border-left:3px solid var(--mut);background:rgba(127,127,127,.10)}
+.cobertura span{color:var(--mut);display:block;margin-top:2px}
+.cobertura.baixa{border-left-color:#c0392b}
+.cobertura.media{border-left-color:#d68910}
+.cobertura.ok{border-left-color:#1e8449}
 .meta{margin-top:10px;font-size:12.5px;color:var(--mut);border-top:1px solid var(--line);padding-top:8px}
 .meta b{color:#a9b4bf}
 details{margin-top:10px}summary{cursor:pointer;color:var(--acc);font-size:13px}
@@ -249,7 +255,11 @@ function card(f,idx){
  return `<div class="finding ${f.gravidade}">
  <span class="badge ${f.gravidade}">${f.gravidade}</span>
  <span style="color:var(--mut);font-size:11.5px">${esc(f.frente)}</span>
- <h3>${esc(f.titulo)}</h3><p class="desc">${esc(f.descricao)}</p>
+ <h3>${esc(f.titulo)}</h3>
+ ${f.cobertura?`<div class="cobertura ${f.cobertura.pct<25?'baixa':f.cobertura.pct<60?'media':'ok'}">
+   Cobertura da base: <b>${Number(f.cobertura.pct).toFixed(1)}%</b>
+   <span>${esc(f.cobertura.o_que||'')}</span></div>`:''}
+ <p class="desc">${esc(f.descricao)}</p>
  ${f.serie?`<div class="chartwrap"><canvas id="${cid}" height="95"></canvas></div>`:''}
  ${(f.base_legal||f.como_verificar)?`<div class="meta">
    ${f.base_legal?`<div><b>Base legal:</b> ${esc(f.base_legal)}</div>`:''}

@@ -689,6 +689,14 @@ def run(staged) -> list[Finding]:
     if not ranking.empty:
         atipicas = ranking[ranking["meses_efetivos"] < MESES_EFETIVOS_BAIXO]
         menor = float(ranking["meses_efetivos"].iloc[0])
+        mediana = float(ranking["meses_efetivos"].median())
+        # Quando a maioria das unidades cruza o corte, "atípico" é a palavra
+        # errada: na rodada real foram 161 de 207 (78%), com mediana de 3,5
+        # meses efetivos. Uma lista com 78% do universo não aponta exceção —
+        # aponta que a concentração é o padrão do órgão, o que é um achado
+        # melhor e verdadeiro, mas outro. Publicar como lista de desvios
+        # ensinaria o leitor a ignorar a lista.
+        sistemico = len(atipicas) > 0.5 * len(ranking)
         nota_neg = (f" {negativas} unidade(s) ficaram fora do índice por terem "
                     "algum mês com valor negativo (estorno lançado no mês): "
                     "participação negativa quebra o índice e um número "
@@ -696,9 +704,16 @@ def run(staged) -> list[Finding]:
                     if negativas else "")
         achados.append(Finding(
             id="sazonalidade-perfil-atipico", frente=FRENTE,
-            gravidade=("alta" if not atipicas.empty and menor < 3 else
+            gravidade=("media" if sistemico else
+                       "alta" if not atipicas.empty and menor < 3 else
                        "media" if not atipicas.empty else "info"),
-            titulo=(f"{len(atipicas)} centro(s) de custo concentram o ano em "
+            titulo=(f"A concentração é o padrão, não a exceção: "
+                    f"{len(atipicas)} de {len(ranking)} centros de custo "
+                    f"({100 * len(atipicas) / len(ranking):.0f}%) concentram o "
+                    f"ano em menos de {MESES_EFETIVOS_BAIXO:.0f} meses "
+                    f"efetivos — mediana de {mediana:.1f}"
+                    if sistemico else
+                    f"{len(atipicas)} centro(s) de custo concentram o ano em "
                     f"menos de {MESES_EFETIVOS_BAIXO:.0f} meses efetivos — o "
                     f"mais concentrado, em {menor:.1f}"
                     if not atipicas.empty else
@@ -706,6 +721,21 @@ def run(staged) -> list[Finding]:
                     f"distribuído concentra o ano em {menor:.1f} meses "
                     "efetivos"),
             descricao=(
+                (f"**Leia como padrão do órgão, não como lista de desvios.** "
+                 f"{100 * len(atipicas) / len(ranking):.0f}% das unidades ficam "
+                 f"abaixo do corte e a mediana é de {mediana:.1f} meses "
+                 "efetivos: nesse cenário, estar abaixo de 6 meses não "
+                 "distingue unidade nenhuma. O que a medida mostra é que a "
+                 "despesa deste conselho, vista por centro de custo, não se "
+                 "distribui ao longo do exercício — o que a Lei 4.320 espera "
+                 "que aconteça via cotas.\n\n"
+                 "Duas explicações concorrem e a tabela permite separá-las: "
+                 "unidade pequena com poucos lançamentos concentra por "
+                 "aritmética, não por decisão; unidade grande concentrada é "
+                 "decisão. Ordene por `total` antes de tirar conclusão de "
+                 "qualquer linha.\n\n"
+                 if sistemico else "")
+                +
                 "Ranking das unidades pela dispersão do gasto ao longo do ano. "
                 "A medida é o número EQUIVALENTE de meses — o inverso do índice "
                 "Herfindahl-Hirschman das doze participações mensais. Uma "
@@ -733,8 +763,9 @@ def run(staged) -> list[Finding]:
             metricas={"unidades_avaliadas": int(len(ranking)),
                       "unidades_atipicas": int(len(atipicas)),
                       "menor_meses_efetivos": round(menor, 2),
-                      "mediana_meses_efetivos":
-                          round(float(ranking["meses_efetivos"].median()), 2),
+                      "mediana_meses_efetivos": round(mediana, 2),
+                      "pct_atipicas": round(100 * len(atipicas) / len(ranking), 1),
+                      "padrao_sistemico": bool(sistemico),
                       "unidades_sem_indice": negativas},
             como_verificar="Para as unidades no topo, pedir o cronograma de "
                            "desembolso aprovado e as cotas trimestrais — a Lei "
