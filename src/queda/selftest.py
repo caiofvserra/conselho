@@ -569,6 +569,22 @@ def _staged() -> dict[str, pd.DataFrame]:
         ("Dívida Ativa - Anuidades", 8e6, 1.06),
         ("Receita de Certidões e Emolumentos", 2e6, 1.05),
         ("Rendimentos de Aplicações Financeiras", 6e6, 1.03),
+        # A anuidade não se chama "anuidade" no plano real do Crea-SP: é
+        # segmentada por nível de formação (PF) e por faixa de capital (PJ),
+        # cada uma dividida em exercício Atual e Anterior. Foi essa lacuna que
+        # jogou R$ 1,55 bi de anuidade em "outras receitas" e fez o relatório
+        # publicar "10% da receita vem da anuidade" quando o correto era 46%.
+        ("Nível Superior - Atual", 70e6, 1.05),
+        ("Nível Superior - Anterior", 5e6, 1.05),
+        ("Nível Médio - Atual", 3e6, 1.05),
+        ("Faixa 1 - Atual", 8e6, 1.05),
+        ("Faixa 7 - Atual", 6e6, 1.05),
+        # e as demais naturezas que também caíam em "outras"
+        ("Não Tributária (Multas Disc. Leis 5.194/66 e 6496/77) PJ", 2.5e6, 1.16),
+        ("Honorários Advocatícios", 3e6, 1.06),
+        ("Aluguéis de Imóveis Próprios", 1.5e6, 1.03),
+        ("Restituições de Despesas", 1.8e6, 1.03),
+        ("Receitas Não Identificadas", 0.3e6, 1.02),
     )
     receita = pd.DataFrame([
         {"_ano": a, "NOME": nome, "ANALITICA": True,
@@ -811,6 +827,7 @@ ESPERADOS = [
     "repr-mandatario-dominio",         # domínio do e-mail = fornecedor do órgão
     # receita: de onde vem o dinheiro e o que ele deveria comprar
     "receita-composicao",
+    "receita-anuidade-segmentada",     # anuidade que não se chama anuidade
     "receita-cobertura-por-art",       # ART cresce 12%/ano, fiscalização 1-2%
     "receita-multa-vs-anuidade",
     "receita-dependencia-anuidade",
@@ -913,13 +930,18 @@ def _confere_metricas(achados) -> list[str]:
     def soma(base, cresc):            # 13 exercícios, 2013..2025
         return sum(base * (cresc ** t) for t in range(13))
 
+    # anuidade nomeada (PF+PJ) + os cinco segmentos que não a nomeiam
+    _anuid_segmentada = (soma(70e6, 1.05) + soma(5e6, 1.05) + soma(3e6, 1.05)
+                         + soma(8e6, 1.05) + soma(6e6, 1.05))
     exige("receita-dependencia-anuidade", "anuidade",
-          soma(90e6, 1.05) + soma(30e6, 1.05))
+          soma(90e6, 1.05) + soma(30e6, 1.05) + _anuid_segmentada)
     exige("receita-dependencia-anuidade", "divida_ativa", soma(8e6, 1.06))
     exige("receita-composicao", "total",
           soma(90e6, 1.05) + soma(30e6, 1.05) + soma(30e6, 1.12)
           + soma(4e6, 1.16) + soma(3e6, 1.04) + soma(8e6, 1.06)
-          + soma(2e6, 1.05) + soma(6e6, 1.03))
+          + soma(2e6, 1.05) + soma(6e6, 1.03) + _anuid_segmentada
+          + soma(2.5e6, 1.16) + soma(3e6, 1.06) + soma(1.5e6, 1.03)
+          + soma(1.8e6, 1.03) + soma(0.3e6, 1.02))
     # ART cresce 12% ao ano; a fiscalização (4e6 a 1%/ano + 5e6 a 2%/ano) fica
     # muito atrás — a cobertura por real de ART tem de CAIR.
     exige("receita-cobertura-por-art", "cagr_art", 0.12, tol=0.02)
@@ -997,6 +1019,16 @@ def _confere_metricas(achados) -> list[str]:
           (20_000_000 + 8_000_000) * 13)
     exige("repr-dinheiro-por-interesse", "total", 49_590_000)
     exige("casos-entidade-da-casa", "total", 40_000_000)
+
+    # A anuidade segmentada: 5 contas de nível/faixa, 13 exercícios. Se um
+    # desses padrões deixar de casar, a anuidade despenca e o relatório volta a
+    # publicar um share impossível para um conselho profissional.
+    exige("receita-anuidade-segmentada", "contas", 5)
+    exige("receita-anuidade-segmentada", "valor_reclassificado",
+          soma(70e6, 1.05) + soma(5e6, 1.05) + soma(3e6, 1.05)
+          + soma(8e6, 1.05) + soma(6e6, 1.05))
+    # e a multa de fiscalização tem de reconhecer as leis citadas no nome
+    exige("receita-multa-vs-anuidade", "cagr_multa", 0.16, tol=0.02)
 
     # A razão meio/fim é a frase mais citável do relatório e a mais frágil: o
     # denominador é a atividade-fim que NÓS identificamos. Com ela abaixo de 5%

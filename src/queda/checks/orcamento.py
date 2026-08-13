@@ -366,8 +366,19 @@ def run(staged) -> list[Finding]:
                 achados.append(Finding(
                     id="orcamento-retorno-da-anuidade", frente=FRENTE,
                     gravidade="alta" if medio < 10 else "media",
-                    titulo=(f"Da receita arrecadada dos profissionais, "
-                            f"{medio:.1f}% em média voltou como fiscalização"),
+                    # "receita arrecadada dos profissionais" não é a receita
+                    # TOTAL: entram aqui aluguel de imóvel próprio, rendimento
+                    # de aplicação e recuperação de despesa, que ninguém pagou
+                    # como contribuição compulsória. O denominador é o que é —
+                    # receita total — e o título passa a dizer isso, em vez de
+                    # sugerir uma base mais estreita e mais favorável ao número.
+                    titulo=(f"Da receita total do conselho, {medio:.1f}% em "
+                            "média voltou como fiscalização"),
+                    cobertura={"base": float(comp2["fiscalizacao"].sum()),
+                               "universo": float(comp2["receita"].sum()),
+                               "o_que": "o gasto que a ferramenta identificou "
+                                        "como fiscalização, medido contra toda "
+                                        "a receita do exercício"},
                     descricao=(
                         "A anuidade é compulsória e existe para custear a "
                         "fiscalização do exercício profissional. Este é o "

@@ -41,8 +41,12 @@ FONTES: list[tuple[str, str]] = [
     ("MULTA_ANUIDADE",
      r"multa.*(anuidade|mora|atraso)|juros.*(anuidade|mora|atraso)|"
      r"(anuidade|mora|atraso).*juros"),
+    # As duas leis citadas SÃO as da fiscalização do exercício profissional, e
+    # o nome da conta as cita: "Não Tributária (Multas Disc. Leis 5.194/66 e
+    # 6496/77) PJ" — R$ 33,3 milhões que estavam caindo em "outras".
     ("MULTA_FISCALIZACAO",
-     r"multa.*(infrac|fiscaliza|exercicio ilegal)|auto de infrac"),
+     r"multa.*(infrac|fiscaliza|exercicio ilegal)|auto de infrac|"
+     r"multa.*5\.?194|multa.*6\.?496|nao tributaria.*multa"),
     # ANUIDADE vem ANTES de ART, e a razão é concreta: nome de conta contábil
     # brasileiro cita artigo de lei o tempo todo ("Repasse Anuidade Técnicos
     # Industriais - Lei 13.639/2018", que existe neste plano). Com ART na
@@ -50,14 +54,46 @@ FONTES: list[tuple[str, str]] = [
     # contabilizada como ART — foi o que produziu, na rodada real, ART de
     # R$ 1,55 bi contra anuidade de R$ 452 mi, proporção impossível num
     # conselho profissional, onde a anuidade é a fonte principal por lei.
-    ("ANUIDADE", r"anuidade"),
+    # A anuidade NÃO se chama "anuidade" no plano de contas do Crea-SP. Ela é
+    # segmentada por quem paga, e o nome da conta traz só o segmento:
+    #   pessoa física  -> "Nível Superior", "Nível Médio", "Nível Técnico",
+    #                     "Técnicos Industriais" (Lei 13.639/2018)
+    #   pessoa jurídica-> "Faixa 1" a "Faixa 7", por capital social
+    # e cada um se divide em "- Atual" (exercício corrente) e "- Anterior"
+    # (exercícios anteriores), que é a marca registrada da anuidade e de mais
+    # nada.
+    #
+    # Sem estes padrões, R$ 1,55 BILHÃO de anuidade caía em "outras receitas" e
+    # o relatório publicava "10% da receita vem da anuidade" — quando o número
+    # verdadeiro é 46%. Num conselho profissional, onde a anuidade é a fonte
+    # principal por lei, os 10% deveriam ter sido lidos como impossíveis desde
+    # a primeira rodada.
+    ("ANUIDADE",
+     r"anuidade|n[ií]vel superior|n[ií]vel m[ée]dio|n[ií]vel t[ée]cnico|"
+     r"\bfaixa \d\b|tecnicos industriais"),
     # E mesmo depois disso, `\bart\b` não pode casar "art. 5º" nem "Lei ...,
     # art": a ART é o documento, não a citação.
     ("ART", r"(?<!lei )\bart\b(?!\s*\.?\s*\d)|anotacao de responsabilidade"),
     ("SERVICOS", r"certidao|certidoes|carteira|registro|acervo|\bcat\b|"
-                 r"servico(s)? prestado|emolumento|taxa de expediente"),
+                 r"servico(s)? prestado|emolumento|taxa de expediente|"
+                 r"inscric(ao|oes)|substituic(ao|oes)|2a\.? via|segunda via|"
+                 r"visto\b|vistoria"),
     ("FINANCEIRA", r"financeir|aplicac|rendiment|juros"),
+    # Aluguel e edifício são receita patrimonial: o conselho arrendando imóvel
+    # próprio. Não é serviço prestado ao profissional nem produto de
+    # fiscalização, e misturá-la com "serviços" descreveria mal o órgão.
+    ("PATRIMONIAL", r"alugue|\bedificio|\bimovel|\bimoveis|locacao de|arrendament"),
+    # Recuperação e restituição não são receita nova: são despesa que voltou.
+    # Somá-las como arrecadação infla o denominador de todo indicador de
+    # retorno da anuidade.
+    ("RECUPERACAO", r"restituic|recuperacao de despesa|reembolso|ressarcim|"
+                    r"devolucao"),
+    # Honorário de sucumbência nasce da execução fiscal da anuidade em atraso:
+    # é acessório da cobrança, e fica ao lado dela.
+    ("DIVIDA_ATIVA_ACESSORIO", r"honorario.*advocatic|sucumbenc"),
     ("TRANSFERENCIA", r"\bconfea\b|cota[- ]parte|transferenc|convenio|subvenc"),
+    # O próprio órgão declara não saber de onde veio. É achado, não resíduo.
+    ("NAO_IDENTIFICADA_PELO_ORGAO", r"nao identificad|a identificar|diversas"),
 ]
 _FONTES = [(k, re.compile(rx)) for k, rx in FONTES]
 
@@ -70,8 +106,19 @@ ROTULO = {
     "SERVICOS": "Serviços e certidões",
     "FINANCEIRA": "Receita financeira",
     "TRANSFERENCIA": "Transferências recebidas",
+    "PATRIMONIAL": "Receita patrimonial (aluguel de imóvel próprio)",
+    "RECUPERACAO": "Recuperação e restituição de despesa",
+    "DIVIDA_ATIVA_ACESSORIO": "Honorários da cobrança judicial",
+    "NAO_IDENTIFICADA_PELO_ORGAO": "Não identificada pelo próprio conselho",
     "OUTRA": "Outras receitas",
 }
+
+# Segmentos de anuidade que não carregam a palavra "anuidade" no nome. A lista
+# é publicada num achado próprio: reclassificar R$ 1,5 bilhão a partir de uma
+# leitura nossa do plano de contas exige que a leitura fique exposta.
+RX_ANUIDADE_SEGMENTADA = re.compile(
+    r"n[ií]vel superior|n[ií]vel m[ée]dio|n[ií]vel t[ée]cnico|"
+    r"\bfaixa \d\b|tecnicos industriais")
 
 
 def fonte(nome: str) -> str:
@@ -182,6 +229,53 @@ def run(staged) -> list[Finding]:
                   "por_fonte": {r["rotulo"]: round(float(r["total"]), 2)
                                 for _, r in por_fonte.iterrows()}},
     ))
+
+    # ------------------------------ 1b. a reclassificação, exposta
+    from .. import taxonomia as _T
+    seg = d[d["conta"].map(
+        lambda c: bool(RX_ANUIDADE_SEGMENTADA.search(_T.normalizar(c))))]
+    if not seg.empty:
+        val_seg = float(seg["valor"].sum())
+        tabela = (seg.groupby("conta")["valor"].sum()
+                  .sort_values(ascending=False).reset_index()
+                  .rename(columns={"conta": "conta do plano", "valor": "total"}))
+        achados.append(Finding(
+            id="receita-anuidade-segmentada", frente=FRENTE, gravidade="info",
+            titulo=(f"{fmt_brl(val_seg)} de anuidade estão em contas que não "
+                    f"têm a palavra 'anuidade' no nome ({len(tabela)} contas)"),
+            descricao=(
+                "No plano de contas do conselho a anuidade não se chama "
+                "anuidade: ela é segmentada por **quem paga**, e o nome da "
+                "conta traz só o segmento. Pessoa física aparece como *Nível "
+                "Superior*, *Nível Médio* e *Técnicos Industriais*; pessoa "
+                "jurídica, como *Faixa 1* a *Faixa 7*, escalonadas por capital "
+                "social. Cada um se divide em **Atual** (exercício corrente) e "
+                "**Anterior** (exercícios anteriores) — estrutura que nenhuma "
+                "outra receita tem.\n\n"
+                "**Esta reclassificação é uma leitura da ferramenta, e é por "
+                "isso que ela está publicada linha a linha.** Sem ela, a "
+                f"composição da receita atribuía à anuidade apenas as contas "
+                "que a nomeiam, e o relatório afirmava que 10% da receita vinha "
+                "da anuidade compulsória. Num conselho profissional, onde a "
+                "anuidade é a fonte principal por força de lei (Lei "
+                "12.514/2011), 10% era um número que deveria ter sido lido "
+                "como impossível.\n\n"
+                "Confira antes de citar: o Balanço Orçamentário e o Balancete "
+                "publicados pelo próprio conselho trazem a receita de anuidade "
+                "consolidada, e o total tem de bater com a soma abaixo."),
+            evidencia=tabela,
+            base_legal=("Lei 12.514/2011, arts. 4º a 6º (anuidade por nível de "
+                        "formação e por capital social da pessoa jurídica); "
+                        "Lei 5.194/1966, art. 34, 'e'; Lei 13.639/2018 "
+                        "(técnicos industriais)."),
+            como_verificar=("Somar estas contas no Balancete do exercício e "
+                            "comparar com a linha de anuidades do Balanço "
+                            "Orçamentário publicado pelo conselho."),
+            metricas={"valor_reclassificado": round(val_seg, 2),
+                      "contas": int(len(tabela)),
+                      "pct_da_receita": (round(100 * val_seg / total, 1)
+                                         if total else 0.0)},
+        ))
 
     # ------------------------------------------------ 2. ART como denominador
     #
