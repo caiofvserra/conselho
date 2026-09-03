@@ -196,6 +196,18 @@ nav button{background:none;border:1px solid var(--line);color:var(--txt);padding
 border-radius:8px;cursor:pointer;font-size:13.5px}
 nav button:hover{border-color:var(--acc)}
 nav button.on{background:var(--acc);border-color:var(--acc);color:#06130c;font-weight:600}
+/* São 18 abas. Com flex-wrap em tela estreita elas viram ~15 linhas e o menu
+   come a tela inteira antes do primeiro achado. Abaixo de 900px o menu vira
+   UMA fita rolável na horizontal: a aba ativa continua visível (scroll-snap +
+   scrollIntoView no clique) e o conteúdo começa logo abaixo. */
+@media(max-width:900px){
+ nav{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:10px 16px;
+  scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;
+  scrollbar-width:thin}
+ nav button{flex:0 0 auto;scroll-snap-align:start;white-space:nowrap}
+ header{padding:16px}
+ main{padding:16px 16px 60px}
+}
 main{padding:24px 32px 60px;max-width:1240px;margin:auto}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px}
 .card{background:var(--panel);border-radius:12px;padding:15px}
@@ -244,7 +256,10 @@ const GRAV=['alta','media','baixa','info'], PAL=['#38b26f','#f5a524','#4d9de0','
 const nav=document.getElementById('tabs'), main=document.getElementById('main');
 let charts=[];
 ['Visão geral',...P.frentes].forEach((t,i)=>{const b=document.createElement('button');
- b.textContent=t;b.onclick=()=>show(t,b);nav.appendChild(b);if(!i)setTimeout(()=>show(t,b));});
+ b.textContent=t;
+ // Na fita rolável do mobile a aba clicada pode estar meio fora da vista.
+ b.onclick=()=>{show(t,b);b.scrollIntoView({block:'nearest',inline:'center'});};
+ nav.appendChild(b);if(!i)setTimeout(()=>show(t,b));});
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function brl(v){return typeof v==='number'?v.toLocaleString('pt-BR',{style:'currency',currency:'BRL',maximumFractionDigits:0}):esc(v)}
 function tbl(rows){if(!rows||!rows.length)return'';const c=Object.keys(rows[0]);

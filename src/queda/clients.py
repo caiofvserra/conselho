@@ -130,18 +130,38 @@ def _variantes_params(ano: int | None) -> list[dict]:
     return v
 
 
+# Formato que já funcionou para cada endpoint, guardado pela ASSINATURA (o
+# conjunto de chaves), não pelos valores — o ano muda a cada janela.
+_FORMATO_APRENDIDO: dict[str, frozenset] = {}
+
+
 def implanta_variantes(endpoint: str, ano: int | None = None) -> tuple[list, dict]:
     """Tenta os formatos de parâmetro até um devolver dado.
 
     Devolve (linhas_achatadas, params_vencedores). Um 400 por formato errado
     era indistinguível de "não há dado" — esta função separa os dois casos.
+
+    APRENDE O FORMATO. Chamada por janela numa série de vinte exercícios, a
+    sondagem cega custaria até 5 requisições por ano só para redescobrir o
+    mesmo formato — caro num portal que responde 403 por rajada. O formato que
+    venceu vai para `_FORMATO_APRENDIDO` e passa a ser tentado PRIMEIRO nas
+    janelas seguintes; os demais continuam como reserva, porque um endpoint
+    pode aceitar formatos diferentes em exercícios diferentes.
     """
-    for params in _variantes_params(ano):
+    ordem = _variantes_params(ano)
+    assinatura = _FORMATO_APRENDIDO.get(endpoint)
+    if assinatura is not None:
+        preferido = [p for p in ordem if frozenset(p) == assinatura]
+        ordem = preferido + [p for p in ordem if frozenset(p) != assinatura]
+
+    for params in ordem:
         bruto = implanta(endpoint, params or None)
         linhas = achatar_grupos(bruto)
         if linhas:
-            log.info("%s: %d linha(s) com params=%s", endpoint, len(linhas),
-                     params or "sem parâmetros")
+            if frozenset(params) != assinatura:
+                log.info("%s: %d linha(s) com params=%s", endpoint, len(linhas),
+                         params or "sem parâmetros")
+            _FORMATO_APRENDIDO[endpoint] = frozenset(params)
             return linhas, params
     log.info("%s: nenhum formato de parâmetro devolveu dado", endpoint)
     return [], {}

@@ -571,8 +571,13 @@ def stage_licitacoes(desde, ate):
     if manual is not None:
         _marcar_manual("licitacoes", len(manual))
         return _salvar("licitacoes", pd.DataFrame(manual))
-    rows = _anos_com_sondagem(lambda a: clients.implanta_ano("Licitacoes", a), ate,
-                              desde, etapa="licitacoes")
+    # Antes: `implanta_ano`, que tenta SÓ referenciaInicio/Termino — e o
+    # endpoint devolveu 400 para esse formato, o que a sondagem não sabia
+    # distinguir de "não há licitação neste ano". `implanta_variantes` percorre
+    # os formatos conhecidos e aprende o que funciona (ver clients.py).
+    rows = _anos_com_sondagem(
+        lambda a: clients.implanta_variantes("Licitacoes", a)[0], ate,
+        desde, etapa="licitacoes")
     return _salvar("licitacoes", pd.DataFrame(rows))
 
 
@@ -727,8 +732,9 @@ def stage_atas(desde, ate):
     if manual is not None:
         _marcar_manual("atas", len(manual))
         return _salvar("atas", pd.DataFrame(manual))
+    # Mesmo motivo de `licitacoes`: `implanta_datas` fixa dataInicio/Termino.
     rows = _anos_com_sondagem(
-        lambda a: clients.implanta_datas("AtasColegiados", a), ate, desde,
+        lambda a: clients.implanta_variantes("AtasColegiados", a)[0], ate, desde,
         etapa="atas")
     return _salvar("atas", pd.DataFrame(rows))
 
