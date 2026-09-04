@@ -608,24 +608,99 @@ def run(staged) -> list[Finding]:
     if not pncp.empty:
         alvo = pncp[pncp.get("orgao_papel") == "alvo"]
         if not ctr.empty and not alvo.empty:
-            nomes_portal = set(ctr["CONTRATADA_NORM"].dropna())
-            nomes_pncp = set(alvo["fornecedor_norm"].dropna())
-            so_portal = sorted(nomes_portal - nomes_pncp)
-            so_pncp = sorted(nomes_pncp - nomes_portal)
-            ctr_pos21 = ctr[ctr["INI"].dt.year >= 2021] if "INI" in ctr else ctr
-            faltando = ctr_pos21[ctr_pos21["CONTRATADA_NORM"].isin(so_portal)]
+            # Casamento por CNPJ, não por nome. O mesmo fornecedor aparece no
+            # portal sob razões sociais diferentes — 09.477.765/0001-91 é
+            # "PERILLO ENGENHARIA LTDA." num contrato e "PERILLO ENGENHARIA E
+            # GEOLOGIA - EIRELI" noutro; 38.352.733/0001-68 é "FB UNI ONLINE" e
+            # "ENGINEME CURSOS E CONSULTORIA ONLINE". Comparando nome, cada
+            # variação vira um fornecedor "ausente do PNCP" que está lá.
+            doc_portal = coluna(ctr, "CONTRATADA_CNPJ", "").fillna("").astype(str)
+            doc_pncp = coluna(alvo, "fornecedor_ni", "").fillna("").astype(str)
+            por_cnpj = doc_portal.str.len().eq(14).any() and doc_pncp.str.len().eq(14).any()
+            if por_cnpj:
+                chave_portal, chave_pncp = doc_portal, doc_pncp
+                criterio = "CNPJ do fornecedor"
+            else:
+                chave_portal = ctr["CONTRATADA_NORM"].fillna("")
+                chave_pncp = alvo["fornecedor_norm"].fillna("")
+                criterio = ("nome normalizado do fornecedor — aproximado, "
+                            "porque um dos lados não publicou CNPJ")
+            no_pncp = set(chave_pncp[chave_pncp.ne("")])
+            ausente = chave_portal.ne("") & ~chave_portal.isin(no_pncp)
+
+            # Lei 14.133, art. 193, II: a Lei 8.666 conviveu com ela até
+            # 30/12/2023, e contrato firmado sob a lei antiga NÃO tinha de ir ao
+            # PNCP. Cortar em 2021 (quando o PNCP entrou no ar) transformava em
+            # "falha de transparência" contrato que a lei da época não mandava
+            # publicar lá — e é justamente onde está o dinheiro grande desta
+            # carteira. O corte é a data da OBRIGAÇÃO; o período de convivência
+            # vira contexto declarado, nunca acusação.
+            obrigatorio = pd.Timestamp("2023-12-30")
+            ini = ctr["INI"] if "INI" in ctr else pd.Series(pd.NaT, index=ctr.index)
+            faltando = ctr[ausente & ini.ge(obrigatorio)]
+            convivencia = ctr[ausente & ini.lt(obrigatorio) & ini.ge(pd.Timestamp("2021-08-01"))]
+            cols_ev = ["NUMERO_CONTRATO", "CONTRATADA", "VALOR",
+                       "DATA_INICIO_VIGENCIA"]
             if not faltando.empty:
+                valor = float(pd.to_numeric(faltando["VALOR"], errors="coerce")
+                              .fillna(0).sum())
                 achados.append(Finding(
                     id="contratos-ausentes-pncp", frente=FRENTE, gravidade="media",
-                    titulo=f"{faltando['CONTRATADA_NORM'].nunique()} contratada(s) do "
-                           "portal (pós-2021) sem contrato correspondente no PNCP",
-                    descricao="A Lei 14.133 obriga a publicação no PNCP; ausência é "
-                              "falha de transparência (comparação por nome do "
-                              "fornecedor — aproximada).",
-                    evidencia=faltando[["NUMERO_CONTRATO", "CONTRATADA", "VALOR",
-                                        "DATA_INICIO_VIGENCIA"]].sort_values(
+                    titulo=(f"{len(faltando)} contrato(s) firmados sob a Lei 14.133 "
+                            f"({fmt_brl(valor)}) não têm correspondente no PNCP"),
+                    descricao=(
+                        "A Lei 14.133/2021 obriga a divulgação no Portal Nacional "
+                        "de Contratações Públicas, e a obrigação vale para o que "
+                        "foi firmado a partir de **30/12/2023**, quando terminou a "
+                        "convivência com a Lei 8.666 (art. 193, II).\n\n"
+                        f"O cruzamento é por **{criterio}**, entre o que o portal "
+                        "próprio do conselho publica e o que o PNCP devolve para o "
+                        "CNPJ do órgão. Ausência aqui é falha de publicação — não "
+                        "diz nada sobre a legalidade da contratação em si.\n\n"
+                        "**O que este número não prova:** que o contrato não "
+                        "exista no PNCP sob outro órgão ou outra unidade "
+                        "compradora. A consulta cobre o CNPJ do conselho."),
+                    evidencia=faltando[cols_ev].sort_values(
                         "VALOR", ascending=False).head(100),
+                    base_legal="Lei 14.133/2021, arts. 54 e 94; art. 193, II "
+                               "(fim da convivência com a Lei 8.666 em 30/12/2023).",
+                    como_verificar=("Consultar cada contrato em pncp.gov.br pelo "
+                                    "CNPJ do conselho e pelo número do contrato; "
+                                    "se não constar, pedir o comprovante de "
+                                    "divulgação."),
+                    metricas={"contratos": int(len(faltando)),
+                              "valor": round(valor, 2),
+                              "criterio_de_casamento": criterio,
+                              "corte_da_obrigacao": "2023-12-30"},
                 ))
+            if not convivencia.empty:
+                valor = float(pd.to_numeric(convivencia["VALOR"], errors="coerce")
+                              .fillna(0).sum())
+                achados.append(Finding(
+                    id="contratos-fora-do-pncp-convivencia", frente=FRENTE,
+                    gravidade="info",
+                    titulo=(f"{len(convivencia)} contrato(s) de 2021 a 2023 "
+                            f"({fmt_brl(valor)}) não estão no PNCP — e não "
+                            "precisavam estar"),
+                    descricao=(
+                        "Contexto, **não achado**. Estes contratos começaram entre "
+                        "a entrada do PNCP no ar (ago/2021) e o fim da convivência "
+                        "com a Lei 8.666 (30/12/2023). Quem contratou sob a lei "
+                        "antiga não tinha obrigação de publicá-los no PNCP, e a "
+                        "ausência deles ali não é irregularidade.\n\n"
+                        "A lista existe por um motivo só: é aqui que está a maior "
+                        "parte do dinheiro da carteira, e quem cruzar as duas "
+                        "bases sem olhar a data vai concluir 'falha de "
+                        "transparência' sobre contrato que a lei da época mandava "
+                        "publicar exatamente onde ele está — no portal próprio."),
+                    evidencia=convivencia[cols_ev].sort_values(
+                        "VALOR", ascending=False).head(100),
+                    base_legal="Lei 14.133/2021, art. 193, II.",
+                    metricas={"contratos": int(len(convivencia)),
+                              "valor": round(valor, 2)},
+                ))
+            no_portal = set(chave_portal[chave_portal.ne("")])
+            so_pncp = sorted(set(chave_pncp[chave_pncp.ne("")]) - no_portal)
             if so_pncp:
                 achados.append(Finding(
                     id="contratos-so-no-pncp", frente=FRENTE, gravidade="baixa",
@@ -633,7 +708,7 @@ def run(staged) -> list[Finding]:
                            "no portal da transparência",
                     descricao="Situação inversa: contrato publicado nacionalmente mas "
                               "invisível no portal próprio do conselho.",
-                    evidencia=alvo[alvo["fornecedor_norm"].isin(so_pncp)][
+                    evidencia=alvo[chave_pncp.isin(so_pncp)][
                         ["numeroContrato", "fornecedor_nome", "objeto", "valorGlobal",
                          "vigenciaInicio", "vigenciaFim"]].head(100),
                 ))

@@ -849,6 +849,7 @@ ESPERADOS = [
     # O achado ter de aparecer AQUI é o teste: sem ele, uma rodada que abortou
     # na terceira etapa publicaria "Coleta completa: 3 de 3 datasets".
     "diagnostico-etapas-nao-alcancadas",
+    "contratos-fora-do-pncp-convivencia",  # 2021-2023: contexto, não acusação
     "empenhos-vinculo-empenho-ausente",  # art. 60: a chave não é publicada — um
                                          # achado de metodologia, não 7.059 acusações
     "contratos-aditivos-limite",
@@ -983,6 +984,32 @@ def _confere_metricas(achados) -> list[str]:
                      "(chave indisponível não casa zero: não é tentada)")
     erros.extend(_regressao_chave_empenho())
     erros.extend(_regressao_retomada())
+    # PNCP × portal: o casamento é por CNPJ e o corte é a data da OBRIGAÇÃO.
+    # Antes o cruzamento era por NOME e cortava em 2021: o mesmo fornecedor com
+    # duas razões sociais virava "ausente do PNCP" estando lá, e contrato
+    # firmado sob a Lei 8.666 — que não tinha de ir ao PNCP — entrava como
+    # falha de transparência. Na carteira real é onde está o dinheiro grande:
+    # R$ 70,8 mi de uma ATA de 2022 encabeçavam a lista de acusações.
+    f = por_id.get("contratos-ausentes-pncp")
+    if f is not None:
+        if f.metricas.get("criterio_de_casamento") != "CNPJ do fornecedor":
+            erros.append("contratos-ausentes-pncp: casou por "
+                         f"{f.metricas.get('criterio_de_casamento')!r} — com CNPJ "
+                         "nos dois lados, casar por nome cria ausência falsa")
+        if f.metricas.get("corte_da_obrigacao") != "2023-12-30":
+            erros.append("contratos-ausentes-pncp: o corte saiu "
+                         f"{f.metricas.get('corte_da_obrigacao')!r}, esperado "
+                         "'2023-12-30' (Lei 14.133, art. 193, II)")
+    if "contratos-fora-do-pncp-convivencia" not in por_id:
+        erros.append("o período de convivência com a Lei 8.666 deixou de sair "
+                     "como contexto — sem ele, a ausência no PNCP de contrato "
+                     "que a lei da época não mandava publicar lá volta a ser "
+                     "publicada como falha")
+    elif por_id["contratos-fora-do-pncp-convivencia"].gravidade != "info":
+        erros.append("contratos-fora-do-pncp-convivencia saiu como "
+                     f"{por_id['contratos-fora-do-pncp-convivencia'].gravidade} "
+                     "— é contexto declarado, não achado")
+
     exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 17)
     exige("diagnostico-etapas-nao-alcancadas", "etapas_nao_alcancadas", 1)
     f = por_id.get("diagnostico-etapas-nao-alcancadas")
