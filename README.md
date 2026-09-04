@@ -99,6 +99,12 @@ pronta e o buraco não fechava em rodada nenhuma. Hoje ela é refeita, e refazer
 exercícios faltam em cada etapa e quais são — é o mesmo laço da coleta rodando
 em seco, para que o inventário não possa divergir do que a coleta faria.
 
+Para forçar recoleta de um período, `python main.py limpar --etapa licitacoes,atas`
+apaga os marcadores de janela vazia dessas etapas (`--tudo` apaga também os
+checkpoints com dado). Rodar **sem** `--retomar` não serve para isso: `--retomar`
+só governa o pulo de etapa, e a leitura do checkpoint por janela é
+incondicional — só `QUEDA_CHECKPOINT=0` a desliga.
+
 Um efeito de contar janelas: passadas 12h, o exercício em curso volta a contar
 como pendente (é o TTL do checkpoint do ano aberto, que muda todo dia) e as
 etapas anuais são refeitas — uma requisição cada, com as demais janelas saindo

@@ -120,8 +120,19 @@ def achatar_grupos(rows) -> list[dict]:
 
 # Formatos de parâmetro aceitos pelo portal — variam por endpoint e não estão
 # documentados. Tentados em ordem até um devolver dado.
-def _variantes_params(ano: int | None) -> list[dict]:
-    v: list[dict] = [{}]
+def _variantes_params(ano: int | None, *, sem_filtro: bool = True) -> list[dict]:
+    """`sem_filtro=False` retira a variante `{}`, que pede a tabela INTEIRA.
+
+    Ela é indispensável na consulta de tiro único (uma foto do quadro de
+    pessoal não tem exercício a filtrar) e é veneno dentro de um laço por
+    exercício: se o endpoint responder tudo sem filtro, cada janela recebe o
+    MESMO payload e o carimba com um ano diferente. Medido com stub: uma tabela
+    de 2 linhas virou 28 linhas na série 2013-2026, todas rotuladas com o mesmo
+    exercício, porque `_anos_com_sondagem` faz `r["_ano"] = ano` sobre os
+    próprios dicionários devolvidos. Nenhum check por ano sobrevive a isso, e
+    nada no relatório denunciaria a duplicação.
+    """
+    v: list[dict] = [{}] if sem_filtro else []
     if ano:
         v += [{"exercicio": ano},
               {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
@@ -135,8 +146,8 @@ def _variantes_params(ano: int | None) -> list[dict]:
 _FORMATO_APRENDIDO: dict[str, frozenset] = {}
 
 
-def implanta_variantes(endpoint: str,
-                       ano: int | None = None) -> tuple[list | None, dict]:
+def implanta_variantes(endpoint: str, ano: int | None = None, *,
+                       sem_filtro: bool = True) -> tuple[list | None, dict]:
     """Tenta os formatos de parâmetro até um devolver dado.
 
     Devolve (linhas, params_vencedores), e as linhas seguem a MESMA convenção
@@ -144,6 +155,9 @@ def implanta_variantes(endpoint: str,
     quando nenhum formato obteve resposta utilizável (400, 403 de sondagem,
     payload nulo). Um 400 por formato errado era indistinguível de "não há
     dado" — esta função separa os dois casos.
+
+    `sem_filtro=False` proíbe a variante que pede a tabela inteira — é o que os
+    laços por exercício passam, e o porquê está em `_variantes_params`.
 
     O `None` não é detalhe de tipo. `_anos_com_sondagem` grava um checkpoint
     `.vazio` para toda janela que devolve lista, e checkpoint `.vazio` de
@@ -160,7 +174,11 @@ def implanta_variantes(endpoint: str,
     janelas seguintes; os demais continuam como reserva, porque um endpoint
     pode aceitar formatos diferentes em exercícios diferentes.
     """
-    ordem = _variantes_params(ano)
+    ordem = _variantes_params(ano, sem_filtro=sem_filtro)
+    if not ordem:
+        log.warning("%s: sem exercício e sem variante filtrada — nada a tentar",
+                    endpoint)
+        return None, {}
     assinatura = _FORMATO_APRENDIDO.get(endpoint)
     if assinatura is not None:
         preferido = [p for p in ordem if frozenset(p) == assinatura]

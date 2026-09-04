@@ -35,11 +35,29 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from queda import config  # noqa: E402
 
 
+def _tem_dado(staged: dict) -> bool:
+    """Há dataset com linha, ignorando os metadados da própria coleta.
+
+    `load_staged` devolve também `_coleta_diagnostico` e `_coleta_http`, que o
+    `finally` de `build_staged` grava ANTES de a exceção subir. Testar o dicionário
+    por verdade — `if not staged` — dava sempre verdadeiro e a guarda "nada a
+    analisar" era inalcançável: com data/staged contendo só o ledger, os checks
+    rodavam e o relatório saía afirmando ausência de achado sobre ausência de dado.
+    """
+    return any(len(v) for k, v in staged.items() if not str(k).startswith("_"))
+
+
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("cmd", choices=["fetch", "analyze", "report", "all",
-                                   "faltando", "selftest", "llm"])
+                                   "faltando", "limpar", "selftest", "llm"])
+    p.add_argument("--etapa", default="",
+                   help="limpar: etapas separadas por vírgula "
+                        "(ex.: licitacoes,atas)")
+    p.add_argument("--tudo", action="store_true",
+                   help="limpar: apagar também os checkpoints COM dado, não só "
+                        "os marcadores de janela vazia")
     p.add_argument("--desde", default="auto",
                    help="ano inicial, ou 'auto' para sondar retroativamente (padrão)")
     p.add_argument("--ate", type=int, default=config.ANO_ATUAL)
@@ -86,6 +104,35 @@ def main():
     from queda.http import RateLimited
     desde = None if args.desde == "auto" else int(args.desde)
 
+    if args.cmd == "limpar":
+        # A instrução anterior era "rode sem --retomar para forçar recoleta", e
+        # ela é FALSA: `retomar` só governa o pulo de etapa; a leitura do
+        # checkpoint por janela é incondicional (só `QUEDA_CHECKPOINT=0` a
+        # desliga). Quem quisesse refazer um período tinha de apagar arquivo à
+        # mão dentro do Drive.
+        etapas = [e.strip() for e in args.etapa.split(",") if e.strip()]
+        if not etapas:
+            print("Diga quais etapas: `--etapa licitacoes,atas`. Os nomes são "
+                  "os de `python main.py faltando`.", file=sys.stderr)
+            return 1
+        raiz = config.RAW_DIR / pipeline.CHECKPOINT_SUBDIR
+        total = 0
+        for etapa in etapas:
+            pasta = raiz / etapa
+            if not pasta.is_dir():
+                print(f"{etapa}: sem checkpoint em {pasta}")
+                continue
+            padrao = "*" if args.tudo else "*.vazio"
+            alvos = [f for f in pasta.rglob(padrao) if f.is_file()]
+            for f in alvos:
+                f.unlink()
+            total += len(alvos)
+            print(f"{etapa}: {len(alvos)} checkpoint(s) apagado(s) "
+                  f"({'todos' if args.tudo else 'só os de janela vazia'})")
+        print(f"\n{total} arquivo(s) removido(s). A próxima rodada vai à rede "
+              "por essas janelas.")
+        return 0
+
     if args.cmd == "faltando":
         inv = pipeline.inventario(desde, args.ate)
         # max_colwidth=None: a coluna `exercicios_faltando` É a resposta do
@@ -127,13 +174,13 @@ def main():
                   "o relatório sai com o diagnóstico da coleta dizendo o que "
                   "faltou.", file=sys.stderr)
             staged = pipeline.load_staged()
-            if not staged:
+            if not _tem_dado(staged):
                 print("Nada em data/staged: a coleta abortou antes de gravar a "
                       "primeira etapa. Nada a analisar.", file=sys.stderr)
                 return 2
     else:
         staged = pipeline.load_staged()
-        if not staged:
+        if not _tem_dado(staged):
             print("Nada em data/staged — rode `python main.py fetch` antes.", file=sys.stderr)
             return 1
 

@@ -634,7 +634,7 @@ def stage_licitacoes(desde, ate):
     # distinguir de "não há licitação neste ano". `implanta_variantes` percorre
     # os formatos conhecidos e aprende o que funciona (ver clients.py).
     rows = _anos_com_sondagem(
-        lambda a: clients.implanta_variantes("Licitacoes", a)[0], ate,
+        lambda a: clients.implanta_variantes("Licitacoes", a, sem_filtro=False)[0], ate,
         desde, etapa="licitacoes")
     return _salvar("licitacoes", pd.DataFrame(rows))
 
@@ -792,7 +792,7 @@ def stage_atas(desde, ate):
         return _salvar("atas", pd.DataFrame(manual))
     # Mesmo motivo de `licitacoes`: `implanta_datas` fixa dataInicio/Termino.
     rows = _anos_com_sondagem(
-        lambda a: clients.implanta_variantes("AtasColegiados", a)[0], ate, desde,
+        lambda a: clients.implanta_variantes("AtasColegiados", a, sem_filtro=False)[0], ate, desde,
         etapa="atas")
     return _salvar("atas", pd.DataFrame(rows))
 
@@ -1135,18 +1135,26 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
                 estado = _janela_estado(chave, str(ano), ano)
                 com_dado += estado == "linhas"
                 vazias += estado == "vazio"
+        # A ingestão manual curto-circuita a etapa ANTES de qualquer checkpoint
+        # (`stage_licitacoes` e `stage_atas` chamam `manual_rows` na primeira
+        # linha). Sem consultar isso, o inventário anunciava 14 exercícios a
+        # buscar para uma etapa que não faz uma requisição sequer.
+        manual = manual_rows(nome) is not None
         linhas.append({
             "etapa": nome,
             "linhas_staged": 0 if staged is None else int(len(staged)),
             "janelas_com_dado": com_dado,
             "janelas_vazias": vazias,
-            "janelas_faltando": len(pend),
-            "exercicios_faltando": ", ".join(str(a) for a in pend),
-            "vai_a_rede": bool(pend),
+            "janelas_faltando": 0 if manual else len(pend),
+            "exercicios_faltando": (f"arquivo manual em data/{MANUAL_SUBDIR}/"
+                                    if manual else
+                                    ", ".join(str(a) for a in pend)),
+            "vai_a_rede": bool(pend) and not manual,
         })
     for nome in ("processos_itens", "indenizacoes_endpoint", "plano_contas",
                  "quadro_pessoal", "mandatarios", "pncp_contratos"):
         staged = _ja_coletado(nome)
+        manual = manual_rows(nome) is not None
         linhas.append({
             "etapa": nome,
             "linhas_staged": 0 if staged is None else int(len(staged)),
@@ -1154,8 +1162,10 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
             # Sem janela anual própria: o critério é o antigo — vazio se
             # recoleta, cheio se pula. Declarado, para o inventário não dar a
             # entender que conferiu exercício por exercício aqui.
-            "exercicios_faltando": "sem janela anual (ver ETAPAS_JANELA_ANUAL)",
-            "vai_a_rede": staged is None,
+            "exercicios_faltando": (f"arquivo manual em data/{MANUAL_SUBDIR}/"
+                                    if manual else
+                                    "sem janela anual (ver ETAPAS_JANELA_ANUAL)"),
+            "vai_a_rede": staged is None and not manual,
         })
     return pd.DataFrame(linhas)
 
@@ -1193,6 +1203,12 @@ def build_staged(desde: int | None, ate: int, *,
         ("indenizacoes_endpoint", lambda: stage_indenizacoes(desde, ate)),
         ("pncp_contratos", lambda: stage_pncp(desde, ate)),
     ]
+
+    # Lista de MÓDULO: duas coletas no mesmo processo (o Colab reaproveita o
+    # kernel) empilhavam duas linhas por dataset em `_coleta_diagnostico.csv`, e
+    # o check de cobertura passava a contar cada fonte duas vezes.
+    _DIAGNOSTICO.clear()
+    _JANELAS.clear()
 
     staged: dict[str, pd.DataFrame] = {}
     try:
@@ -1233,7 +1249,23 @@ def build_staged(desde: int | None, ate: int, *,
                 # todo o resto já tinha vindo.
                 log.warning("etapa %s falhou (%s: %s) — seguindo com as demais",
                             nome, type(e).__name__, e)
-                staged[nome] = _salvar(nome, pd.DataFrame())
+                # `_salvar` com DataFrame vazio grava `_vazio` POR CIMA do CSV
+                # existente: um KeyError passageiro na normalização apagava
+                # 40 mil linhas boas da rodada anterior. O dado que já está em
+                # disco é preservado, e a falha vai para o diagnóstico — que é
+                # onde ela tem de aparecer, não no lugar do dado.
+                anterior = _ja_coletado(nome)
+                if anterior is not None:
+                    log.warning("etapa %s: mantendo as %d linhas da rodada "
+                                "anterior em disco", nome, len(anterior))
+                    staged[nome] = anterior
+                    _DIAGNOSTICO.append({
+                        "dataset": nome, "linhas": int(len(anterior)),
+                        "colunas": int(anterior.shape[1]), "ano_min": None,
+                        "ano_max": None, "anos_cobertos": 0,
+                        "anos_faltando": "", "preservado_de_rodada_anterior": True})
+                else:
+                    staged[nome] = _salvar(nome, pd.DataFrame())
                 _DIAGNOSTICO[-1]["erro"] = f"{type(e).__name__}: {e}"[:300]
     finally:
         # Grava o inventário mesmo se a coleta abortar no meio: sem isso, uma
@@ -1247,9 +1279,32 @@ def build_staged(desde: int | None, ate: int, *,
         salvar_diagnostico()
         salvar_ledger_http()
 
+    # Datasets que uma etapa grava mas NÃO devolve — `stage_orcamento` salva
+    # `balanco_orcamentario` e devolve `comparativo_receita`; `stage_pncp` salva
+    # `pncp_orgaos`. Eles existiam em disco e não no dicionário, então
+    # `main.py analyze` encontrava dois achados de orçamento que
+    # `main.py all` perdia, sobre exatamente o mesmo dado. Reler o que sobrou em
+    # disco fecha o buraco sem exigir que cada stage_* declare seus datasets.
+    for nome, df_disco in load_staged().items():
+        if nome not in staged and not nome.startswith("_"):
+            log.info("staged/%s.csv existe em disco e não foi devolvido por "
+                     "etapa nenhuma (%d linhas) — entrando na análise",
+                     nome, len(df_disco))
+            staged[nome] = df_disco
+
     staged["_coleta_diagnostico"] = salvar_diagnostico()
     staged["_coleta_http"] = salvar_ledger_http()
     return staged
+
+
+# Colunas cujo conteúdo é uma STRING DE DÍGITOS, não um número. Relidas com
+# inferência de tipo, `01234567000189` vira `1234567000189` e o zero à esquerda
+# some — e `checks/common.py` filtra CNPJ por `str.len() == 14`, então o
+# fornecedor simplesmente desaparece da análise, sem erro nenhum. É a mesma
+# classe de defeito que `_checkpoint_ler` já evita com `dtype=str`.
+COLUNAS_TEXTO_STAGED = ("CPF_CNPJ", "FAVORECIDO_CNPJ", "CONTRATADA_CNPJ",
+                        "CNPJ", "CPF", "NUMERO_EMPENHO", "NUMERO_PAGAMENTO",
+                        "NUMERO", "NUMERO_CONTRATO", "NUMERO_LICITACAO")
 
 
 def load_staged() -> dict[str, pd.DataFrame]:
@@ -1257,7 +1312,13 @@ def load_staged() -> dict[str, pd.DataFrame]:
     out = {}
     for path in sorted(config.STAGED_DIR.glob("*.csv")):
         try:
-            df = pd.read_csv(path, low_memory=False)
+            # `dtype` só nas colunas de dígitos: aplicar `dtype=str` no arquivo
+            # inteiro transformaria VALOR em texto e derrubaria toda soma.
+            cabecalho = pd.read_csv(path, nrows=0).columns
+            forcar = {c: str for c in COLUNAS_TEXTO_STAGED if c in cabecalho}
+            df = pd.read_csv(path, low_memory=False, dtype=forcar,
+                             keep_default_na=False if forcar else True,
+                             na_values=[""] if forcar else None)
         except (pd.errors.EmptyDataError, ValueError):
             out[path.stem] = pd.DataFrame()
             continue

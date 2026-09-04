@@ -978,6 +978,7 @@ def _confere_metricas(achados) -> list[str]:
                      "(chave indisponível não casa zero: não é tentada)")
     erros.extend(_regressao_chave_empenho())
     erros.extend(_regressao_retomada())
+    erros.extend(_regressao_dado_nao_some())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1098,19 +1099,31 @@ def _regressao_retomada() -> list[str]:
     curso expira em 12h, e um teste que dependesse disso passaria ou falharia
     conforme a hora do dia.
     """
+    import os
     import tempfile
     from pathlib import Path
     from . import clients, pipeline
 
     erros: list[str] = []
-    raw_orig, staged_orig = config.RAW_DIR, config.STAGED_DIR
+    guardado = (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+                config.CACHE_DIR, os.environ.get("QUEDA_CHECKPOINT"))
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-        config.RAW_DIR = base / "raw"
-        config.STAGED_DIR = base / "staged"
-        config.STAGED_DIR.mkdir(parents=True)
-        cp = config.RAW_DIR / "checkpoints"
         try:
+            # `QUEDA_CHECKPOINT=0` no ambiente desliga a leitura de checkpoint
+            # (pipeline._checkpoint_ligado) e derruba as seis asserções de uma
+            # vez — medido. Um teste que passa ou falha conforme a variável de
+            # quem o chamou não testa nada.
+            os.environ["QUEDA_CHECKPOINT"] = "1"
+            # DATA_DIR junto: `manual_rows` lê `config.DATA_DIR/'manual'` no
+            # começo de stage_licitacoes, e um arquivo manual na árvore de quem
+            # roda faria a etapa nem chegar ao checkpoint.
+            config.DATA_DIR = base
+            config.CACHE_DIR = base / "cache"
+            config.RAW_DIR = base / "raw"
+            config.STAGED_DIR = base / "staged"
+            config.STAGED_DIR.mkdir(parents=True)
+            cp = config.RAW_DIR / "checkpoints"
             # empenhos: 2021-2023 em checkpoint, 2020 faltando; staged CHEIO
             (cp / "empenhos").mkdir(parents=True)
             for ano in (2021, 2022, 2023):
@@ -1188,7 +1201,12 @@ def _regressao_retomada() -> list[str]:
                     f"deveriam dar 4 linhas, deram {len(df)} — o dado do "
                     "checkpoint não está sendo reaproveitado")
         finally:
-            config.RAW_DIR, config.STAGED_DIR = raw_orig, staged_orig
+            (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+             config.CACHE_DIR, checkpoint_antes) = guardado
+            if checkpoint_antes is None:
+                os.environ.pop("QUEDA_CHECKPOINT", None)
+            else:
+                os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
 
     # `[]` só quando o SERVIDOR respondeu; `None` quando nenhum formato passou
     orig = clients.implanta
@@ -1210,6 +1228,121 @@ def _regressao_retomada() -> list[str]:
     finally:
         clients.implanta = orig
 
+    return erros
+
+
+def _regressao_dado_nao_some() -> list[str]:
+    """Quatro maneiras de o dado sumir entre o disco e a análise, todas medidas.
+
+    Nenhuma delas dá erro: o relatório sai bonito, com menos dado do que existe.
+    É a pior forma de falhar numa ferramenta de fiscalização, porque o silêncio
+    se parece com regularidade.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+    from . import clients, pipeline
+
+    erros: list[str] = []
+    guardado = (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+                config.CACHE_DIR, os.environ.get("QUEDA_CHECKPOINT"))
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        try:
+            os.environ["QUEDA_CHECKPOINT"] = "1"
+            config.DATA_DIR = base
+            config.CACHE_DIR = base / "cache"
+            config.RAW_DIR = base / "raw"
+            config.STAGED_DIR = base / "staged"
+            config.STAGED_DIR.mkdir(parents=True)
+
+            # 1. A variante SEM FILTRO dentro de um laço por exercício. Se o
+            #    endpoint responde a tabela inteira, cada janela recebe o mesmo
+            #    payload com um `_ano` diferente: medido, 2 linhas viraram 28.
+            tabela = [{"NUMERO": 1}, {"NUMERO": 2}]
+            de_verdade = clients.implanta
+            try:
+                clients.implanta = (lambda ep, params=None:
+                                    list(tabela) if not params else [])
+                clients._FORMATO_APRENDIDO.clear()
+                df = pipeline.stage_licitacoes(2013, 2026)
+            finally:
+                clients.implanta = de_verdade
+            if len(df) > len(tabela):
+                erros.append(
+                    "regressão do dado: a resposta SEM FILTRO entrou no laço "
+                    f"por exercício e virou {len(df)} linhas a partir de "
+                    f"{len(tabela)} — cada janela carimbou a mesma tabela com "
+                    "um ano diferente")
+
+            # 2. CNPJ é string de dígitos, não número. Relido com inferência,
+            #    perde o zero à esquerda e some do filtro `str.len() == 14`.
+            (config.STAGED_DIR / "pagamentos.csv").write_text(
+                "FAVORECIDO_CNPJ,VALOR\n01234567000189,10.5\n")
+            recarregado = pipeline.load_staged()["pagamentos"]
+            if recarregado["FAVORECIDO_CNPJ"].iloc[0] != "01234567000189":
+                erros.append(
+                    "regressão do dado: load_staged destruiu o zero à esquerda "
+                    f"do CNPJ ({recarregado['FAVORECIDO_CNPJ'].iloc[0]!r}) — o "
+                    "fornecedor desaparece da análise sem erro nenhum")
+            if not isinstance(recarregado["VALOR"].iloc[0], float):
+                erros.append(
+                    "regressão do dado: load_staged transformou VALOR em texto "
+                    "ao proteger as colunas de dígitos — toda soma cai")
+
+            # 3. Etapa que levanta não pode apagar o CSV bom da rodada anterior.
+            (config.STAGED_DIR / "empenhos.csv").write_text(
+                "_ano,NUMERO\n2020,1\n2021,2\n")
+            quebrado = pipeline.stage_empenhos
+            outras: dict = {}
+            empenhos_preservados = -1
+            try:
+                pipeline.stage_empenhos = lambda d, a: (_ for _ in ()).throw(
+                    KeyError("coluna sumiu"))
+                for etapa in ("pagamentos", "contratos", "aditivos",
+                              "licitacoes", "convenios", "comparativo_despesa",
+                              "despesas_centro_custo", "demonstrativo",
+                              "plano_contas", "processos_compras", "atas",
+                              "orcamento", "quadro_pessoal", "mandatarios",
+                              "indenizacoes", "pncp"):
+                    outras[etapa] = getattr(pipeline, f"stage_{etapa}")
+                    setattr(pipeline, f"stage_{etapa}",
+                            lambda *a, **k: pd.DataFrame())
+                staged = pipeline.build_staged(2020, 2021, retomar=False)
+                empenhos_preservados = len(staged.get("empenhos", []))
+
+                # 4. Dataset gravado por um stage_* mas NÃO devolvido por ele
+                #    (`balanco_orcamentario`, `pncp_orgaos`) precisa chegar à
+                #    análise: `analyze` o encontrava e `all` o perdia, sobre o
+                #    mesmo dado em disco. Roda com os stubs AINDA no lugar —
+                #    restaurá-los antes daqui manda `stage_pncp` à rede de
+                #    verdade, e `build_staged` engole a exceção por etapa, então
+                #    o teste não falha: só demora minutos e sai pela internet.
+                (config.STAGED_DIR / "balanco_orcamentario.csv").write_text(
+                    "_ano,DOTACOES\n2021,100\n")
+                staged = pipeline.build_staged(2020, 2021, retomar=True)
+            finally:
+                pipeline.stage_empenhos = quebrado
+                for etapa, fn in outras.items():
+                    setattr(pipeline, f"stage_{etapa}", fn)
+            if empenhos_preservados != 2:
+                erros.append(
+                    "regressão do dado: uma etapa que levantou apagou o CSV da "
+                    "rodada anterior com `_vazio` — 40 mil linhas boas se "
+                    f"perdem por um KeyError passageiro (sobraram "
+                    f"{empenhos_preservados})")
+            if "balanco_orcamentario" not in staged:
+                erros.append(
+                    "regressão do dado: `balanco_orcamentario` está em disco e "
+                    "não chegou ao dicionário da análise — `main.py all` perde "
+                    "os achados de orçamento que `main.py analyze` encontra")
+        finally:
+            (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+             config.CACHE_DIR, checkpoint_antes) = guardado
+            if checkpoint_antes is None:
+                os.environ.pop("QUEDA_CHECKPOINT", None)
+            else:
+                os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
     return erros
 
 
@@ -1288,12 +1421,23 @@ def _regressao_chave_empenho() -> list[str]:
 
 def run() -> int:
     common._FICHAS = dict(_FICHAS_FIXTURE)   # evita rede no selftest
-    staged = _staged()
-    achados = run_all(staged)
-    ids = {f.id for f in achados}
-    faltando = [e for e in ESPERADOS if e not in ids]
-    metricas_erradas = _confere_metricas(achados)
-    report.gerar(achados, staged)
+    # A saída do selftest é FIXTURE e vai para uma subpasta própria. Escrevendo
+    # em `config.OUTPUT_DIR` direto, ele sobrescrevia o report.html da rodada
+    # real, apagava `output/csv/` inteiro (report.gerar faz rmtree) e acrescentava
+    # uma "rodada" falsa ao histórico — que o relatório seguinte usaria como
+    # base do "o que mudou desde a rodada anterior". No Colab, com OUTPUT_DIR
+    # apontando para o Drive, isso destrói o resultado do operador.
+    saida_real = config.OUTPUT_DIR
+    config.OUTPUT_DIR = saida_real / "_selftest"
+    try:
+        staged = _staged()
+        achados = run_all(staged)
+        ids = {f.id for f in achados}
+        faltando = [e for e in ESPERADOS if e not in ids]
+        metricas_erradas = _confere_metricas(achados)
+        report.gerar(achados, staged)
+    finally:
+        saida_selftest, config.OUTPUT_DIR = config.OUTPUT_DIR, saida_real
 
     print(f"selftest: {len(achados)} achados gerados")
     for f in achados:
@@ -1306,7 +1450,7 @@ def run() -> int:
         for e in metricas_erradas:
             print(f"  {e}")
         return 1
-    html = (config.OUTPUT_DIR / "report.html")
+    html = (saida_selftest / "report.html")
     assert html.exists() and html.stat().st_size > 100_000, "report.html não gerado"
     print(f"\nOK — todos os {len(ESPERADOS)} cenários esperados foram detectados; "
           f"report em {html}")
