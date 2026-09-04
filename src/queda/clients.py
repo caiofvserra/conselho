@@ -61,10 +61,21 @@ def implanta_probe_diarias(ano: int) -> dict[str, list]:
     for ep in DIARIAS_PROBE:
         if ep in _PROBE_MORTOS:
             continue
+        # `rate_limit_retries=0`: aqui um 403 é RESPOSTA, não bloqueio a esperar.
+        # Estes caminhos existem no swagger sem endpoint publicado — sondar é
+        # perguntar "este caminho serve?", e o WAF respondendo 403 já respondeu.
+        #
+        # Com retry, a segunda recusa virava RateLimited, que sobe até
+        # build_staged e ABORTA A COLETA INTEIRA. Medido nas rodadas de 04/09:
+        # os dois lados morreram no mesmo ponto, `DiariasDeslocamentos`, depois
+        # de ~90 requisições bem-sucedidas — e as duas últimas etapas
+        # (`indenizacoes_endpoint`, `pncp_contratos`) nunca chegaram a ser
+        # executadas em rodada nenhuma. Uma sondagem opcional não pode matar a
+        # coleta obrigatória que vem depois dela.
         data = get_json(
             f"{config.IMPLANTA_BASE}/{ep}",
             {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
-            rate_limit_retries=1)
+            rate_limit_retries=0)
         if data:
             found[ep] = data
         elif data is None:

@@ -992,6 +992,7 @@ def _confere_metricas(achados) -> list[str]:
                      "— se outra etapa sumiu da fixture, é regressão dela")
     erros.extend(_regressao_dado_nao_some())
     erros.extend(_regressao_recusa_do_portal())
+    erros.extend(_regressao_coleta_converge())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1302,8 +1303,8 @@ def _regressao_recusa_do_portal() -> list[str]:
                     f"janelas {rede} que o portal já recusou — cada rodada "
                     "queima ritmo em pergunta que não vai ser aceita")
 
-            _, _, marcador = pipeline._checkpoint_arquivos("empenhos", "2026")
-            _, vazio, _ = pipeline._checkpoint_arquivos("empenhos", "2026")
+            _csv, _jsn, vazio, marcador = pipeline._checkpoint_arquivos(
+                "empenhos", "2026")
             if not marcador.exists():
                 erros.append("regressão da recusa: o marcador `.recusado` não "
                              "foi gravado")
@@ -1333,6 +1334,128 @@ def _regressao_recusa_do_portal() -> list[str]:
         finally:
             (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
              config.CACHE_DIR, checkpoint_antes, clients.implanta_ano) = guardado
+            if checkpoint_antes is None:
+                os.environ.pop("QUEDA_CHECKPOINT", None)
+            else:
+                os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
+    return erros
+
+
+def _regressao_coleta_converge() -> list[str]:
+    """A rodada seguinte gasta MENOS que a anterior — três defeitos que impediam.
+
+    Todos medidos nas duas rodadas reais de 04/09/2026, sobre o Drive do
+    operador, que gastaram ~90 requisições cada uma e morreram no mesmo ponto.
+    """
+    import os
+    import tempfile
+    import time
+    from pathlib import Path
+    from . import clients, pipeline
+
+    erros: list[str] = []
+    # `clients.get_json`, e NÃO `http.get_json`: clients faz
+    # `from .http import get_json` no import, então são dois nomes distintos e
+    # trocar o do módulo http não afeta quem já importou.
+    guardado = (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+                config.CACHE_DIR, os.environ.get("QUEDA_CHECKPOINT"),
+                clients.implanta_ano, clients.get_json)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        try:
+            os.environ["QUEDA_CHECKPOINT"] = "1"
+            config.DATA_DIR = base
+            config.CACHE_DIR = base / "cache"
+            config.RAW_DIR = base / "raw"
+            config.STAGED_DIR = base / "staged"
+            config.STAGED_DIR.mkdir(parents=True)
+
+            # 1. Payload ANINHADO tinha de virar checkpoint. `contratos` traz
+            #    ITENS dentro da linha; `_plano_para_csv` recusava o CSV (uma
+            #    lista dentro de um CSV vira texto irreversível) e a janela
+            #    ficava SEM checkpoint, num log.debug que ninguém vê. As duas
+            #    rodadas de 04/09 registraram, idênticas, "contratos: 0 janela(s)
+            #    do checkpoint, 15 coletada(s) agora" — 15 requisições jogadas
+            #    fora por rodada, para sempre.
+            rede: list[int] = []
+
+            def portal(endpoint, ano, **kw):
+                rede.append(ano)
+                return [{"NUMERO_CONTRATO": f"CT-{ano}", "VALOR": "1,00",
+                         "ITENS": [{"DESC": "x", "QTD": 2}],
+                         "DATA_INICIO_VIGENCIA": f"01/01/{ano}"}]
+
+            clients.implanta_ano = portal
+            pipeline.stage_contratos(2020, 2023)
+            if not rede:
+                erros.append("regressão da convergência: a primeira rodada nem "
+                             "foi à rede")
+            rede.clear()
+            df = pipeline.stage_contratos(2020, 2023)
+            if rede:
+                erros.append(
+                    f"regressão da convergência: a segunda rodada re-coletou "
+                    f"{rede} — payload aninhado voltou a não virar checkpoint, "
+                    "e a etapa vai à rede inteira em TODA rodada")
+            if len(df) != 4:
+                erros.append("regressão da convergência: o checkpoint aninhado "
+                             f"devolveu {len(df)} linhas, esperado 4")
+            elif not isinstance(df.iloc[0].get("ITENS"), list):
+                erros.append(
+                    "regressão da convergência: o campo aninhado voltou como "
+                    f"{type(df.iloc[0].get('ITENS')).__name__} — o checkpoint "
+                    "está achatando o que a API mandou")
+
+            # 2. Marcador de vazio EXPIRADO no exercício em curso. `atas` tinha
+            #    2026 e 2025 vazios; passadas 12h o de 2026 expira, a contagem
+            #    de vazios consecutivos se perde e o inventário anunciava 16
+            #    exercícios pendentes — para uma coleta que fez UMA requisição.
+            d = pipeline._checkpoint_dir("atas")
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "2026.vazio").write_text("x\n")
+            (d / "2025.vazio").write_text("x\n")
+            velho = time.time() - (pipeline.CHECKPOINT_TTL_HORAS + 5) * 3600
+            os.utime(d / "2026.vazio", (velho, velho))
+            pend = pipeline.janelas_pendentes("atas", 2026, None)
+            if pend != [2026]:
+                erros.append(
+                    "regressão da convergência: com o vazio do exercício em "
+                    f"curso expirado, o inventário aponta {len(pend)} "
+                    f"exercício(s) pendente(s) ({pend[:5]}...) — a coleta vai "
+                    "fazer uma requisição e parar nos dois vazios seguidos")
+
+            # 3. A sondagem de diárias não pode MATAR a coleta. Ela pergunta
+            #    "este caminho serve?" a endpoints que o swagger define sem
+            #    publicar; com retry de rate-limit, o segundo 403 virava
+            #    RateLimited, subia até build_staged e abortava tudo. Nas duas
+            #    rodadas de 04/09 as duas últimas etapas
+            #    (indenizacoes_endpoint, pncp_contratos) nunca foram executadas.
+            from .http import RateLimited
+
+            def _403(url, params=None, **kw):
+                # É assim que `get_json` se comporta de verdade: com
+                # `rate_limit_retries=0` o 403 é resposta final (`None`); com
+                # retry, a recusa persistente vira RateLimited.
+                if kw.get("rate_limit_retries") == 0:
+                    return None
+                raise RateLimited("403 persistente (simulado)")
+
+            clients.get_json = _403
+            clients._PROBE_MORTOS.clear()
+            try:
+                clients.implanta_probe_diarias(2024)
+            except RateLimited:
+                erros.append(
+                    "regressão da convergência: a sondagem de diárias levantou "
+                    "RateLimited — ela aborta a coleta inteira e as etapas "
+                    "seguintes nunca são executadas. 403 numa SONDAGEM é "
+                    "resposta ('este caminho não serve'), não bloqueio a "
+                    "esperar")
+        finally:
+            (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+             config.CACHE_DIR, checkpoint_antes, clients.implanta_ano,
+             clients.get_json) = guardado
+            clients._PROBE_MORTOS.clear()
             if checkpoint_antes is None:
                 os.environ.pop("QUEDA_CHECKPOINT", None)
             else:

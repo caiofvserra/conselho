@@ -99,6 +99,18 @@ pronta e o buraco não fechava em rodada nenhuma. Hoje ela é refeita, e refazer
 exercícios faltam em cada etapa e quais são — é o mesmo laço da coleta rodando
 em seco, para que o inventário não possa divergir do que a coleta faria.
 
+Nem todo payload cabe num CSV: `contratos` e `processos_itens` trazem listas
+dentro da linha, e uma lista num CSV vira texto irreversível. Essas janelas
+viram checkpoint **JSON**, que devolve o que a API mandou. Sem isso a etapa não
+tinha checkpoint nenhum — `contratos` re-coletava seus 15 exercícios em toda
+rodada, num `log.debug` que ninguém via.
+
+A sondagem de diárias (endpoints que o swagger define sem publicar caminho) usa
+`rate_limit_retries=0`: ali um 403 é RESPOSTA — "este caminho não serve" —, não
+bloqueio a esperar. Com retry, a segunda recusa virava `RateLimited`, subia até
+`build_staged` e abortava a coleta inteira; as duas últimas etapas
+(`indenizacoes_endpoint`, `pncp_contratos`) nunca chegavam a ser executadas.
+
 O portal **recusa** algumas janelas com HTTP 400 — na rodada de 04/09/2026 foram
 o exercício 2026 em onze endpoints e 2010–2020 no `DespesasCentroCusto`. Recusa
 não é "o órgão não publica": é pergunta não aceita, e pode ser do nosso formato

@@ -173,13 +173,21 @@ def _checkpoint_dir(etapa: str) -> Path:
     return config.RAW_DIR / CHECKPOINT_SUBDIR / etapa
 
 
-def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path, Path]:
-    """(csv com linhas, marcador de janela vazia, marcador de janela recusada).
+def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path, Path, Path]:
+    """(csv, json, marcador de vazia, marcador de recusada).
 
     Três arquivos para três afirmações distintas, e a distinção é o que impede
     a ferramenta de mentir sobre o fiscalizado:
 
-    * `.csv`      — o servidor respondeu e há dado;
+    * `.csv`      — o servidor respondeu e há dado, e a linha é PLANA;
+    * `.json`     — idem, mas a linha tem lista ou dicionário dentro. Um CSV
+                    transformaria o aninhado em texto (`"[{'ITEM': ...}]"`) e o
+                    devolveria como texto; JSON devolve o que a API mandou.
+                    Sem ele, `contratos` re-coletava seus 15 exercícios em TODA
+                    rodada (medido nas duas de 04/09: "0 janela(s) do
+                    checkpoint, 15 coletada(s) agora", as duas vezes), e
+                    `faltando` anunciava 17 exercícios pendentes numa etapa
+                    que já tinha vindo inteira;
     * `.vazio`    — o servidor respondeu que NÃO HÁ nada neste exercício. Vale
                     para sempre num exercício encerrado, e é o único dos três
                     que pode sustentar "o órgão não publica";
@@ -192,15 +200,15 @@ def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path, Path]:
     """
     base = _checkpoint_dir(etapa) / "".join(
         c if c.isalnum() or c in "-_" else "_" for c in str(janela))
-    return (base.with_suffix(".csv"), base.with_suffix(".vazio"),
-            base.with_suffix(".recusado"))
+    return (base.with_suffix(".csv"), base.with_suffix(".json"),
+            base.with_suffix(".vazio"), base.with_suffix(".recusado"))
 
 
 def _recusa_fresca(etapa: str, janela: str) -> bool:
     """A janela foi recusada há pouco? Então não vale gastar ritmo com ela agora."""
     if not _checkpoint_ligado():
         return False
-    _, _, recusado = _checkpoint_arquivos(etapa, janela)
+    *_, recusado = _checkpoint_arquivos(etapa, janela)
     if not recusado.exists():
         return False
     idade_h = (time.time() - recusado.stat().st_mtime) / 3600.0
@@ -210,7 +218,7 @@ def _recusa_fresca(etapa: str, janela: str) -> bool:
 def _marcar_recusa(etapa: str, janela: str) -> None:
     if not _checkpoint_ligado():
         return
-    _, _, recusado = _checkpoint_arquivos(etapa, janela)
+    *_, recusado = _checkpoint_arquivos(etapa, janela)
     try:
         recusado.parent.mkdir(parents=True, exist_ok=True)
         recusado.write_text(f"{datetime.now().isoformat(timespec='seconds')}\n")
@@ -267,7 +275,7 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
     """
     if not _checkpoint_ligado():
         return None
-    csv, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
+    csv, jsn, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
     if _checkpoint_utilizavel(csv, ano):
         try:
             d = pd.read_csv(csv, dtype=str, keep_default_na=False,
@@ -278,13 +286,22 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
             return None
         return [{k: _do_texto(v) for k, v in r.items()}
                 for r in d.to_dict("records")]
+    if _checkpoint_utilizavel(jsn, ano):
+        try:
+            linhas = json.loads(jsn.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as e:
+            log.warning("checkpoint %s ilegível (%s) — será recoletado",
+                        jsn.name, type(e).__name__)
+            return None
+        return linhas if isinstance(linhas, list) else None
     if _checkpoint_utilizavel(vazio, ano):
         return []
     return None
 
 
 def _janela_estado(etapa: str, janela: str, ano: int | None = None) -> str | None:
-    """`"linhas"`, `"vazio"` ou `None` (não coletada) — sem abrir o CSV.
+    """`"linhas"`, `"vazio"`, `"vazio_expirado"`, `"recusado"` ou `None` — sem
+    abrir o arquivo.
 
     `_checkpoint_ler` responde a mesma pergunta, mas lendo o arquivo inteiro:
     para o inventário são 17 etapas × ~14 exercícios, e ler centenas de
@@ -293,13 +310,20 @@ def _janela_estado(etapa: str, janela: str, ano: int | None = None) -> str | Non
     """
     if not _checkpoint_ligado():
         return None
-    csv, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
-    if _checkpoint_utilizavel(csv, ano):
+    csv, jsn, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
+    if _checkpoint_utilizavel(csv, ano) or _checkpoint_utilizavel(jsn, ano):
         return "linhas"
     if _checkpoint_utilizavel(vazio, ano):
         return "vazio"
     if _recusa_fresca(etapa, janela):
         return "recusado"
+    # Marcador de vazio EXPIRADO — só acontece no exercício em curso, cujo
+    # checkpoint vale 12h. A janela volta à rede, mas o que ela devolveu da
+    # última vez foi vazio, e é isso que decide se a sondagem retroativa para
+    # aqui. Sem o estado próprio, o inventário anunciava 16 exercícios
+    # pendentes em `atas` numa rodada em que a coleta fez UMA requisição.
+    if vazio.exists():
+        return "vazio_expirado"
     return None
 
 
@@ -333,6 +357,16 @@ def janelas_pendentes(etapa: str, ate: int, desde: int | None) -> list[int]:
         if estado is None:
             pendentes.append(ano)
             vazios = 0
+        elif estado == "vazio_expirado":
+            # Vai à rede (o exercício em curso muda todo dia), mas da última vez
+            # veio vazio — e é isso que decide se a sondagem retroativa para
+            # aqui. Sem contar como vazio, o inventário anunciava 16 exercícios
+            # pendentes em `atas` numa rodada em que a coleta fez UMA
+            # requisição e parou nos dois vazios seguidos (medido em 04/09).
+            pendentes.append(ano)
+            vazios += 1
+            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
+                break
         elif estado == "recusado":
             # Não entra em "pendente" porque a rodada NÃO vai buscá-la agora —
             # o inventário tem de prever o que a coleta faz, não o que seria
@@ -373,7 +407,7 @@ def _checkpoint_gravar(etapa: str, janela: str, rows: list) -> None:
     falha viraria falha permanente."""
     if not _checkpoint_ligado():
         return
-    csv, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
+    csv, jsn, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
     try:
         csv.parent.mkdir(parents=True, exist_ok=True)
         if not rows:
@@ -381,18 +415,28 @@ def _checkpoint_gravar(etapa: str, janela: str, rows: list) -> None:
             csv.unlink(missing_ok=True)
             _recusa.unlink(missing_ok=True)
             return
-        if not _plano_para_csv(rows):
-            log.debug("%s/%s: payload aninhado — sem checkpoint", etapa, janela)
-            return
         # `_ano` é reposto pelo chamador como inteiro a cada leitura; gravá-lo
         # faria o rótulo do exercício voltar como texto e quebrar toda
         # comparação numérica de ano nos checks.
         limpos = [{k: v for k, v in r.items() if k != "_ano"} for r in rows]
-        # Gravação atômica: uma queda de sessão no meio do `to_csv` deixaria um
-        # CSV truncado que a rodada seguinte leria como se fosse completo.
-        parcial = csv.with_suffix(".csv.parcial")
-        pd.DataFrame(limpos).to_csv(parcial, index=False)
-        os.replace(parcial, csv)
+        # Gravação atômica nos dois formatos: uma queda de sessão no meio da
+        # escrita deixaria um arquivo truncado que a rodada seguinte leria como
+        # se fosse completo.
+        if _plano_para_csv(rows):
+            parcial = csv.with_suffix(".csv.parcial")
+            pd.DataFrame(limpos).to_csv(parcial, index=False)
+            os.replace(parcial, csv)
+            jsn.unlink(missing_ok=True)
+        else:
+            # Aninhado. Antes esta janela simplesmente NÃO virava checkpoint —
+            # num `log.debug` que ninguém vê —, e a etapa inteira voltava à
+            # rede em toda rodada. JSON devolve exatamente o que a API mandou,
+            # que é o que o CSV não consegue fazer com lista dentro de linha.
+            parcial = jsn.with_suffix(".json.parcial")
+            parcial.write_text(json.dumps(limpos, ensure_ascii=False),
+                               encoding="utf-8")
+            os.replace(parcial, jsn)
+            csv.unlink(missing_ok=True)
         vazio.unlink(missing_ok=True)
         _recusa.unlink(missing_ok=True)
     except OSError as e:
@@ -1312,7 +1356,7 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
             for ano in range(desde or config.ANO_PISO, ate + 1):
                 estado = _janela_estado(chave, str(ano), ano)
                 com_dado += estado == "linhas"
-                vazias += estado == "vazio"
+                vazias += estado in ("vazio", "vazio_expirado")
                 if estado == "recusado":
                     recusadas += 1
                     anos_recusados.append(ano)
