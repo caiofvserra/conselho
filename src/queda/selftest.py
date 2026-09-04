@@ -960,14 +960,23 @@ def _confere_metricas(achados) -> list[str]:
     exige("diarias-politico-vs-quadro", "quadro_contratado",
           (2_600_000 + 670_000 + 570_000) * 13)
 
-    # art. 60: a fixture de empenhos não publica NUMERO_EMPENHO e o par
-    # credor+valor não coincide — o esperado é a guarda de metodologia, com
-    # 100% e nenhum casamento, não 7.059 acusações de ilegalidade.
+    # art. 60: a fixture de empenhos não publica número de empenho sob rótulo
+    # nenhum e o par credor+valor não coincide — o esperado é a guarda de
+    # metodologia, com 100% e nenhum casamento, não 7.059 acusações de
+    # ilegalidade.
     exige("empenhos-vinculo-empenho-ausente", "taxa_pct", 100.0)
     f = por_id.get("empenhos-vinculo-empenho-ausente")
-    if f is not None and f.metricas.get("casados_por_numero") not in (0, 0.0):
+    # `None`, e NÃO 0. A versão anterior exigia 0 aqui e foi essa exigência que
+    # carimbou o zero fabricado: com a chave indisponível, "casaram zero" é
+    # afirmação falsa — nada foi tentado. E como a guarda
+    # `empenhos-chave-nao-casa` dispara justamente com `casados_por_numero == 0`,
+    # o zero fabricado a mantinha desligada, deixando passar a acusação de
+    # "64,0% dos pagamentos sem empenho" da rodada de 2026-09-03.
+    if f is not None and f.metricas.get("casados_por_numero") is not None:
         erros.append("empenhos-vinculo-empenho-ausente.casados_por_numero = "
-                     f"{f.metricas.get('casados_por_numero')}, esperado 0")
+                     f"{f.metricas.get('casados_por_numero')}, esperado None "
+                     "(chave indisponível não casa zero: não é tentada)")
+    erros.extend(_regressao_chave_empenho())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1064,6 +1073,79 @@ def _confere_metricas(achados) -> list[str]:
     exige("diagnostico-porque-vazio", "sem_publicacao", 1)
     exige("diagnostico-porque-vazio", "falha_da_coleta", 1)
     exige("diagnostico-porque-vazio", "indeterminadas", 1)
+    return erros
+
+
+def _regressao_chave_empenho() -> list[str]:
+    """A chave pagamento → empenho: casa quando deve, e é vetada quando não deve.
+
+    Esta regressão existe por causa de um defeito concreto. O portal publica o
+    número do empenho como `NUMERO` no conjunto Empenhos e como
+    `NUMERO_EMPENHO` no conjunto Pagamentos; o cruzamento procurava
+    `NUMERO_EMPENHO` **nos dois lados**, não achava do lado dos empenhos, caía
+    inteiro no par credor + valor e publicava `casados_por_numero: 0`. Daí saiu
+    o achado de gravidade alta "64,0% dos pagamentos (291.322 de 455.262) não
+    encontram empenho nos dados abertos" — que media a taxa de erro da nossa
+    chave, não a conformidade do conselho.
+
+    A fixture principal não pega isso: os empenhos dela não publicam número
+    sob rótulo nenhum, então o caminho da chave por número nunca é percorrido.
+    Por isso os dois cenários abaixo são montados à mão.
+    """
+    from .checks import empenhos as E
+
+    anos = range(2013, 2026)
+    n_por_ano = 200
+
+    def montar(chave_certa: bool):
+        rnd = random.Random(7)
+        emp, pg = [], []
+        for a in anos:
+            for n in range(1, n_por_ano + 1):
+                v = 1000.0 + n
+                emp.append({"_ano": a, "NUMERO": n, "VALOR": v, "VALOR_PAGO": v,
+                            "VALOR_ANULADO": 0.0, "PESSOA": f"FORN {n % 11}",
+                            "DATA": pd.Timestamp(f"{a}-03-01")})
+                # numeração REINICIA a cada exercício: no cenário torto o
+                # pagamento cita um número que existe, mas de outro empenho.
+                citado = n if chave_certa else rnd.randint(1, n_por_ano)
+                # resto a pagar: 5% quitados no exercício seguinte
+                ano_pg = a + 1 if (chave_certa and n % 20 == 0 and a < 2025) else a
+                pg.append({"_ano": ano_pg, "NUMERO_EMPENHO": citado, "VALOR": v,
+                           "FAVORECIDO_NORM": f"FORN {n % 11}",
+                           "NOME_RAZAO_SOCIAL": f"FORN {n % 11}",
+                           "DATA": pd.Timestamp(f"{ano_pg}-06-01")})
+        return {"empenhos": pd.DataFrame(emp), "pagamentos": pd.DataFrame(pg)}
+
+    erros: list[str] = []
+
+    certos = E._empenho_previo(montar(True))
+    m = certos[0].metricas if certos else {}
+    if not m.get("casados_por_numero"):
+        erros.append(
+            "regressão da chave: com `NUMERO` nos empenhos e `NUMERO_EMPENHO` "
+            "nos pagamentos apontando para o mesmo empenho, "
+            f"casados_por_numero = {m.get('casados_por_numero')} — a chave por "
+            "número voltou a não ser tentada")
+    if m.get("rotulo_numero_empenhos") != "NUMERO":
+        erros.append("regressão da chave: o rótulo do número nos empenhos "
+                     f"saiu {m.get('rotulo_numero_empenhos')!r}, esperado 'NUMERO'")
+    if (m.get("conferencia_bate_pct") or 0) < E.CONFERENCIA_MINIMA_PCT:
+        erros.append("regressão da chave: a conferência pelo VALOR_PAGO "
+                     f"reprovou a chave CERTA ({m.get('conferencia_bate_pct')}%)")
+
+    tortos = E._empenho_previo(montar(False))
+    ids = {f.id for f in tortos}
+    mt = tortos[0].metricas if tortos else {}
+    if "empenhos-chave-nao-casa" not in ids:
+        erros.append(
+            "regressão da chave: números que apenas COINCIDEM (sequência que "
+            "reinicia por exercício) passaram pela conferência de VALOR_PAGO "
+            f"e não viraram diagnóstico — saiu {sorted(ids)}")
+    if mt.get("casados_por_numero"):
+        erros.append("regressão da chave: casamento por coincidência não foi "
+                     f"descartado ({mt.get('casados_por_numero')} casados)")
+
     return erros
 
 

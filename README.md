@@ -263,6 +263,20 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     bases simplesmente não é publicada, a frente troca a lista de acusações por
     **um** achado de metodologia: 100% "sem empenho" não são milhares de
     ilegalidades, é campo vazio.
+
+    A chave tem duas armadilhas, e as duas já morderam. A primeira é o rótulo:
+    o portal publica o número do empenho como `NUMERO` no conjunto Empenhos e
+    como `NUMERO_EMPENHO` no conjunto Pagamentos — procurar o segundo nos dois
+    lados faz o cruzamento inteiro cair no par credor + valor e publicar
+    `casados_por_numero: 0`, um zero que parece resultado e é ausência de
+    tentativa. A segunda é a numeração, que **reinicia a cada exercício**: o
+    número sozinho não identifica empenho nenhum, e casar por ele absolve
+    pagamento sem empenho por coincidência de sequência. Por isso o casamento
+    por número passa por uma **conferência pelo dinheiro** — o `VALOR_PAGO` que
+    o dataset de empenhos declara para cada número tem de bater com a soma dos
+    pagamentos que apontam para ele. Reprovado na conferência, o casamento é
+    descartado e o caso vira diagnóstico (`empenhos-chave-nao-casa`), nunca
+    acusação. `_regressao_chave_empenho`, no selftest, tranca as duas.
 19. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
     o que faltou, que exercícios ficaram fora, **qual análise está desligada
     por falta de qual fonte** e, lido do registro de status HTTP, **por que**

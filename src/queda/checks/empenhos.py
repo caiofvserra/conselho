@@ -8,10 +8,12 @@ que foi empenhado.
 O limite honesto desse cruzamento precisa vir antes do resultado. "Não achei o
 empenho no dataset" não é "o empenho não existe" — é "o empenho não está no
 arquivo que o portal publicou, sob a chave que o portal publicou". As duas
-coisas só coincidem se (a) os dois datasets divulgarem o mesmo identificador e
-(b) cobrirem os mesmos exercícios. Quando não coincidem, o cruzamento deixa de
-medir ilegalidade e passa a medir a si mesmo — e é isso, e não uma lista de
-milhares de ilegalidades, que este módulo publica.
+coisas só coincidem se (a) os dois datasets divulgarem o mesmo identificador,
+sob os rótulos que cada um escolheu, (b) cobrirem os mesmos exercícios e (c) o
+identificador designar de fato o mesmo documento — que num número reiniciado a
+cada exercício não é dado, é hipótese a conferir. Quando qualquer uma das três
+falha, o cruzamento deixa de medir ilegalidade e passa a medir a si mesmo — e é
+isso, e não uma lista de milhares de ilegalidades, que este módulo publica.
 """
 from __future__ import annotations
 
@@ -36,6 +38,11 @@ TAXA_LIMITE_CRUZAMENTO_PCT = 30.0
 # entrava na lista como "pagamento sem empenho". Mesmo defeito que já havia
 # contaminado o fracionamento.
 PISO_VALOR_ART60 = 0.0
+# Abaixo desta fração de números que conferem contra o VALOR_PAGO do empenho, o
+# casamento por número não é tratado como chave: números que coincidem sem que
+# o dinheiro bata são coincidência de sequência, e absolver por eles é pior do
+# que não testar o art. 60.
+CONFERENCIA_MINIMA_PCT = 50.0
 
 
 def _hhi(shares: pd.Series) -> float:
@@ -130,6 +137,106 @@ def _so_digitos_chave(s: str) -> str:
     grava o exercício no próprio número e o outro não."""
     d = re.sub(r"\D", "", s or "")
     return re.sub(r"^0+(?=.)", "", d) if d else ""
+
+
+# Rótulos do número do empenho, por lado e em ordem de preferência.
+#
+# O portal usa DOIS rótulos para a mesma coisa: o conjunto Empenhos publica
+# `NUMERO`, o conjunto Pagamentos publica `NUMERO_EMPENHO`. A versão anterior
+# procurava `NUMERO_EMPENHO` nos dois lados. Do lado dos empenhos ele não
+# existe: o conjunto de chaves saía vazio, `tem_numero` saía False, e o
+# cruzamento inteiro caía no par credor + valor — que é a chave de RESGATE,
+# generosa de propósito, nunca a chave principal.
+#
+# O estrago não parou aí. A métrica publicada dizia `casados_por_numero: 0`,
+# um zero FABRICADO: a chave não casou zero vezes, ela nunca foi tentada. Esse
+# zero também desligava a guarda `empenhos-chave-nao-casa`, que existe
+# exatamente para impedir que um defeito nosso vire acusação. Foi assim que a
+# rodada de 2026-09-03 publicou, com gravidade alta, "64,0% dos pagamentos
+# (291.322 de 455.262) não encontram empenho nos dados abertos".
+_ROTULOS_NUMERO_EMP = ("NUMERO_EMPENHO", "NUMERO_NOTA_EMPENHO", "NUM_EMPENHO",
+                       "NR_EMPENHO", "NUMERO", "EMPENHO")
+# Do lado dos PAGAMENTOS, `NUMERO` é o número do próprio pagamento. Aceitá-lo
+# como número de empenho casaria documentos distintos que apenas compartilham
+# a sequência e ABSOLVERIA pagamento sem empenho — o único erro que este
+# módulo não pode cometer em silêncio. Aqui o rótulo tem de dizer "empenho".
+_ROTULOS_NUMERO_PG = ("NUMERO_EMPENHO", "NUMERO_NOTA_EMPENHO", "NUM_EMPENHO",
+                      "NR_EMPENHO")
+
+
+def _rotulo_numero(d: pd.DataFrame, rotulos) -> tuple[pd.Series, str | None]:
+    """Número do empenho sob qualquer rótulo da lista, com o rótulo escolhido.
+
+    Devolve série vazia e `None` quando nenhum rótulo existe ou quando o que
+    existe está integralmente em branco — e é esse `None`, e não um zero, que
+    o resultado publica quando a chave não está disponível.
+    """
+    for col in rotulos:
+        if col in d.columns:
+            s = d[col].map(_chave_empenho)
+            if s.ne("").any():
+                return s, col
+    return pd.Series("", index=d.index, dtype=str), None
+
+
+def _conferir_valor_pago(pg_num, pg_ano, pg_valor,
+                         emp_num, emp_ano, emp_pago, anos) -> dict:
+    """A chave designa mesmo o empenho? O teste independente é o dinheiro.
+
+    Casar por número não prova nada sozinho: a numeração reinicia a cada
+    exercício (na rodada real o maior número de 2025 é 4.692, para ~9 mil
+    empenhos no ano), então documentos diferentes compartilham número o tempo
+    todo. Se a chave designa o mesmo empenho, o que o dataset de EMPENHOS
+    declara como pago naquele número tem de bater com a soma dos pagamentos
+    que apontam para ele. Se não bate quase nunca, os números coincidiram por
+    acaso — e casar por coincidência ABSOLVERIA pagamento sem empenho.
+
+    Duas escolhas que decidem se o teste mede a chave ou mede a janela:
+
+    * agrega por número, não por (exercício, número). Resto a pagar quita no
+      exercício seguinte um empenho do anterior; por par, isso apareceria como
+      divergência em todo empenho que atravessa o ano.
+    * usa a MESMA janela dos dois lados, e joga fora o primeiro exercício
+      dela. Sem isso, o pagamento de janeiro que liquida empenho de dezembro
+      entra por um lado e não pelo outro — e como cada número se repete uma
+      vez por exercício, esse vazamento de borda desloca ~1/n do total de
+      TODOS os números, muito além da tolerância.
+    """
+    anos = sorted(anos)
+    if len(anos) >= 2:
+        anos = anos[1:]
+    anos = set(anos)
+    emp_pago = pd.to_numeric(emp_pago, errors="coerce")
+    if not (emp_pago.fillna(0) > 0).any():
+        return {"conferencia_valor_pago": "nao_testavel",
+                "conferencia_motivo": "o dataset de empenhos não publica "
+                                      "VALOR_PAGO com valor não nulo"}
+    lado_emp = pd.DataFrame({"_num": emp_num, "_ano": emp_ano,
+                             "_v": emp_pago.fillna(0.0)})
+    lado_pg = pd.DataFrame({"_num": pg_num, "_ano": pg_ano,
+                            "_v": pd.to_numeric(pg_valor, errors="coerce").fillna(0.0)})
+    soma = []
+    for lado in (lado_emp, lado_pg):
+        d = lado[lado["_num"].ne("") & lado["_ano"].isin(anos)]
+        soma.append(d.groupby("_num")["_v"].sum())
+    par = pd.concat([soma[0].rename("emp"), soma[1].rename("pg")], axis=1,
+                    join="inner")
+    par = par[par["emp"] > 0]
+    if par.empty:
+        return {"conferencia_valor_pago": "nao_testavel",
+                "conferencia_motivo": "nenhum número aparece com valor pago "
+                                      "nos dois datasets dentro da janela"}
+    # Tolerância de 1% ou R$ 1,00, o que for maior: centavo de arredondamento
+    # não é divergência, e num empenho pequeno 1% é menos que um centavo.
+    folga = (par["emp"].abs() * 0.01).clip(lower=1.0)
+    bate = (par["pg"] - par["emp"]).abs() <= folga
+    return {
+        "conferencia_valor_pago": "testada",
+        "conferencia_janela": _janela(anos),
+        "conferencia_numeros": int(len(par)),
+        "conferencia_bate_pct": round(100 * float(bate.mean()), 1),
+        "conferencia_razao_total": round(float(par["pg"].sum() / par["emp"].sum()), 4),
+    }
 
 
 def _favorecido_empenho(emp: pd.DataFrame) -> pd.Series:
@@ -276,10 +383,12 @@ def _empenho_previo(staged) -> list[Finding]:
              "anos_em_comum": len(comuns)})]
 
     # ---------------------------------------------------- chave 1: nº do empenho
-    chaves_emp: set[str] = set()
-    if "NUMERO_EMPENHO" in emp.columns:
-        chaves_emp = set(emp["NUMERO_EMPENHO"].map(_chave_empenho)) - {""}
-    tem_numero = bool(chaves_emp) and "NUMERO_EMPENHO" in base.columns
+    #
+    # Os dois lados são resolvidos por LISTA DE RÓTULOS, não pelo nome literal
+    # `NUMERO_EMPENHO`: o portal chama o mesmo campo de `NUMERO` no conjunto
+    # Empenhos e de `NUMERO_EMPENHO` no conjunto Pagamentos. Ver
+    # `_ROTULOS_NUMERO_EMP` para o que essa assimetria já custou.
+    num_emp, rotulo_emp = _rotulo_numero(emp, _ROTULOS_NUMERO_EMP)
 
     # Contado sobre a base inteira e INDEPENDENTE do cruzamento. Antes só era
     # calculado dentro de `if tem_numero`: quando o dataset de EMPENHOS não
@@ -287,18 +396,59 @@ def _empenho_previo(staged) -> list[Finding]:
     # saía 0 — publicando "nenhum pagamento deixa de declarar o empenho"
     # justamente no caso em que nenhum o declara. Zero fabricado é pior que
     # ausência declarada.
-    k = (base["NUMERO_EMPENHO"].map(_chave_empenho)
-         if "NUMERO_EMPENHO" in base.columns
-         else pd.Series("", index=base.index, dtype=str))
+    k, rotulo_pg = _rotulo_numero(base, _ROTULOS_NUMERO_PG)
     sem_numero_declarado = int(k.eq("").sum())
+    tem_numero = rotulo_emp is not None and rotulo_pg is not None
 
     marcado = pd.Series(False, index=base.index)
+    via_numero = 0
+    via_numero_mesmo_exercicio = 0
+    numero_reprovado = False
+    conferencia: dict = {"conferencia_valor_pago": "nao_testavel",
+                         "conferencia_motivo": "a chave por número não estava "
+                                               "disponível nos dois datasets"}
     if tem_numero:
-        marcado = k.ne("") & k.isin(chaves_emp)
-        digitos_emp = {d for d in (_so_digitos_chave(c) for c in chaves_emp) if d}
-        if digitos_emp:
-            marcado |= k.ne("") & k.map(_so_digitos_chave).isin(digitos_emp)
-    via_numero = int(marcado.sum())
+        e_num = pd.DataFrame({
+            "_num": num_emp,
+            "_ano_emp": pd.to_numeric(coluna(emp, "_ano", 0), errors="coerce"),
+        })
+        e_num = e_num[e_num["_num"].ne("") & e_num["_ano_emp"].notna()]
+        # A numeração do empenho REINICIA a cada exercício: na rodada real o
+        # maior número de 2025 é 4.692 para ~9 mil empenhos no ano. O número
+        # sozinho não identifica empenho nenhum — o par (exercício, número)
+        # identifica. Casar exercício IGUAL OU ANTERIOR é a mesma generosidade
+        # já aplicada ao par credor + valor: resto a pagar é legítimo, e na
+        # dúvida o empenho é dado por existente.
+        primeiro = e_num.groupby("_num")["_ano_emp"].min()
+        # Variante só-dígitos para o caso de um lado gravar o exercício dentro
+        # do próprio número ('123/2024' de um lado, '1232024' do outro).
+        e_dig = e_num.assign(_dig=e_num["_num"].map(_so_digitos_chave))
+        primeiro_dig = (e_dig[e_dig["_dig"].ne("")]
+                        .groupby("_dig")["_ano_emp"].min())
+        ano_min = k.map(primeiro)
+        if not primeiro_dig.empty:
+            ano_min = ano_min.fillna(k.map(_so_digitos_chave).map(primeiro_dig))
+        marcado = k.ne("") & ano_min.notna() & (ano_min <= base["_ano"])
+        via_numero = int(marcado.sum())
+        pares_emp = set(zip(e_num["_ano_emp"].astype(int), e_num["_num"]))
+        mesmo_exercicio = pd.Series(
+            [(a, n) in pares_emp for a, n in zip(base["_ano"], k)],
+            index=base.index)
+        via_numero_mesmo_exercicio = int((marcado & mesmo_exercicio).sum())
+        conferencia = _conferir_valor_pago(
+            k, base["_ano"], base["VALOR"],
+            e_num["_num"], e_num["_ano_emp"],
+            coluna(emp, "VALOR_PAGO", None).loc[e_num.index],
+            apuracao)
+        # A conferência é o VETO. Número que casa sem o dinheiro bater é
+        # coincidência de sequência, e absolver por coincidência é o erro que
+        # este módulo não pode cometer: os casamentos por número são
+        # DESCARTADOS e o caso vira diagnóstico, nunca acusação.
+        if (conferencia.get("conferencia_valor_pago") == "testada"
+                and conferencia["conferencia_bate_pct"] < CONFERENCIA_MINIMA_PCT):
+            marcado = pd.Series(False, index=base.index)
+            via_numero = via_numero_mesmo_exercicio = 0
+            numero_reprovado = True
 
     # ---------------------------------- chave 2: credor + valor + exercício
     fav_emp = _favorecido_empenho(emp)
@@ -362,9 +512,21 @@ def _empenho_previo(staged) -> list[Finding]:
     n_tot, n_sem = int(len(base)), int(len(sem))
     taxa = 100 * n_sem / n_tot
     valor_sem = float(sem["VALOR"].sum())
-    chave_usada = ("número do empenho" if tem_numero and not tem_fallback else
+    numero_valeu = tem_numero and not numero_reprovado
+    # Em prosa vale a mesma regra da métrica: "casaram 0 por número" é
+    # afirmação sobre uma tentativa que, sem a chave, não houve.
+    frase_numero = (
+        f"Casaram por número de empenho: {via_numero}"
+        if numero_valeu else
+        "A chave por número foi tentada e reprovada na conferência pelo "
+        "VALOR_PAGO — os casamentos dela foram descartados" if numero_reprovado
+        else ("O número do empenho não é publicado pelos dois datasets sob "
+              f"rótulo comparável (empenhos: {rotulo_emp or 'ausente'}; "
+              f"pagamentos: {rotulo_pg or 'ausente'}), então essa chave não "
+              "chegou a ser tentada"))
+    chave_usada = ("número do empenho" if numero_valeu and not tem_fallback else
                    "número do empenho, com credor + valor como segunda chave"
-                   if tem_numero else "credor + valor + exercício")
+                   if numero_valeu else "credor + valor + exercício")
 
     d = base[["_ano", "VALOR"]].copy()
     d["_sem"] = (~marcado).astype(int)
@@ -388,7 +550,16 @@ def _empenho_previo(staged) -> list[Finding]:
         "janela_pagamentos": _janela(anos_pg),
         "janela_empenhos": _janela(anos_emp),
         "chave": chave_usada,
-        "casados_por_numero": via_numero,
+        # `None`, nunca 0, quando a chave por número não foi tentada. Zero diz
+        # "tentei e não casou nenhum" — foi essa confusão que sustentou o
+        # "64% dos pagamentos sem empenho" da rodada de 2026-09-03.
+        "casados_por_numero": via_numero if tem_numero else None,
+        "casados_por_numero_no_mesmo_exercicio": (via_numero_mesmo_exercicio
+                                                  if tem_numero else None),
+        "rotulo_numero_empenhos": rotulo_emp,
+        "rotulo_numero_pagamentos": rotulo_pg,
+        "chave_numero_reprovada_na_conferencia": numero_reprovado,
+        **conferencia,
         "casados_por_credor_e_valor": via_fallback,
         "pagamentos_sem_numero_declarado": sem_numero_declarado,
         "sem_empenho_e_sem_numero_declarado": sem_numero_na_lista,
@@ -405,52 +576,84 @@ def _empenho_previo(staged) -> list[Finding]:
            "exercício, então o efeito de restos a pagar do ano anterior "
            "permanece embutido no número."))
 
-    # ------------------------------------- guarda: a chave existe e não casa
+    # --------------------------- guarda: a chave existe e não serve como chave
     #
-    # Na rodada real: 455.262 pagamentos, TODOS declarando número de empenho,
-    # o dataset de empenhos também com número — e `casados_por_numero = 0`.
-    # Isso não é o órgão escondendo o vínculo. Zero casamentos com a chave
-    # presente dos dois lados só acontece se os dois campos não são a mesma
-    # coisa: numeração reiniciada por exercício, prefixo de unidade, ou a
-    # coluna do pagamento apontando para outro documento.
+    # Dois modos de falhar, e nenhum deles é o órgão escondendo o vínculo:
     #
-    # Acusar aqui seria transformar um defeito do NOSSO cruzamento em achado
-    # de transparência contra o fiscalizado. Numa ferramenta de fiscalização,
-    # errar assim custa mais do que não achar nada — então este caso vira
-    # diagnóstico, com amostra das duas chaves para quem for conferir.
-    if tem_numero and via_numero == 0 and sem_numero_declarado < n_tot * 0.5:
+    # 1. nenhum casamento, com o número publicado dos dois lados — os campos
+    #    não designam a mesma coisa (prefixo de unidade orçamentária, ou a
+    #    coluna do pagamento apontando para outro documento);
+    # 2. casamentos que a conferência de VALOR_PAGO reprova — os números
+    #    coincidem porque a sequência reinicia a cada exercício, não porque
+    #    apontam para o mesmo empenho.
+    #
+    # Acusar em qualquer um dos dois seria transformar defeito do NOSSO
+    # cruzamento em achado de transparência contra o fiscalizado. Numa
+    # ferramenta de fiscalização, errar assim custa mais do que não achar
+    # nada — então o caso vira diagnóstico, com amostra das duas chaves e os
+    # números da conferência para quem for conferir.
+    # O piso de 50% vale só para o modo 1: quando a maioria dos pagamentos
+    # sequer declara número, a história é mesmo a do vínculo não publicado. No
+    # modo 2 não há dúvida sobre de quem é o defeito — a chave foi tentada e
+    # reprovada por nós —, então ele desvia para o diagnóstico sempre.
+    if tem_numero and (numero_reprovado
+                       or (via_numero == 0
+                           and sem_numero_declarado < n_tot * 0.5)):
         amostra_pg = [c for c in k[k.ne("")].unique()[:8]]
-        amostra_emp = sorted(chaves_emp)[:8]
-        return [Finding(
-            id="empenhos-chave-nao-casa", frente=FRENTE, gravidade="media",
-            titulo=("O número de empenho é publicado nos dois datasets e não "
-                    "casa em nenhum dos {n} pagamentos conferidos".format(n=n_tot)),
-            descricao=(
-                "O art. 60 da Lei 4.320/1964 proíbe despesa sem prévio empenho, "
-                "e o teste seria direto: cada pagamento tem de encontrar sua "
-                "nota de empenho.\n\n"
+        amostra_emp = sorted(set(num_emp) - {""})[:8]
+        if numero_reprovado:
+            motivo = (
+                f"O casamento por número **acontece** — mas não sobrevive à "
+                f"conferência pelo dinheiro. Somando por número de empenho, "
+                f"dentro de {conferencia.get('conferencia_janela')}, apenas "
+                f"{conferencia.get('conferencia_bate_pct')}% dos "
+                f"{conferencia.get('conferencia_numeros')} números conferidos "
+                "têm o pago dos pagamentos batendo com o `VALOR_PAGO` que o "
+                "dataset de empenhos declara para o mesmo número.\n\n"
+                "Isso é a assinatura de uma sequência que **reinicia a cada "
+                "exercício**: os números coincidem sem apontar para o mesmo "
+                "empenho. Casar por eles daria por empenhado o que não foi "
+                "conferido — absolvição por coincidência.")
+            diagnostico = "chave presente, casamentos reprovados na conferência"
+            titulo = ("O número de empenho casa entre os dois datasets, mas o "
+                      "valor pago não confere — a sequência reinicia a cada "
+                      "exercício e o par não identifica o empenho")
+        else:
+            motivo = (
                 f"Os dois datasets publicam número de empenho — apenas "
                 f"{sem_numero_declarado} dos {n_tot} pagamentos não o declaram "
+                f"(`{rotulo_pg}` nos pagamentos, `{rotulo_emp}` nos empenhos) "
                 "— e ainda assim **nenhum** casou. Zero casamentos com a chave "
                 "presente dos dois lados não é o órgão ocultando o vínculo: é "
                 "sinal de que os dois campos não designam a mesma coisa. As "
-                "causas prováveis são numeração reiniciada a cada exercício, "
-                "prefixo de unidade orçamentária, ou a coluna do pagamento "
-                "apontando para outro documento.\n\n"
+                "causas prováveis são prefixo de unidade orçamentária ou a "
+                "coluna do pagamento apontando para outro documento.")
+            diagnostico = "chave presente, zero casamentos"
+            titulo = ("O número de empenho é publicado nos dois datasets e "
+                      f"não casa em nenhum dos {n_tot} pagamentos conferidos")
+        return [Finding(
+            id="empenhos-chave-nao-casa", frente=FRENTE, gravidade="media",
+            titulo=titulo,
+            descricao=(
+                "O art. 60 da Lei 4.320/1964 proíbe despesa sem prévio empenho, "
+                "e o teste seria direto: cada pagamento tem de encontrar sua "
+                f"nota de empenho.\n\n{motivo}\n\n"
                 "**Este achado é sobre a ferramenta, não sobre o conselho.** "
                 "Enquanto a chave não for entendida, o art. 60 não é testável "
                 "aqui, e nenhum número sobre 'pagamento sem empenho' deve ser "
                 "citado a partir desta rodada.\n\n"
-                f"Amostra da chave nos pagamentos: `{'`, `'.join(map(str, amostra_pg))}`.\n\n"
-                f"Amostra da chave nos empenhos: `{'`, `'.join(map(str, amostra_emp))}`."),
+                f"Amostra da chave nos pagamentos (`{rotulo_pg}`): "
+                f"`{'`, `'.join(map(str, amostra_pg))}`.\n\n"
+                f"Amostra da chave nos empenhos (`{rotulo_emp}`): "
+                f"`{'`, `'.join(map(str, amostra_emp))}`."),
             evidencia=pd.DataFrame({
                 "origem": ["pagamentos"] * len(amostra_pg) + ["empenhos"] * len(amostra_emp),
                 "chave": list(map(str, amostra_pg)) + list(map(str, amostra_emp))}),
             como_verificar=("Pedir o dicionário de dados dos dois conjuntos: "
                             "qual campo do pagamento referencia qual campo do "
                             "empenho, e se a numeração é única ou reiniciada "
-                            "por exercício e por unidade."),
-            metricas={**metricas, "diagnostico": "chave presente, zero casamentos"},
+                            "por exercício e por unidade orçamentária."),
+            metricas={**metricas, "diagnostico": diagnostico},
         )]
 
     # -------------------------------------------------- guarda de metodologia
@@ -477,8 +680,8 @@ def _empenho_previo(staged) -> list[Finding]:
                 "as duas bases não está publicada, ou as bases não cobrem o "
                 "mesmo período**.\n\n"
                 f"{universo_txt}\n\n"
-                f"Chave tentada: {chave_usada}. Casaram por número de empenho: "
-                f"{via_numero}; resgatados por credor + valor: {via_fallback}; "
+                f"Chave tentada: {chave_usada}. {frase_numero}; "
+                f"resgatados por credor + valor: {via_fallback}; "
                 f"pagamentos que sequer declaram número de empenho: "
                 f"{sem_numero_declarado}.\n\n"
                 f"Os {fmt_brl(valor_sem)} sem empenho localizado **não** devem "
@@ -552,8 +755,8 @@ def _empenho_previo(staged) -> list[Finding]:
             "dotação e cria a obrigação — pagar antes dele é gastar dinheiro "
             "que ninguém verificou existir.\n\n"
             f"{universo_txt}\n\n"
-            f"Chave usada: {chave_usada}. Casaram por número de empenho "
-            f"{via_numero} pagamentos e outros {via_fallback} foram resgatados "
+            f"Chave usada: {chave_usada}. {frase_numero}; outros "
+            f"{via_fallback} pagamentos foram resgatados "
             "pelo par credor + valor antes de sobrar esta lista. O pareamento "
             "por credor e valor é deliberadamente generoso: basta existir "
             "empenho do mesmo credor, pelo mesmo valor, em exercício igual ou "
