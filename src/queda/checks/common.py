@@ -1,6 +1,7 @@
 """Helpers compartilhados entre as frentes."""
 from __future__ import annotations
 
+import logging
 import re
 
 import pandas as pd
@@ -8,6 +9,8 @@ import pandas as pd
 from .. import clients, config
 from .. import taxonomia as T
 from ..utils import norm_nome, so_digitos
+
+log = logging.getLogger("queda.checks")
 
 
 def df(staged: dict, nome: str) -> pd.DataFrame:
@@ -146,11 +149,25 @@ def fichas_cnpj(staged) -> dict[str, dict]:
             if len(ni) == 14:
                 candidatos[ni] = candidatos.get(ni, 0) + float(r.get("valorGlobal") or 0)
     top = sorted(candidatos.items(), key=lambda kv: -kv[1])[: config.MAX_CONSULTAS_CNPJ]
+    # Esta é a fase mais lenta da ANÁLISE, e a única que vai à rede: o throttle
+    # por host é de config.THROTTLE_SECONDS, então 150 fichas passam de seis
+    # minutos na primeira vez. Sem este aviso a célula do Colab fica parada, sem
+    # uma linha de log, e parece travada — e quem reinicia o kernel aqui perde a
+    # rodada inteira. Da segunda vez em diante sai do cache em data/raw, que no
+    # Colab está no Drive.
+    if top:
+        log.info("consultando a ficha cadastral de %d CNPJ(s) — é a fase mais "
+                 "lenta da análise (~%.0f min na primeira vez, depois vem do "
+                 "cache em %s). Não interrompa.",
+                 len(top), len(top) * config.THROTTLE_SECONDS / 60,
+                 config.RAW_DIR.name)
     fichas = {}
-    for cnpj, _ in top:
+    for i, (cnpj, _) in enumerate(top, 1):
         ficha = clients.consultar_cnpj(cnpj)
         if ficha:
             fichas[cnpj] = ficha
+        if i % 25 == 0:
+            log.info("fichas de CNPJ: %d/%d", i, len(top))
     _FICHAS = fichas
     return fichas
 

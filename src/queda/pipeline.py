@@ -1118,6 +1118,50 @@ def etapa_pronta(nome: str, desde: int | None,
     return (pronto if pronto is not None and not pendentes else None), pendentes
 
 
+def _inventario_pncp(staged, manual: bool, ate: int) -> dict:
+    """Linha do PNCP: janela MENSAL, uma subpasta por CNPJ.
+
+    Os checkpoints moram em `pncp_contratos/<cnpj>/AAAAMM.csv` porque
+    `_checkpoint_dir` não sanitiza a barra do nome da etapa — só a da janela.
+    São ~66 janelas por órgão entre 2021 e hoje, a varredura mais longa da
+    coleta depois dos exercícios; deixá-la fora do inventário escondia
+    justamente o maior bloco do que falta.
+
+    O ano sai de `stem[:4]`, NÃO de `int(stem)`: `_exercicio_encerrado(202401)`
+    é False (202401 não é menor que o ano corrente), e o mês inteiro cairia no
+    TTL de 12h para sempre — o PNCP apareceria como pendente em toda rodada.
+    """
+    raiz = _checkpoint_dir("pncp_contratos")
+    com_dado = vazias = 0
+    if raiz.is_dir():
+        for arq in raiz.rglob("*"):
+            if not arq.is_file() or arq.suffix not in (".csv", ".vazio"):
+                continue
+            try:
+                ano = int(arq.stem[:4])
+            except ValueError:
+                continue
+            if not _checkpoint_utilizavel(arq, ano):
+                continue
+            com_dado += arq.suffix == ".csv"
+            vazias += arq.suffix == ".vazio"
+    tem_janela = com_dado + vazias > 0
+    return {
+        "etapa": "pncp_contratos",
+        "linhas_staged": 0 if staged is None else int(len(staged)),
+        "janelas_com_dado": com_dado,
+        "janelas_vazias": vazias,
+        # Quantas FALTAM não é calculável sem resolver os CNPJs dos órgãos, o
+        # que é uma consulta de rede — e este comando promete não fazer nenhuma.
+        # Declarar o que se sabe e o que não se sabe, em vez de estimar.
+        "janelas_faltando": "",
+        "exercicios_faltando": (f"arquivo manual em data/{MANUAL_SUBDIR}/" if manual
+                                else "janela mensal por CNPJ; quantas faltam só "
+                                     "se sabe resolvendo os órgãos na rede"),
+        "vai_a_rede": not manual and (staged is None or not tem_janela),
+    }
+
+
 def inventario(desde: int | None, ate: int) -> pd.DataFrame:
     """O que já está em disco e o que falta — sem uma requisição sequer.
 
@@ -1155,6 +1199,9 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
                  "quadro_pessoal", "mandatarios", "pncp_contratos"):
         staged = _ja_coletado(nome)
         manual = manual_rows(nome) is not None
+        if nome == "pncp_contratos":
+            linhas.append(_inventario_pncp(staged, manual, ate))
+            continue
         linhas.append({
             "etapa": nome,
             "linhas_staged": 0 if staged is None else int(len(staged)),
