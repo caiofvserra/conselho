@@ -1074,7 +1074,10 @@ def _achados_sancoes(staged) -> list[Finding]:
     if pg.empty or "cnpj" not in pg.columns:
         return []
     san = san.copy()
-    san["documento"] = san["documento"].astype(str).str.replace(r"\D", "", regex=True)
+    # zfill(14): CNPJ relido como int perde o zero à esquerda (ver contratos.py)
+    san["documento"] = (san["documento"].astype(str).str.replace(r"\D", "", regex=True))
+    san["documento"] = san["documento"].where(san["documento"].eq(""),
+                                              san["documento"].str.zfill(14))
     san = san[san["documento"].str.len() == 14]
     pagos = pg.copy()
     pagos["DATA"] = pd.to_datetime(coluna(pagos, "DATA", None), errors="coerce")

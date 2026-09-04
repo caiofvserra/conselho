@@ -126,6 +126,7 @@ def _sondar(pipeline) -> int:
               "é o contrato inteiro — cole a URL dele em DOC_IMPLANTA_CANDIDATOS "
               "ou salve-o em data/raw/swagger/. O JSON de dados baixado pode ir "
               "para data/manual/<etapa>.json: a etapa passa a ler dali, sem rede.")
+        _persistir_ledger_sondar()
         return 1
 
     pasta.mkdir(parents=True, exist_ok=True)
@@ -168,7 +169,25 @@ def _sondar(pipeline) -> int:
                 for n in sobra:
                     q = ", ".join(por_nome[n]["query"]) or "sem parâmetros"
                     print(f"  {n:34} {q}")
+    _persistir_ledger_sondar()
     return 0
+
+
+def _persistir_ledger_sondar() -> None:
+    """A medição só existia no stdout. Na rodada de 04/09/2026 a tabela de
+    prefixos (Empenhos 12.575 nos dois, QuadrosPessoas 0 nos dois) foi a
+    evidência que derrubou uma hipótese — e não ficou em lugar nenhum além da
+    tela do Colab. Vai para data/raw/sondar/<carimbo>.csv, NÃO para
+    staged/_coleta_http.csv, que é o ledger da última coleta e seria
+    sobrescrito por ~60 linhas de sondagem."""
+    from datetime import datetime
+    from queda import http
+    destino = config.RAW_DIR / "sondar" / f"{datetime.now():%Y-%m-%d_%H%M}.csv"
+    try:
+        http.salvar_ledger(destino)
+        print(f"\nLedger desta sondagem: {destino}")
+    except Exception as e:                       # diagnóstico nunca derruba
+        print(f"\n(não foi possível gravar o ledger da sondagem: {e})", file=sys.stderr)
 
 
 def main():

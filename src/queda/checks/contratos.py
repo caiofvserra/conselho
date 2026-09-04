@@ -614,8 +614,17 @@ def run(staged) -> list[Finding]:
             # GEOLOGIA - EIRELI" noutro; 38.352.733/0001-68 é "FB UNI ONLINE" e
             # "ENGINEME CURSOS E CONSULTORIA ONLINE". Comparando nome, cada
             # variação vira um fornecedor "ausente do PNCP" que está lá.
-            doc_portal = coluna(ctr, "CONTRATADA_CNPJ", "").fillna("").astype(str)
-            doc_pncp = coluna(alvo, "fornecedor_ni", "").fillna("").astype(str)
+            # Defesa em profundidade contra o zero à esquerda: um CNPJ que
+            # passou por int em algum ponto volta com 9 a 13 dígitos. Só
+            # dígitos + zfill(14) recompõe o número sem ambiguidade — CNPJ tem
+            # 14 posições, e o que faltou só pode ter sido zero à esquerda. Foi
+            # exatamente isso que fez 25 contratos com CNPJ iniciado em 0 saírem
+            # como "ausentes do PNCP" estando lá.
+            def _cnpj14(serie):
+                d = serie.fillna("").astype(str).str.replace(r"\D", "", regex=True)
+                return d.where(d.eq(""), d.str.zfill(14))
+            doc_portal = _cnpj14(coluna(ctr, "CONTRATADA_CNPJ", ""))
+            doc_pncp = _cnpj14(coluna(alvo, "fornecedor_ni", ""))
             por_cnpj = doc_portal.str.len().eq(14).any() and doc_pncp.str.len().eq(14).any()
             if por_cnpj:
                 chave_portal, chave_pncp = doc_portal, doc_pncp

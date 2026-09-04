@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -1646,7 +1647,25 @@ def build_staged(desde: int | None, ate: int, *,
 # classe de defeito que `_checkpoint_ler` já evita com `dtype=str`.
 COLUNAS_TEXTO_STAGED = ("CPF_CNPJ", "FAVORECIDO_CNPJ", "CONTRATADA_CNPJ",
                         "CNPJ", "CPF", "NUMERO_EMPENHO", "NUMERO_PAGAMENTO",
-                        "NUMERO", "NUMERO_CONTRATO", "NUMERO_LICITACAO")
+                        "NUMERO", "NUMERO_CONTRATO", "NUMERO_LICITACAO",
+                        # PNCP e sanções — as que ficaram de fora e custaram caro
+                        "fornecedor_ni", "orgao_cnpj", "cnpjOrgao", "niFornecedor",
+                        "documento", "numeroControlePNCP", "numeroControlePNCPCompra")
+# Lista explícita NÃO basta: `fornecedor_ni` (CNPJ do fornecedor no PNCP) não
+# estava nela, foi relida como int64, perdeu o zero à esquerda, e o cruzamento
+# portal × PNCP deixou de casar todo fornecedor cujo CNPJ começa com 0. Na
+# rodada de 04/09/2026, 25 dos 39 contratos publicados como "ausentes do PNCP"
+# (R$ 66,5 mi, 61% do valor) ESTAVAM no PNCP — em 15 casos era o mesmo
+# contrato, mesmo número e valor. Por isso a regra também é por PADRÃO de nome:
+# qualquer coluna que fale de CNPJ, CPF, NI (número de inscrição), documento ou
+# número de controle é texto, sempre.
+_PADRAO_COLUNA_TEXTO = re.compile(r"(cnpj|cpf|(^|_)ni($|_)|documento|numerocontrole|"
+                                  r"^numero(_|$)|_numero$)", re.I)
+
+
+def _colunas_texto(cabecalho) -> dict:
+    return {c: str for c in cabecalho
+            if c in COLUNAS_TEXTO_STAGED or _PADRAO_COLUNA_TEXTO.search(str(c))}
 
 
 def load_staged() -> dict[str, pd.DataFrame]:
@@ -1657,7 +1676,7 @@ def load_staged() -> dict[str, pd.DataFrame]:
             # `dtype` só nas colunas de dígitos: aplicar `dtype=str` no arquivo
             # inteiro transformaria VALOR em texto e derrubaria toda soma.
             cabecalho = pd.read_csv(path, nrows=0).columns
-            forcar = {c: str for c in COLUNAS_TEXTO_STAGED if c in cabecalho}
+            forcar = _colunas_texto(cabecalho)
             df = pd.read_csv(path, low_memory=False, dtype=forcar,
                              keep_default_na=False if forcar else True,
                              na_values=[""] if forcar else None)

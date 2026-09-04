@@ -1057,6 +1057,26 @@ def _confere_metricas(achados) -> list[str]:
                      "(chave indisponível não casa zero: não é tentada)")
     erros.extend(_regressao_chave_empenho())
     erros.extend(_regressao_retomada())
+    # PNCP × portal: mesmo que o CNPJ chegue SEM o zero à esquerda (int que
+    # passou por CSV), o check tem de recompor e casar — é a defesa em
+    # profundidade para a coluna que a lista de texto não previu.
+    from .checks import contratos as _C
+    _ctr = pd.DataFrame([{"NUMERO_CONTRATO": "C-031/2025", "CONTRATADA": "00.000.424/0001-56 - DEBRITO",
+                          "CONTRATADA_CNPJ": "00000424000156", "CONTRATADA_NORM": "DEBRITO",
+                          "VALOR": 14_000_000.0, "INI": pd.Timestamp("2025-03-01"),
+                          "FIM": pd.Timestamp("2026-03-01"), "DATA_INICIO_VIGENCIA": "2025-03-01"}])
+    _pncp = pd.DataFrame([{"orgao_papel": "alvo", "fornecedor_ni": "424000156",   # <- sem zeros
+                           "fornecedor_nome": "DEBRITO LTDA", "fornecedor_norm": "DEBRITO LTDA",
+                           "numeroContrato": "31/2025", "objeto": "x", "valorGlobal": 14_000_000.0,
+                           "valorAcumulado": 0.0, "vigenciaInicio": "2025-03-01", "vigenciaFim": "2026-03-01"}])
+    _ids = {f.id for f in _C.run({"contratos": _ctr, "aditivos": pd.DataFrame(),
+                                  "pagamentos": pd.DataFrame(), "pncp_contratos": _pncp})}
+    if "contratos-ausentes-pncp" in _ids:
+        erros.append("contratos-ausentes-pncp: CNPJ do PNCP sem zero à esquerda "
+                     "(424000156) não casou com 00000424000156 — o contrato que "
+                     "ESTÁ no PNCP saiu como ausente. Foi assim que 25 de 39 "
+                     "'ausentes' da rodada real eram falsos")
+
     # PNCP × portal: o casamento é por CNPJ e o corte é a data da OBRIGAÇÃO.
     # Antes o cruzamento era por NOME e cortava em 2021: o mesmo fornecedor com
     # duas razões sociais virava "ausente do PNCP" estando lá, e contrato
@@ -2018,6 +2038,32 @@ def _regressao_dado_nao_some() -> list[str]:
                 erros.append(
                     "regressão do dado: load_staged transformou VALOR em texto "
                     "ao proteger as colunas de dígitos — toda soma cai")
+
+            # 2b. O MESMO defeito, na coluna que a lista explícita não tinha:
+            #     `fornecedor_ni` (CNPJ do fornecedor no PNCP). Relida como int,
+            #     '00000424000156' virava 424000156 e o cruzamento portal × PNCP
+            #     deixava de casar todo CNPJ iniciado em 0 — 25 dos 39 "ausentes"
+            #     da rodada de 04/09/2026 estavam no PNCP. A proteção agora é por
+            #     padrão de nome, e vale para coluna que ainda não existe.
+            (config.STAGED_DIR / "pncp_contratos.csv").write_text(
+                "fornecedor_ni,valorGlobal,orgao_papel\n00000424000156,14000000.0,alvo\n")
+            (config.STAGED_DIR / "sancoes.csv").write_text(
+                "cadastro,documento,categoria\nceis,00716656000109,Inidoneidade\n")
+            (config.STAGED_DIR / "qualquer.csv").write_text(
+                "id_cnpj_do_fornecedor,cpf_socio,ni_orgao,x\n00012345000100,00012345678,00123,1\n")
+            st = pipeline.load_staged()
+            for ds, col, esperado in (("pncp_contratos", "fornecedor_ni", "00000424000156"),
+                                      ("sancoes", "documento", "00716656000109"),
+                                      ("qualquer", "id_cnpj_do_fornecedor", "00012345000100"),
+                                      ("qualquer", "cpf_socio", "00012345678"),
+                                      ("qualquer", "ni_orgao", "00123")):
+                v = st[ds][col].iloc[0]
+                if v != esperado:
+                    erros.append(f"regressão do dado: {ds}.{col} relido como {v!r} "
+                                 f"(esperado {esperado!r}) — zero à esquerda perdido")
+            if not pd.api.types.is_numeric_dtype(st["qualquer"]["x"]):
+                erros.append("regressão do dado: o padrão de coluna-texto engoliu uma "
+                             "coluna numérica comum")
 
             # 3. Etapa que levanta não pode apagar o CSV bom da rodada anterior.
             (config.STAGED_DIR / "empenhos.csv").write_text(
