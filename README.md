@@ -22,6 +22,7 @@ rede de influência entre órgãos do sistema Confea/Crea e fornecedores suspeit
 
 ```bash
 pip install -r requirements.txt
+python main.py faltando --desde auto --ate 2026  # o que falta coletar, sem rede
 python main.py all --desde auto --ate 2026   # coleta + análise + relatório
 python main.py selftest                      # valida o pipeline sem rede (fixtures)
 ```
@@ -75,19 +76,40 @@ python main.py all --desde auto --ate 2026 --retomar
 ```
 
 A célula 1 do notebook faz isso. Reconectando, rode a mesma célula de coleta:
-`--retomar` pula cada etapa que já tem dado em disco. Etapa que veio **vazia**
-é tentada de novo de propósito — dataset zerado quase sempre é bloqueio por
-rajada (403), e 403 nunca é cacheado. O inventário da coleta é gravado mesmo
-quando a rodada aborta no meio, então dá para ver o que já veio.
+ela vai à rede **só pelos exercícios que ainda não vieram**. Etapa que veio
+**vazia** é tentada de novo de propósito — dataset zerado quase sempre é
+bloqueio por rajada (403), e 403 nunca é cacheado. O inventário da coleta é
+gravado mesmo quando a rodada aborta no meio, então dá para ver o que já veio.
 
-A retomada tem **dois níveis**. O grosso é o `--retomar` acima, que pula
-etapas inteiras. O fino é o checkpoint por **janela**: cada exercício coletado
-vira um arquivo em `data/raw/checkpoints/<etapa>/`, e a etapa só vai à rede
-pelas janelas que faltam. É a diferença entre "a sessão caiu em 2019 e
-voltamos de 2019" e "caiu em 2019 e a etapa recomeça de 2026". Como
-`data/raw` está no Drive, os checkpoints sobrevivem à desconexão. O exercício
-ainda em curso tem checkpoint com validade curta (12h), porque ele muda todo
-dia. Para ignorar checkpoints numa rodada, `QUEDA_CHECKPOINT=0`.
+A retomada tem **dois níveis**. O fino é o checkpoint por **janela**: cada
+exercício coletado vira um arquivo em `data/raw/checkpoints/<etapa>/`, e a
+etapa só vai à rede pelas janelas que faltam. É a diferença entre "a sessão
+caiu em 2019 e voltamos de 2019" e "caiu em 2019 e a etapa recomeça de 2026".
+Como `data/raw` está no Drive, os checkpoints sobrevivem à desconexão. O
+exercício ainda em curso tem checkpoint com validade curta (12h), porque ele
+muda todo dia. Para ignorar checkpoints numa rodada, `QUEDA_CHECKPOINT=0`.
+
+O grosso é o `--retomar`, que pula a etapa inteira — e ele **conta as janelas**
+antes de pular. Uma etapa que trouxe 2016-2025 e falhou em 2013-2015 tem linhas
+de sobra em `data/staged`; a versão anterior olhava só isso, dava a etapa por
+pronta e o buraco não fechava em rodada nenhuma. Hoje ela é refeita, e refazer
+é barato: as janelas que já estão em checkpoint saem do disco, sem rede.
+
+`python main.py faltando` responde, sem gastar uma requisição, quantos
+exercícios faltam em cada etapa e quais são — é o mesmo laço da coleta rodando
+em seco, para que o inventário não possa divergir do que a coleta faria.
+
+Um efeito de contar janelas: passadas 12h, o exercício em curso volta a contar
+como pendente (é o TTL do checkpoint do ano aberto, que muda todo dia) e as
+etapas anuais são refeitas — uma requisição cada, com as demais janelas saindo
+do disco. Rodar duas vezes dentro das 12h continua quase de graça; depois
+delas, a rodada atualiza o exercício aberto em vez de não fazer nada.
+
+**A análise sempre acontece.** Se o portal bloquear por ritmo no meio, `all`
+não desiste da rodada: ele analisa o que já está em `data/staged`, entrega o
+relatório e sai com código **2** para dizer que a coleta ficou incompleta. Antes
+ele saía com 2 sem analisar nada, e quem operava do Colab descobria isso ao
+abrir um zip de 164 bytes.
 
 Toda requisição da rodada é registrada em `data/staged/_coleta_http.csv`:
 host, caminho, status, tentativa, se veio do cache e quantos itens vieram. É

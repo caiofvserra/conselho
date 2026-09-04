@@ -135,11 +135,23 @@ def _variantes_params(ano: int | None) -> list[dict]:
 _FORMATO_APRENDIDO: dict[str, frozenset] = {}
 
 
-def implanta_variantes(endpoint: str, ano: int | None = None) -> tuple[list, dict]:
+def implanta_variantes(endpoint: str,
+                       ano: int | None = None) -> tuple[list | None, dict]:
     """Tenta os formatos de parâmetro até um devolver dado.
 
-    Devolve (linhas_achatadas, params_vencedores). Um 400 por formato errado
-    era indistinguível de "não há dado" — esta função separa os dois casos.
+    Devolve (linhas, params_vencedores), e as linhas seguem a MESMA convenção
+    de `implanta`: `[]` quando o servidor respondeu que não há nada, e **None**
+    quando nenhum formato obteve resposta utilizável (400, 403 de sondagem,
+    payload nulo). Um 400 por formato errado era indistinguível de "não há
+    dado" — esta função separa os dois casos.
+
+    O `None` não é detalhe de tipo. `_anos_com_sondagem` grava um checkpoint
+    `.vazio` para toda janela que devolve lista, e checkpoint `.vazio` de
+    exercício encerrado vale para sempre: devolver `[]` numa janela que apenas
+    foi RECUSADA congelaria a recusa no Drive do operador, e a rodada seguinte
+    leria "vazio" do disco sem tocar na rede — exatamente o que a correção de
+    formato veio desfazer. A primeira versão desta função devolvia `[]` nos
+    dois casos.
 
     APRENDE O FORMATO. Chamada por janela numa série de vinte exercícios, a
     sondagem cega custaria até 5 requisições por ano só para redescobrir o
@@ -154,8 +166,13 @@ def implanta_variantes(endpoint: str, ano: int | None = None) -> tuple[list, dic
         preferido = [p for p in ordem if frozenset(p) == assinatura]
         ordem = preferido + [p for p in ordem if frozenset(p) != assinatura]
 
+    # Alguma variante chegou a obter resposta do servidor? É essa a diferença
+    # entre "não há dado neste exercício" e "nenhum formato foi aceito".
+    respondeu = False
     for params in ordem:
         bruto = implanta(endpoint, params or None)
+        if bruto is not None:
+            respondeu = True
         linhas = achatar_grupos(bruto)
         if linhas:
             if frozenset(params) != assinatura:
@@ -163,8 +180,12 @@ def implanta_variantes(endpoint: str, ano: int | None = None) -> tuple[list, dic
                          params or "sem parâmetros")
             _FORMATO_APRENDIDO[endpoint] = frozenset(params)
             return linhas, params
-    log.info("%s: nenhum formato de parâmetro devolveu dado", endpoint)
-    return [], {}
+    if respondeu:
+        log.info("%s: o servidor respondeu e não há linhas nesta janela", endpoint)
+        return [], {}
+    log.warning("%s: nenhum formato de parâmetro obteve resposta utilizável — "
+                "janela tratada como NÃO coletada, sem checkpoint", endpoint)
+    return None, {}
 
 
 def achatar_demonstrativo(rows: list, nivel: int = 0, pai: str = "") -> list[dict]:

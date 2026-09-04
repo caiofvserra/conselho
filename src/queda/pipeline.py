@@ -241,6 +241,64 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
     return None
 
 
+def _janela_estado(etapa: str, janela: str, ano: int | None = None) -> str | None:
+    """`"linhas"`, `"vazio"` ou `None` (não coletada) — sem abrir o CSV.
+
+    `_checkpoint_ler` responde a mesma pergunta, mas lendo o arquivo inteiro:
+    para o inventário são 17 etapas × ~14 exercícios, e ler centenas de
+    milhares de linhas só para saber se o arquivo existe transformaria um
+    comando de conferência num comando demorado.
+    """
+    if not _checkpoint_ligado():
+        return None
+    csv, vazio = _checkpoint_arquivos(etapa, janela)
+    if _checkpoint_utilizavel(csv, ano):
+        return "linhas"
+    if _checkpoint_utilizavel(vazio, ano):
+        return "vazio"
+    return None
+
+
+def janelas_pendentes(etapa: str, ate: int, desde: int | None) -> list[int]:
+    """Exercícios que esta etapa iria buscar NA REDE, sem tocar na rede.
+
+    É um ensaio de `_anos_com_sondagem`: mesma ordem (de `ate` para trás),
+    mesmo piso, mesmo critério de parada da sondagem retroativa. Escrito como
+    espelho de propósito — uma reimplementação com regra própria passaria a
+    divergir do laço real na primeira vez que ele mudasse, e um inventário que
+    mente sobre o que falta é pior que nenhum inventário.
+
+    Janela sem checkpoint zera o contador de vazios pelo mesmo motivo que no
+    laço real: com um exercício desconhecido no meio, não dá para afirmar que
+    dois vazios foram consecutivos.
+
+    Consequência do TTL que vale declarar: o checkpoint do exercício EM CURSO
+    expira em 12h, então passadas 12h o ano corrente reaparece como pendente e
+    a etapa é refeita. Isso é o comportamento desejado — o exercício aberto
+    muda todo dia —, e o custo é uma requisição por etapa, porque as demais
+    janelas continuam saindo do disco. O que mudou é o significado de rodar
+    duas vezes seguidas: dentro das 12h, quase de graça; depois delas, a rodada
+    atualiza o exercício em curso em vez de não fazer nada.
+    """
+    pendentes: list[int] = []
+    vazios = 0
+    ano = ate
+    piso = desde or config.ANO_PISO
+    while ano >= piso:
+        estado = _janela_estado(etapa, str(ano), ano)
+        if estado is None:
+            pendentes.append(ano)
+            vazios = 0
+        elif estado == "vazio":
+            vazios += 1
+            if desde is None and vazios >= config.SONDAGEM_VAZIOS:
+                break
+        else:
+            vazios = 0
+        ano -= 1
+    return pendentes
+
+
 def _plano_para_csv(rows: list) -> bool:
     """Só vira checkpoint o payload PLANO.
 
@@ -1010,6 +1068,98 @@ def _ja_coletado(nome: str) -> pd.DataFrame | None:
     return df
 
 
+# Etapa -> chave(s) de checkpoint por janela ANUAL. A chave é o argumento
+# `etapa=` que cada stage_* passa a `_anos_com_sondagem`, e ela NEM SEMPRE é o
+# nome da etapa: `comparativo_receita` grava duas janelas (a sua e a do
+# balanço orçamentário), e é por isso que este mapa é explícito em vez de
+# derivado do nome. Etapa fora do mapa não tem retomada fina por exercício:
+#
+#   processos_itens        cada processo carrega os ITENS aninhados, e uma
+#                          lista dentro de um CSV vira texto irreversível — a
+#                          retomada dela é o cache HTTP;
+#   indenizacoes_endpoint  varre exercícios em endpoints de sondagem, sem
+#                          janela própria;
+#   plano_contas,          consultas de tiro único (foto do momento), sem
+#   quadro_pessoal,        exercício a percorrer;
+#   mandatarios
+#   pncp_contratos         janela MENSAL e uma subpasta por CNPJ
+#                          (`pncp_contratos/<cnpj>/AAAAMM`), coberta pelo mapa
+#                          abaixo.
+ETAPAS_JANELA_ANUAL: dict[str, tuple[str, ...]] = {
+    "empenhos": ("empenhos",),
+    "pagamentos": ("pagamentos",),
+    "contratos": ("contratos",),
+    "aditivos": ("aditivos",),
+    "licitacoes": ("licitacoes",),
+    "convenios": ("convenios",),
+    "comparativo_despesa": ("comparativo_despesa",),
+    "despesas_centro_custo": ("despesas_centro_custo",),
+    "demonstrativo": ("demonstrativo",),
+    "atas": ("atas",),
+    "comparativo_receita": ("comparativo_receita", "balanco_orcamentario"),
+}
+
+
+def etapa_pronta(nome: str, desde: int | None,
+                 ate: int) -> tuple[pd.DataFrame | None, list[int]]:
+    """(DataFrame pronto ou None, exercícios pendentes).
+
+    A regra do `--retomar`, num lugar só: a etapa está pronta quando tem linhas
+    em `data/staged` **e** nenhuma janela ficou faltando. `inventario` e
+    `build_staged` chamam esta função em vez de cada um ter a sua versão —
+    duas versões da mesma regra divergem, e a que diverge em silêncio é a que
+    decide ir ou não à rede.
+    """
+    pronto = _ja_coletado(nome)
+    pendentes: list[int] = []
+    for chave in ETAPAS_JANELA_ANUAL.get(nome, ()):
+        pendentes += janelas_pendentes(chave, ate, desde)
+    pendentes = sorted(set(pendentes), reverse=True)
+    return (pronto if pronto is not None and not pendentes else None), pendentes
+
+
+def inventario(desde: int | None, ate: int) -> pd.DataFrame:
+    """O que já está em disco e o que falta — sem uma requisição sequer.
+
+    Uma coluna por pergunta que o operador faz antes de decidir se vale
+    reconectar: quantas linhas já foram normalizadas, quantos exercícios estão
+    em checkpoint, e QUAIS exercícios a próxima rodada ainda iria buscar.
+    """
+    linhas = []
+    for nome, chaves in ETAPAS_JANELA_ANUAL.items():
+        staged = _ja_coletado(nome)
+        _, pend = etapa_pronta(nome, desde, ate)
+        com_dado = vazias = 0
+        for chave in chaves:
+            for ano in range(desde or config.ANO_PISO, ate + 1):
+                estado = _janela_estado(chave, str(ano), ano)
+                com_dado += estado == "linhas"
+                vazias += estado == "vazio"
+        linhas.append({
+            "etapa": nome,
+            "linhas_staged": 0 if staged is None else int(len(staged)),
+            "janelas_com_dado": com_dado,
+            "janelas_vazias": vazias,
+            "janelas_faltando": len(pend),
+            "exercicios_faltando": ", ".join(str(a) for a in pend),
+            "vai_a_rede": bool(pend),
+        })
+    for nome in ("processos_itens", "indenizacoes_endpoint", "plano_contas",
+                 "quadro_pessoal", "mandatarios", "pncp_contratos"):
+        staged = _ja_coletado(nome)
+        linhas.append({
+            "etapa": nome,
+            "linhas_staged": 0 if staged is None else int(len(staged)),
+            "janelas_com_dado": "", "janelas_vazias": "", "janelas_faltando": "",
+            # Sem janela anual própria: o critério é o antigo — vazio se
+            # recoleta, cheio se pula. Declarado, para o inventário não dar a
+            # entender que conferiu exercício por exercício aqui.
+            "exercicios_faltando": "sem janela anual (ver ETAPAS_JANELA_ANUAL)",
+            "vai_a_rede": staged is None,
+        })
+    return pd.DataFrame(linhas)
+
+
 def build_staged(desde: int | None, ate: int, *,
                  retomar: bool = False) -> dict[str, pd.DataFrame]:
     """Executa toda a coleta. desde=None ativa sondagem retroativa.
@@ -1048,7 +1198,19 @@ def build_staged(desde: int | None, ate: int, *,
     try:
         for nome, executar in etapas:
             if retomar:
-                pronto = _ja_coletado(nome)
+                # CSV cheio NÃO é etapa completa. Uma etapa que trouxe
+                # 2016-2025 e falhou em 2013-2015 tem linhas de sobra em
+                # `staged` e três exercícios faltando — e a versão anterior a
+                # pulava para sempre, porque olhava só se havia linhas. O
+                # buraco não se fechava em rodada nenhuma, e `--retomar` é o
+                # modo que o notebook usa SEMPRE. Refazer é barato: as janelas
+                # que já estão em checkpoint saem do disco, sem rede.
+                pronto, pendentes = etapa_pronta(nome, desde, ate)
+                if pronto is None and pendentes and _ja_coletado(nome) is not None:
+                    log.info("retomando: %s tem linhas mas faltam os exercícios "
+                             "%s — refazendo a etapa (as janelas já coletadas "
+                             "saem do disco, sem rede)",
+                             nome, ", ".join(map(str, pendentes)))
                 if pronto is not None:
                     log.info("retomando: %s já em disco (%d linhas) — pulando",
                              nome, len(pronto))

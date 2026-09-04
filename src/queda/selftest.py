@@ -977,6 +977,7 @@ def _confere_metricas(achados) -> list[str]:
                      f"{f.metricas.get('casados_por_numero')}, esperado None "
                      "(chave indisponível não casa zero: não é tentada)")
     erros.extend(_regressao_chave_empenho())
+    erros.extend(_regressao_retomada())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1073,6 +1074,142 @@ def _confere_metricas(achados) -> list[str]:
     exige("diagnostico-porque-vazio", "sem_publicacao", 1)
     exige("diagnostico-porque-vazio", "falha_da_coleta", 1)
     exige("diagnostico-porque-vazio", "indeterminadas", 1)
+    return erros
+
+
+def _regressao_retomada() -> list[str]:
+    """"Rodar só o que falta": a retomada vê o buraco, e a recusa não vira vazio.
+
+    Três defeitos concretos, todos no caminho que o notebook do Colab percorre
+    em TODA reconexão (`main.py all --retomar`):
+
+    1. `--retomar` olhava só se `data/staged/<etapa>.csv` tinha linhas. Uma
+       etapa que trouxe 2016-2025 e falhou em 2013-2015 parecia pronta, e o
+       buraco não fechava em rodada nenhuma.
+    2. `implanta_variantes` devolvia `[]` quando NENHUM formato de parâmetro era
+       aceito. `_anos_com_sondagem` grava `.vazio` para toda janela que devolve
+       lista, e `.vazio` de exercício encerrado vale para sempre — a recusa
+       virava permanente no Drive do operador, e a rodada seguinte lia "vazio"
+       do disco sem tocar na rede.
+    3. o inventário precisa parar de sondar exatamente onde o laço real para,
+       senão anuncia trabalho que não existe.
+
+    Usa exercícios ENCERRADOS (2020-2023) de propósito: o checkpoint do ano em
+    curso expira em 12h, e um teste que dependesse disso passaria ou falharia
+    conforme a hora do dia.
+    """
+    import tempfile
+    from pathlib import Path
+    from . import clients, pipeline
+
+    erros: list[str] = []
+    raw_orig, staged_orig = config.RAW_DIR, config.STAGED_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        config.RAW_DIR = base / "raw"
+        config.STAGED_DIR = base / "staged"
+        config.STAGED_DIR.mkdir(parents=True)
+        cp = config.RAW_DIR / "checkpoints"
+        try:
+            # empenhos: 2021-2023 em checkpoint, 2020 faltando; staged CHEIO
+            (cp / "empenhos").mkdir(parents=True)
+            for ano in (2021, 2022, 2023):
+                (cp / "empenhos" / f"{ano}.csv").write_text("NUMERO,VALOR\n1,10\n")
+            (config.STAGED_DIR / "empenhos.csv").write_text(
+                "_ano,NUMERO,VALOR\n2021,1,10\n")
+            # contratos: todas as janelas em checkpoint; staged CHEIO
+            (cp / "contratos").mkdir(parents=True)
+            for ano in range(2020, 2024):
+                (cp / "contratos" / f"{ano}.csv").write_text("NUMERO_CONTRATO\nCT-1\n")
+            (config.STAGED_DIR / "contratos.csv").write_text(
+                "_ano,NUMERO_CONTRATO\n2021,CT-1\n")
+
+            pronto, pend = pipeline.etapa_pronta("empenhos", 2020, 2023)
+            if pronto is not None or pend != [2020]:
+                erros.append(
+                    "regressão da retomada: etapa com CSV cheio e o exercício "
+                    f"2020 faltando foi dada por pronta (pendentes={pend}) — "
+                    "o buraco nunca fecharia")
+            pronto, pend = pipeline.etapa_pronta("contratos", 2020, 2023)
+            if pronto is None or pend:
+                erros.append(
+                    "regressão da retomada: etapa com todas as janelas em "
+                    f"checkpoint NÃO foi pulada (pendentes={pend}) — a "
+                    "retomada barata deixou de existir")
+
+            # sondagem retroativa: dois exercícios vazios seguidos encerram a
+            # busca, exatamente como em `_anos_com_sondagem`
+            (cp / "atas").mkdir(parents=True)
+            for ano in (2022, 2023):
+                (cp / "atas" / f"{ano}.vazio").write_text("x\n")
+            if pipeline.janelas_pendentes("atas", 2023, None) != []:
+                erros.append(
+                    "regressão da retomada: dois exercícios vazios seguidos "
+                    "deveriam encerrar a sondagem retroativa e não "
+                    f"encerraram ({pipeline.janelas_pendentes('atas', 2023, None)})")
+            if pipeline.janelas_pendentes("atas", 2023, 2020) != [2021, 2020]:
+                erros.append(
+                    "regressão da retomada: com --desde explícito a sondagem "
+                    "não pode parar nos vazios — esperado [2021, 2020], veio "
+                    f"{pipeline.janelas_pendentes('atas', 2023, 2020)}")
+
+            inv = pipeline.inventario(2020, 2023)
+            linha = inv[inv["etapa"] == "empenhos"].iloc[0]
+            if not linha["vai_a_rede"] or linha["exercicios_faltando"] != "2020":
+                erros.append(
+                    "regressão da retomada: o inventário não aponta o "
+                    f"exercício que falta (veio {linha['exercicios_faltando']!r}, "
+                    f"vai_a_rede={linha['vai_a_rede']})")
+
+            # A propriedade que dá nome ao modo: refazer a etapa vai à rede SÓ
+            # pelo buraco. Sem esta asserção, uma retomada que refizesse tudo
+            # passaria nos testes acima e torraria a cota do portal.
+            rede: list[int] = []
+
+            def _fake_ano(endpoint, ano, **kw):
+                rede.append(ano)
+                return [{"NUMERO": 9, "VALOR": 5.0,
+                         "DATA_EMPENHO": f"01/01/{ano}"}]
+
+            de_verdade = clients.implanta_ano
+            try:
+                clients.implanta_ano = _fake_ano
+                df = pipeline.stage_empenhos(2020, 2023)
+            finally:
+                clients.implanta_ano = de_verdade
+            if rede != [2020]:
+                erros.append(
+                    "regressão da retomada: a etapa refeita foi à rede pelos "
+                    f"exercícios {rede}, e só 2020 faltava — as janelas em "
+                    "checkpoint deveriam sair do disco")
+            if len(df) != 4:
+                erros.append(
+                    "regressão da retomada: 3 janelas do disco + 1 da rede "
+                    f"deveriam dar 4 linhas, deram {len(df)} — o dado do "
+                    "checkpoint não está sendo reaproveitado")
+        finally:
+            config.RAW_DIR, config.STAGED_DIR = raw_orig, staged_orig
+
+    # `[]` só quando o SERVIDOR respondeu; `None` quando nenhum formato passou
+    orig = clients.implanta
+    try:
+        clients.implanta = lambda ep, params=None: None      # 400/403: recusado
+        clients._FORMATO_APRENDIDO.clear()
+        if clients.implanta_variantes("Licitacoes", 2019)[0] is not None:
+            erros.append(
+                "regressão da retomada: formato recusado voltou a devolver "
+                "lista — `_anos_com_sondagem` gravaria `.vazio` e congelaria a "
+                "recusa no Drive do operador")
+        clients.implanta = lambda ep, params=None: []        # servidor: nada aqui
+        clients._FORMATO_APRENDIDO.clear()
+        if clients.implanta_variantes("Licitacoes", 2019)[0] != []:
+            erros.append(
+                "regressão da retomada: resposta vazia legítima do servidor "
+                "virou `None` — o exercício vazio deixaria de encerrar a "
+                "sondagem retroativa e a série histórica se estenderia sozinha")
+    finally:
+        clients.implanta = orig
+
     return erros
 
 

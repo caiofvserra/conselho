@@ -2,12 +2,19 @@
 """QUEDA — fiscalização de dados abertos do Crea-SP.
 
 Uso:
+  python main.py faltando [--desde AAAA|auto] [--ate AAAA]   # o que falta, sem rede
   python main.py fetch    [--desde AAAA|auto] [--ate AAAA]   # só coleta
   python main.py analyze                                     # checks sobre staged
   python main.py report                                      # regenera o HTML
   python main.py all      [--desde AAAA|auto] [--ate AAAA]   # tudo
   python main.py selftest                                    # pipeline com fixtures, sem rede
   python main.py llm                                         # prepara o modelo local (Ollama)
+
+`all` vai à rede SÓ pelo que falta (checkpoint por exercício em
+data/raw/checkpoints) e SEMPRE entrega o relatório: se a coleta abortar por
+bloqueio de ritmo, ele analisa o que já está em data/staged e sai com código 2
+para dizer que a coleta ficou incompleta. Rode `faltando` antes para ver o
+tamanho do que sobrou.
 
 A camada de IA é opcional e roda 100% local via Ollama — nenhum dado do
 conselho sai da máquina. Sem ela, o relatório sai completo, sem o resumo
@@ -21,6 +28,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from queda import config  # noqa: E402
@@ -30,7 +39,7 @@ def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("cmd", choices=["fetch", "analyze", "report", "all",
-                                   "selftest", "llm"])
+                                   "faltando", "selftest", "llm"])
     p.add_argument("--desde", default="auto",
                    help="ano inicial, ou 'auto' para sondar retroativamente (padrão)")
     p.add_argument("--ate", type=int, default=config.ANO_ATUAL)
@@ -76,16 +85,52 @@ def main():
 
     from queda.http import RateLimited
     desde = None if args.desde == "auto" else int(args.desde)
+
+    if args.cmd == "faltando":
+        inv = pipeline.inventario(desde, args.ate)
+        # max_colwidth=None: a coluna `exercicios_faltando` É a resposta do
+        # comando. Truncá-la com "..." esconderia justamente os anos que o
+        # operador veio conferir.
+        with pd.option_context("display.max_colwidth", None,
+                               "display.width", None,
+                               "display.max_rows", None):
+            print(inv.to_string(index=False))
+        falta = inv[inv["vai_a_rede"]]
+        if falta.empty:
+            print("\nNada a coletar: toda janela conferida já está em disco. "
+                  "`python main.py analyze` entrega o relatório sem rede.")
+        else:
+            print(f"\n{len(falta)} etapa(s) ainda iriam à rede: "
+                  f"{', '.join(falta['etapa'])}.\n"
+                  "`python main.py all --retomar` busca só essas — o resto sai "
+                  "do disco.")
+        return 0
+
+    # Coleta incompleta NÃO cancela a análise. O modo de falhar era este: o
+    # portal bloqueava por ritmo no meio, `all` saía com 2, e a rodada inteira
+    # terminava sem relatório — inclusive sobre as etapas que já tinham vindo.
+    # Quem operava do Colab descobria isso ao abrir um zip de 164 bytes.
+    coleta_incompleta = ""
     if args.cmd in ("fetch", "all"):
         try:
             staged = pipeline.build_staged(desde, args.ate, retomar=args.retomar)
         except RateLimited as e:
+            coleta_incompleta = str(e)
             print(f"\n⏳ {e}\n\nO progresso já baixado ficou em "
                   f"{config.RAW_DIR}. Rode a MESMA célula/comando de novo com "
-                  "`--retomar` — ele pula as etapas já concluídas e continua de "
-                  "onde parou. Se insistir, aumente THROTTLE_SECONDS em "
+                  "`--retomar` — ele vai à rede só pelos exercícios que ainda "
+                  "faltam. Se insistir, aumente THROTTLE_SECONDS em "
                   "src/queda/config.py.", file=sys.stderr)
-            return 2
+            if args.cmd == "fetch":
+                return 2
+            print("\nSeguindo para a análise do que JÁ está em data/staged — "
+                  "o relatório sai com o diagnóstico da coleta dizendo o que "
+                  "faltou.", file=sys.stderr)
+            staged = pipeline.load_staged()
+            if not staged:
+                print("Nada em data/staged: a coleta abortou antes de gravar a "
+                      "primeira etapa. Nada a analisar.", file=sys.stderr)
+                return 2
     else:
         staged = pipeline.load_staged()
         if not staged:
@@ -121,6 +166,14 @@ def main():
     for f in altas:
         print(f"  [ALTA] {f.titulo}")
     print(f"\nRelatório: {config.OUTPUT_DIR / 'report.html'}")
+    if coleta_incompleta:
+        # Relatório entregue, coleta pela metade: o código de saída diz a
+        # segunda parte, que o relatório sozinho não diria em voz alta.
+        print("\n⚠️  A COLETA NÃO COMPLETOU nesta rodada — o relatório acima "
+              "cobre só o que já estava em disco.\n    Rode `python main.py "
+              "faltando` para ver o que sobrou e `python main.py all "
+              "--retomar` para buscar só isso.", file=sys.stderr)
+        return 2
     return 0
 
 
