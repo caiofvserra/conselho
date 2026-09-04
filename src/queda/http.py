@@ -355,6 +355,28 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
     raise RuntimeError(f"Falha após retries: {url}") from last_err
 
 
+def get_text(url: str, params: dict | None = None):
+    """GET sem cache que devolve `(status, texto)` — ou None em erro de rede.
+
+    Para o que NÃO é JSON e nós queremos ler mesmo assim: a página HTML da
+    documentação Stoplight, de onde sai a URL do OpenAPI. `get_json` descarta
+    corpo não-JSON por desenho; aqui o corpo é o objetivo. Passa pelo mesmo
+    throttle e pelo mesmo ledger, para que a sondagem apareça na contabilidade
+    da rodada como qualquer outra requisição.
+    """
+    _throttle(url)
+    t0 = time.monotonic()
+    try:
+        r = session().get(url, params=params, timeout=config.TIMEOUT)
+    except requests.RequestException as e:
+        registrar(url, params, resultado=R_ERRO_REDE, status=type(e).__name__,
+                  tentativa=1, duracao=time.monotonic() - t0)
+        return None
+    registrar(url, params, resultado=R_OK if r.ok else R_RECUSADO,
+              status=r.status_code, tentativa=1, duracao=time.monotonic() - t0)
+    return r.status_code, r.text or ""
+
+
 def _guardar_corpo_nao_json(url: str, r) -> None:
     """Um 2xx que não é JSON é a única resposta que o ledger registrava sem
     dizer O QUE veio — e é justamente a que mais explica.

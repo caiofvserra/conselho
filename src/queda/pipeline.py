@@ -976,8 +976,14 @@ def stage_quadro_pessoal(ate=None):
     else:
         df = pd.DataFrame(clients.dados_abertos("quadro-colaboradores"))
         if df.empty:
-            linhas, _ = clients.implanta_variantes("QuadrosPessoas", ate)
-            df = pd.DataFrame(linhas)
+            # A documentação de "Quadros de Pessoas" não declara parâmetro de
+            # consulta, e o endpoint pode morar sob outro prefixo — as duas
+            # coisas ficam com `implanta_primeiro_nome`/`implanta`.
+            linhas, nome = clients.implanta_primeiro_nome(
+                config.ENDPOINT_CANDIDATOS["quadro_pessoal"], ate)
+            if nome:
+                log.info("quadro_pessoal: veio de %s", nome)
+            df = pd.DataFrame(linhas or [])
     if not df.empty:
         df["nome"] = _primeira_coluna(df, "nome", "NOME", "NOME_PESSOA")
         df["vinculo"] = _primeira_coluna(df, "vinculo", "VINCULO", "TIPO_VINCULO",
@@ -1008,8 +1014,13 @@ def stage_mandatarios(ate=None):
     else:
         df = pd.DataFrame(clients.dados_abertos("mandatarios"))
         if df.empty:
-            linhas, _ = clients.implanta_variantes("Conselheiros", ate)
-            df = pd.DataFrame(linhas)
+            # "Rol de Mandatários" é endpoint próprio na documentação;
+            # `Conselheiros` (o que chamávamos) existe e responde vazio.
+            linhas, nome = clients.implanta_primeiro_nome(
+                config.ENDPOINT_CANDIDATOS["mandatarios"], ate)
+            if nome:
+                log.info("mandatarios: veio de %s", nome)
+            df = pd.DataFrame(linhas or [])
     if not df.empty:
         df["nome"] = _primeira_coluna(df, "nomeMandatario", "NOME_MANDATARIO",
                                       "NOME_CONSELHEIRO", "NOME")

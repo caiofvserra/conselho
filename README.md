@@ -113,13 +113,32 @@ que cada uma respondeu, e as respostas pedem remédios diferentes:
 | 7 caminhos de diárias | 403 no mesmo host que serve Empenhos | o WAF barra esses caminhos; provavelmente não existem nesta instalação |
 | Dados Abertos (6 hosts) | 403, timeout, ou **200 sem JSON** em `servicos.creasp.org.br` | um host respondeu; o corpo agora fica em `data/raw/nao-json/` para leitura |
 
+A documentação pública do produto (a mesma API em todos os conselhos) está em
+`https://confea-br.implanta.net.br/transparencia/` — uma página Stoplight com
+todos os endpoints, agrupados: Compras/Serviços, Contabilidade,
+Contratos/Convênios/Licitações, Despesas, Diversos (Aspectos Gerais, **Rol de
+Mandatários**, Identificação, Planos de Contas, **Quadros de Pessoas**),
+**Passagens, Diárias e Deslocamentos** (cinco endpoints) e Portal da
+Transparência. Três coisas que ela já ensinou:
+
+- o exemplo cURL chama `/transparencia/api/...`, e nós chamamos
+  `/portalTransparencia/api/v1.0/...`. Os dois prefixos existem no Crea-SP
+  (o antigo serve Empenhos com dado); a hipótese é que QuadrosPessoas,
+  mandatários e diárias só respondam no documentado. `IMPLANTA_PREFIXOS` faz
+  a coleta tentar o segundo prefixo quando o primeiro vier vazio ou recusado;
+- "Rol de Mandatários" é um endpoint próprio. Chamávamos `Conselheiros`, que
+  existe e responde vazio — `ENDPOINT_CANDIDATOS` tenta os nomes prováveis;
+- Quadros de Pessoas **não tem parâmetro de consulta** na documentação. Os
+  cinco formatos que mandávamos eram ignorados, não recusados.
+
 Adivinhar formato custa cinco requisições por janela num portal que responde
 403 por rajada. Dois caminhos custam quase nada:
 
-1. **`python main.py sondar`** tenta os caminhos usuais do contrato da API
-   (swagger) nos dois serviços, guarda o que responder em `data/raw/swagger/`
-   e imprime, endpoint a endpoint, o que a coleta MANDA contra o que o
-   contrato ACEITA.
+1. **`python main.py sondar`** abre a página de documentação, extrai dela a
+   URL do OpenAPI (`apiDescriptionUrl` do Stoplight) e baixa o contrato; se
+   isso falhar, tenta os caminhos usuais de swagger. Guarda o que responder em
+   `data/raw/swagger/` e imprime, endpoint a endpoint, o que a coleta MANDA
+   contra o que o contrato ACEITA. Também mede qual prefixo serve o quê.
 2. **O navegador.** Abrir o portal da transparência, F12 → aba Rede, clicar em
    "Quadro de Pessoal" (ou "Conselheiros", "Licitações") e ler a requisição
    que a própria página faz: o caminho e os parâmetros dela são os que a API

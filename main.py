@@ -84,6 +84,18 @@ def _sondar(pipeline) -> int:
     `data/raw/swagger/` e cruza com o que a coleta chama.
     """
     from queda import clients
+    # O experimento decisivo vem primeiro, porque é barato (~12 requisições) e
+    # responde sozinho à pergunta que importa: o Crea-SP não publica Quadro de
+    # Pessoas, ou publica em outro prefixo?
+    print("== qual prefixo serve o quê (exercício 2025) ==")
+    medidas = clients.medir_prefixos(2025)
+    largura = max(len(m["endpoint"]) for m in medidas)
+    for m in medidas:
+        print(f"  {m['endpoint']:{largura}}  {m['prefixo']:30}  {m['status']!s:9}  {m['itens']}")
+    print("  (controle: Empenhos deve vir com itens no primeiro prefixo. Um endpoint "
+          "vazio no primeiro e com itens no segundo é a hipótese confirmada; vazio "
+          "em todos é o órgão não publicando.)\n")
+
     encontrados = clients.descobrir_swagger()
     pasta = config.RAW_DIR / "swagger"
     if not encontrados:
@@ -92,12 +104,15 @@ def _sondar(pipeline) -> int:
             print("  ", u)
         for base in config.DADOS_ABERTOS_CANDIDATES:
             print("  ", base + "/swagger/...")
-        print("\nO que resolve isso em dois minutos, no navegador: abrir o portal "
-              "da transparência, F12 → aba Rede, clicar em 'Quadro de Pessoal' "
-              "(ou 'Conselheiros', 'Licitações') e copiar a requisição que a "
-              "própria página faz — o caminho e os parâmetros que ela manda são "
-              "os que a API aceita. Cole o JSON baixado em data/manual/<etapa>.json "
-              "e a etapa passa a ler dali sem ir à rede.")
+        print("\nA documentação pública da API está em "
+              "https://confea-br.implanta.net.br/transparencia/ (Stoplight). Nela: "
+              "clique em 'Busca as informações dos Quadros de Pessoas', copie a "
+              "URL completa do GET e o 'Request Sample' (cURL); faça o mesmo em "
+              "'Rol de Mandatários' e em 'Diárias/Deslocamentos'. Na aba Rede "
+              "(F12), filtre por 'json' ou 'yaml': o arquivo que a página carrega "
+              "é o contrato inteiro — cole a URL dele em DOC_IMPLANTA_CANDIDATOS "
+              "ou salve-o em data/raw/swagger/. O JSON de dados baixado pode ir "
+              "para data/manual/<etapa>.json: a etapa passa a ler dali, sem rede.")
         return 1
 
     pasta.mkdir(parents=True, exist_ok=True)

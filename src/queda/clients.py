@@ -25,10 +25,41 @@ def implanta(endpoint: str, params: dict | None = None):
     checkpoint por janela, que gravaria esse engano em disco e o repetiria em
     todas as rodadas seguintes.
     """
-    data = get_json(f"{config.IMPLANTA_BASE}/{endpoint}", params)
-    if data is None:
-        return None
-    return data if isinstance(data, list) else (data or [])
+    respondeu_vazio = False
+    for base in _bases_para(endpoint):
+        data = get_json(f"{base}/{endpoint}", params)
+        if data is None:
+            continue                       # recusado/inexistente NESTE prefixo
+        linhas = data if isinstance(data, list) else (data or [])
+        if linhas:
+            prefixo = base[len(config.IMPLANTA_HOST):]
+            if _PREFIXO_APRENDIDO.get(endpoint) != prefixo:
+                log.info("%s: responde com dado em %s — prefixo aprendido",
+                         endpoint, prefixo)
+                _PREFIXO_APRENDIDO[endpoint] = prefixo
+            return linhas
+        respondeu_vazio = True
+    # Vazio em todo prefixo que respondeu: o servidor disse que não há nada.
+    # Nenhum respondeu: a pergunta não foi aceita em lugar nenhum.
+    return [] if respondeu_vazio else None
+
+
+# Prefixo que devolveu DADO para cada endpoint. A API existe sob dois prefixos
+# no Crea-SP — `/portalTransparencia/api/v1.0` serve Empenhos, Pagamentos e
+# Contratos; `/transparencia/api` é o que a documentação pública do produto
+# usa. Um endpoint que vem vazio ou recusado no primeiro é tentado nos outros,
+# e o que responder com dado passa na frente nas chamadas seguintes. Empenhos
+# nunca paga esse custo: responde no primeiro e para ali.
+_PREFIXO_APRENDIDO: dict[str, str] = {}
+
+
+def _bases_para(endpoint: str) -> list[str]:
+    prefixos = list(config.IMPLANTA_PREFIXOS)
+    aprendido = _PREFIXO_APRENDIDO.get(endpoint)
+    if aprendido in prefixos:
+        prefixos.remove(aprendido)
+        prefixos.insert(0, aprendido)
+    return [config.IMPLANTA_HOST + p for p in prefixos]
 
 
 def implanta_ano(endpoint: str, ano: int, *, formato: str = "mensal"):
@@ -72,14 +103,24 @@ def implanta_probe_diarias(ano: int) -> dict[str, list]:
         # (`indenizacoes_endpoint`, `pncp_contratos`) nunca chegaram a ser
         # executadas em rodada nenhuma. Uma sondagem opcional não pode matar a
         # coleta obrigatória que vem depois dela.
-        data = get_json(
-            f"{config.IMPLANTA_BASE}/{ep}",
-            {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
-            rate_limit_retries=0)
+        # A documentação lista cinco endpoints em "Passagens, Diárias e
+        # Deslocamentos" — eles EXISTEM no produto. Os 403 que tomamos foram
+        # todos no prefixo antigo; o caminho só é dado por morto se falhar em
+        # todos os prefixos.
+        data = None
+        for base in _bases_para(ep):
+            data = get_json(
+                f"{base}/{ep}",
+                {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
+                rate_limit_retries=0)
+            if data is not None:
+                if data:
+                    _PREFIXO_APRENDIDO[ep] = base[len(config.IMPLANTA_HOST):]
+                break
         if data:
             found[ep] = data
         elif data is None:
-            # 404/400/403 na sondagem: o caminho não serve
+            # 404/400/403 em TODOS os prefixos: o caminho não serve
             _PROBE_MORTOS.add(ep)
     return found
 
@@ -96,6 +137,100 @@ def implanta_datas(endpoint: str, ano: int):
 def implanta_exercicio(endpoint: str, ano: int):
     """Endpoints que usam o parâmetro `exercicio`."""
     return implanta(endpoint, {"exercicio": ano})
+
+
+_NOME_APRENDIDO: dict[str, str] = {}
+
+
+def implanta_primeiro_nome(candidatos: list[str], ano: int | None = None, *,
+                           sem_filtro: bool = True) -> tuple[list | None, str | None]:
+    """Tenta NOMES de endpoint até um devolver dado. Devolve (linhas, nome).
+
+    A documentação lista "Rol de Mandatários" como endpoint próprio; nós
+    chamávamos `Conselheiros`, que existe e responde vazio — quase certamente
+    outro endpoint. Como o nome exato não está visível na captura, os
+    prováveis entram em ordem e o que responder com dado fica aprendido.
+
+    Custo contido de propósito: a primeira passada chama cada nome SEM
+    parâmetro (a documentação de Quadros de Pessoas não declara nenhum), e só
+    os nomes que responderam (mesmo vazio) ganham a segunda passada com os
+    formatos de parâmetro. Nome que não responde em prefixo nenhum não merece
+    cinco variantes.
+
+    Mesma convenção de `implanta`: `[]` = algum nome respondeu vazio;
+    `None` = nenhum respondeu.
+    """
+    chave = "|".join(candidatos)
+    ordem = list(candidatos)
+    aprendido = _NOME_APRENDIDO.get(chave)
+    if aprendido in ordem:
+        ordem.remove(aprendido)
+        ordem.insert(0, aprendido)
+
+    responderam: list[str] = []
+    for nome in ordem:
+        linhas = implanta(nome, None) if sem_filtro else None
+        if linhas:
+            _NOME_APRENDIDO[chave] = nome
+            return linhas, nome
+        if linhas is not None:
+            responderam.append(nome)
+    if not sem_filtro:
+        responderam = ordem
+    for nome in responderam:
+        linhas, _ = implanta_variantes(nome, ano, sem_filtro=False)
+        if linhas:
+            _NOME_APRENDIDO[chave] = nome
+            return linhas, nome
+    return ([] if responderam else None), None
+
+
+def extrair_api_description_url(html: str, base_url: str) -> str | None:
+    """URL do OpenAPI declarada numa página Stoplight Elements.
+
+    A documentação pública do produto é uma página `<elements-api
+    apiDescriptionUrl="...">` (é o `web-components.min.js` do Stoplight que
+    aparece na aba Rede). O atributo aponta para o contrato completo — todos os
+    caminhos e parâmetros — e lê-lo é o que substitui adivinhar.
+    """
+    from urllib.parse import urljoin
+    m = re.search(r'api[-_]?description[-_]?url\s*=\s*["\']([^"\']+)["\']', html or "", re.I)
+    if not m:
+        m = re.search(r'["\']([^"\']+\.(?:json|ya?ml))["\'][^>]*(?:openapi|swagger)', html or "", re.I)
+    return urljoin(base_url, m.group(1)) if m else None
+
+
+def medir_prefixos(ano: int) -> list[dict]:
+    """Qual prefixo serve o quê — o experimento decisivo, em ~12 requisições.
+
+    Para cada endpoint suspeito e um de controle, chama cada prefixo uma vez e
+    anota status e quantidade. É o que separa "o Crea-SP não publica Quadro de
+    Pessoas" de "publica, mas em outro caminho".
+    """
+    from .http import get_text
+    import json as _json
+    janela = {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"}
+    alvos = [("Empenhos (controle)", "Empenhos", janela),
+             ("QuadrosPessoas", "QuadrosPessoas", None),
+             *[(f"mandatários: {n}", n, None) for n in config.ENDPOINT_CANDIDATOS["mandatarios"]],
+             ("DiariasDeslocamentos", "DiariasDeslocamentos", janela),
+             ("Licitacoes", "Licitacoes", janela)]
+    out: list[dict] = []
+    for rotulo, ep, params in alvos:
+        for prefixo in config.IMPLANTA_PREFIXOS:
+            r = get_text(f"{config.IMPLANTA_HOST}{prefixo}/{ep}", params)
+            if r is None:
+                out.append({"endpoint": rotulo, "prefixo": prefixo, "status": "erro-rede", "itens": ""})
+                continue
+            status, texto = r
+            itens: str
+            try:
+                data = _json.loads(texto)
+                itens = str(len(data)) if isinstance(data, list) else "objeto"
+            except ValueError:
+                itens = "sem JSON" if status < 400 else ""
+            out.append({"endpoint": rotulo, "prefixo": prefixo, "status": status, "itens": itens})
+    return out
 
 
 def achatar_grupos(rows) -> list[dict]:
@@ -251,7 +386,27 @@ def descobrir_swagger() -> list[dict]:
     sem cache e sem espera por rate-limit: um 403 aqui é "este caminho não
     serve", e insistir custaria minutos por candidato.
     """
+    from .http import get_text
     achados: list[dict] = []
+    # 1) a página de documentação declara a URL do contrato — ler é melhor que
+    #    adivinhar, e vale para qualquer versão do produto.
+    for url_doc in config.DOC_IMPLANTA_CANDIDATOS:
+        r = get_text(url_doc)
+        if not r or r[0] >= 400:
+            continue
+        spec_url = extrair_api_description_url(r[1], url_doc)
+        if not spec_url:
+            continue
+        try:
+            data = get_json(spec_url, use_cache=False, rate_limit_retries=0, retries=0)
+        except RuntimeError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("paths"), dict):
+            log.info("swagger encontrado via documentação: %s (%d caminho(s))",
+                     spec_url, len(data["paths"]))
+            achados.append({"fonte": "implanta", "url": spec_url, "spec": data})
+            return achados
+    # 2) caminhos usuais
     candidatos = [("implanta", u) for u in config.SWAGGER_CANDIDATOS_IMPLANTA]
     for base in config.DADOS_ABERTOS_CANDIDATES:
         for suf in config.SWAGGER_CANDIDATOS_DADOS_ABERTOS_SUFIXOS:
@@ -285,8 +440,9 @@ ENDPOINTS_IMPLANTA_USADOS: dict[str, str] = {
     "AtasColegiados": "sondagem: exercicio | referencia* | data* | vigencia*",
     "BalancoOrcamentario": "referenciaInicio/referenciaTermino (MM/AAAA)",
     "ComparativoReceita": "referenciaInicio/referenciaTermino (MM/AAAA)",
-    "QuadrosPessoas": "sondagem: sem filtro | exercicio | referencia* | data* | vigencia*",
-    "Conselheiros": "sondagem: sem filtro | exercicio | referencia* | data* | vigencia*",
+    "QuadrosPessoas": "sem parâmetro (a documentação não declara nenhum); variantes só se responder vazio",
+    **{n: "candidato a 'Rol de Mandatários': sem parâmetro, depois variantes"
+       for n in config.ENDPOINT_CANDIDATOS["mandatarios"]},
     **{ep: "sondagem: referenciaInicio/referenciaTermino" for ep in DIARIAS_PROBE},
 }
 

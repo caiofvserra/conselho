@@ -37,7 +37,42 @@ def onde_estao_os_dados() -> str:
                "  (efêmero: some se a sessão cair)"))
 
 # ---------------------------------------------------------------- fontes
-IMPLANTA_BASE = "https://crea-sp.implanta.net.br/portalTransparencia/api/v1.0"
+IMPLANTA_HOST = "https://crea-sp.implanta.net.br"
+# Prefixos da API. O primeiro é o que serve Empenhos, Pagamentos e Contratos
+# com 200 e dado. O segundo é o que a DOCUMENTAÇÃO pública do produto usa
+# (https://confea-br.implanta.net.br/transparencia/ — Stoplight, mesma API em
+# todos os conselhos): o exemplo cURL dela chama `/transparencia/api/...`.
+# Na rodada de 04/09/2026, QuadrosPessoas e Conselheiros devolveram 200 com
+# lista vazia no primeiro prefixo, e os cinco caminhos de diárias, 403 — a
+# hipótese a testar é que esses endpoints só existem sob o prefixo documentado
+# e o WAF responde 403 para rota inexistente no antigo. Um endpoint que vier
+# vazio ou recusado no primeiro prefixo é tentado nos seguintes, UMA vez, e o
+# prefixo que responder com dado fica aprendido para o resto da rodada.
+IMPLANTA_PREFIXOS = ["/portalTransparencia/api/v1.0",
+                     "/transparencia/api/v1.0",
+                     "/transparencia/api"]
+IMPLANTA_BASE = IMPLANTA_HOST + IMPLANTA_PREFIXOS[0]
+
+# Nomes candidatos por dataset, na ordem de tentativa. A documentação lista
+# "Rol de Mandatários" em Diversos; nós chamávamos `Conselheiros`, que responde
+# 200 vazio — provavelmente um endpoint que existe e não é esse. O primeiro
+# nome que devolver dado fica aprendido.
+ENDPOINT_CANDIDATOS = {
+    "mandatarios": ["RolMandatarios", "Mandatarios", "RolDeMandatarios",
+                    "Conselheiros"],
+    "quadro_pessoal": ["QuadrosPessoas", "QuadroPessoas", "QuadrosPessoal"],
+}
+
+# Onde a documentação Stoplight do produto mora, para `sondar` extrair o
+# `apiDescriptionUrl` (a URL do OpenAPI) do HTML em vez de adivinhar. O host
+# do Confea entra porque é o que a documentação pública usa — o CONTRATO é o
+# mesmo produto; só o dado é de outro conselho.
+DOC_IMPLANTA_CANDIDATOS = [
+    "https://crea-sp.implanta.net.br/transparencia/",
+    "https://crea-sp.implanta.net.br/transparencia/api-docs",
+    "https://confea-br.implanta.net.br/transparencia/",
+    "https://confea-br.implanta.net.br/transparencia/api-docs",
+]
 
 # O swagger do serviço de Dados Abertos publica apenas `servers: /service-api`.
 # O host é descoberto em tempo de execução testando os candidatos abaixo.
@@ -109,6 +144,14 @@ ORGAOS_RELACIONADOS_RAZAO = [o["razao"] for o in ORGAOS_RELACIONADOS]
 # parâmetro que conhecemos e devolveram lista vazia para todos — o que sugere
 # um parâmetro que não estamos mandando, e só o contrato diz qual.
 SWAGGER_CANDIDATOS_IMPLANTA = [
+    # prefixo documentado primeiro — é onde a doc Stoplight vive
+    "https://crea-sp.implanta.net.br/transparencia/swagger/v1.0/swagger.json",
+    "https://crea-sp.implanta.net.br/transparencia/api/swagger/v1.0/swagger.json",
+    "https://crea-sp.implanta.net.br/transparencia/api/v1.0/swagger.json",
+    "https://crea-sp.implanta.net.br/transparencia/openapi.json",
+    "https://confea-br.implanta.net.br/transparencia/swagger/v1.0/swagger.json",
+    "https://confea-br.implanta.net.br/transparencia/api/swagger/v1.0/swagger.json",
+    "https://confea-br.implanta.net.br/transparencia/openapi.json",
     "https://crea-sp.implanta.net.br/portalTransparencia/swagger/v1.0/swagger.json",
     "https://crea-sp.implanta.net.br/portalTransparencia/swagger/v1/swagger.json",
     "https://crea-sp.implanta.net.br/portalTransparencia/api/swagger/v1.0/swagger.json",

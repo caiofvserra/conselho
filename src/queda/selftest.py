@@ -1021,6 +1021,7 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_recusa_do_portal())
     erros.extend(_regressao_coleta_converge())
     erros.extend(_regressao_sondagem_e_orgaos())
+    erros.extend(_regressao_prefixo_e_nome())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1366,6 +1367,128 @@ def _regressao_recusa_do_portal() -> list[str]:
                 os.environ.pop("QUEDA_CHECKPOINT", None)
             else:
                 os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
+    return erros
+
+
+def _regressao_prefixo_e_nome() -> list[str]:
+    """O que a documentação pública da API ensinou, trancado.
+
+    A captura da página Stoplight (confea-br.implanta.net.br/transparencia/)
+    mostrou três coisas: o exemplo cURL chama `/transparencia/api/...` e nós
+    chamamos `/portalTransparencia/api/v1.0/...`; "Rol de Mandatários" é um
+    endpoint próprio e nós chamávamos `Conselheiros`; Quadros de Pessoas não
+    declara parâmetro de consulta. As peças abaixo agem sobre isso sem poder
+    tocar o portal (o proxy desta sessão bloqueia o host), então o teste fixa
+    o CONTRATO das funções — o que a rodada no Colab vai confirmar ou refutar.
+    """
+    from . import clients, http
+
+    erros: list[str] = []
+    guardado = (clients.get_json, http.get_text, dict(clients._PREFIXO_APRENDIDO),
+                dict(clients._NOME_APRENDIDO), dict(clients._FORMATO_APRENDIDO))
+    host = config.IMPLANTA_HOST
+    try:
+        # 1. Prefixo: vazio no antigo, dado no documentado → aprende; o controle
+        #    (Empenhos) responde no primeiro e não paga requisição extra.
+        chamadas: list[str] = []
+        dados = {"/transparencia/api/v1.0/QuadrosPessoas":
+                 [{"TITULO": "Efetivos", "PESSOAS": [{"NOME": "A"}]}],
+                 "/portalTransparencia/api/v1.0/Empenhos": [{"NUMERO": 1}]}
+
+        def _fake(url, params=None, **kw):
+            caminho = url[len(host):]
+            chamadas.append(caminho)
+            if caminho in dados:
+                return dados[caminho]
+            return [] if caminho.endswith("/QuadrosPessoas") else None
+
+        clients.get_json = _fake
+        clients._PREFIXO_APRENDIDO.clear()
+        r = clients.implanta("QuadrosPessoas")
+        if not r or clients._PREFIXO_APRENDIDO.get("QuadrosPessoas") != "/transparencia/api/v1.0":
+            erros.append("prefixo: QuadrosPessoas vazio no prefixo antigo não foi "
+                         "buscado no documentado — o dado que existe em outro "
+                         "caminho continua saindo como 'o órgão não publica'")
+        chamadas.clear()
+        clients.implanta("QuadrosPessoas")
+        if chamadas != ["/transparencia/api/v1.0/QuadrosPessoas"]:
+            erros.append(f"prefixo: a segunda chamada não foi direto ao aprendido ({chamadas})")
+        chamadas.clear()
+        clients.implanta("Empenhos", {"referenciaInicio": "01/2025"})
+        if chamadas != ["/portalTransparencia/api/v1.0/Empenhos"]:
+            erros.append(f"prefixo: Empenhos pagou prefixo extra ({chamadas}) — são "
+                         "14 janelas × 11 etapas de requisições a mais por rodada")
+        if clients.implanta("Inexistente") is not None:
+            erros.append("prefixo: endpoint que ninguém aceita devolveu lista em vez "
+                         "de None — viraria checkpoint `.vazio`")
+
+        # 2. Nome: `RolMandatarios` com dado, `Conselheiros` vazio → aprende o
+        #    certo; nomes que não respondem não ganham as cinco variantes.
+        def _nomes(url, params=None, **kw):
+            ep = url.rsplit("/", 1)[1]
+            if ep == "RolMandatarios" and not params:
+                return [{"NOME_MANDATARIO": "X"}]
+            return [] if ep == "Conselheiros" else None
+
+        clients.get_json = _nomes
+        clients._PREFIXO_APRENDIDO.clear()
+        clients._NOME_APRENDIDO.clear()
+        linhas, nome = clients.implanta_primeiro_nome(
+            config.ENDPOINT_CANDIDATOS["mandatarios"], 2025)
+        if nome != "RolMandatarios" or not linhas:
+            erros.append(f"nome: 'Rol de Mandatários' não foi encontrado ({nome}) — "
+                         "mandatários seguem vazios chamando `Conselheiros`")
+        clients.get_json = lambda url, params=None, **kw: (
+            [] if url.endswith("/Conselheiros") else None)
+        clients._NOME_APRENDIDO.clear()
+        tentados: list[str] = []
+        orig_var = clients.implanta_variantes
+        clients.implanta_variantes = lambda ep, ano=None, **kw: (tentados.append(ep) or ([], {}))
+        try:
+            linhas, nome = clients.implanta_primeiro_nome(
+                config.ENDPOINT_CANDIDATOS["mandatarios"], 2025)
+        finally:
+            clients.implanta_variantes = orig_var
+        if (linhas, nome) != ([], None) or tentados != ["Conselheiros"]:
+            erros.append(f"nome: com todos vazios saiu {(linhas, nome)} e as variantes "
+                         f"rodaram em {tentados} — deviam rodar só no que respondeu")
+
+        # 3. A URL do contrato sai do HTML da documentação, relativa ou absoluta.
+        html = ('<elements-api apiDescriptionUrl="/transparencia/api/v1.0/swagger.json" '
+                'router="hash"></elements-api>')
+        u = clients.extrair_api_description_url(html, "https://confea-br.implanta.net.br/transparencia/")
+        if u != "https://confea-br.implanta.net.br/transparencia/api/v1.0/swagger.json":
+            erros.append(f"doc: apiDescriptionUrl relativa não resolveu ({u})")
+        if clients.extrair_api_description_url("<html>nada</html>", "https://x.test/") is not None:
+            erros.append("doc: página sem contrato devolveu uma URL inventada")
+
+        # 4. A medição de prefixos separa vazio, dado, sem-JSON e recusado.
+        def _texto(url, params=None):
+            if "/transparencia/api/v1.0/QuadrosPessoas" in url:
+                return (200, '[{"TITULO":"E","PESSOAS":[{}]}]')
+            if url.endswith("/QuadrosPessoas"):
+                return (200, "[]")
+            if "Empenhos" in url and "/portalTransparencia/" in url:
+                return (200, '[{"a":1},{"a":2}]')
+            if "Diarias" in url:
+                return (403, "<html>Forbidden</html>")
+            return (404, "")
+
+        http.get_text = _texto
+        por = {(r["endpoint"], r["prefixo"]): r for r in clients.medir_prefixos(2025)}
+        esperado = {("QuadrosPessoas", "/portalTransparencia/api/v1.0"): "0",
+                    ("QuadrosPessoas", "/transparencia/api/v1.0"): "1",
+                    ("Empenhos (controle)", "/portalTransparencia/api/v1.0"): "2"}
+        for k, v in esperado.items():
+            if por.get(k, {}).get("itens") != v:
+                erros.append(f"medição: {k} deu {por.get(k, {}).get('itens')!r}, esperado {v!r}")
+        if por.get(("DiariasDeslocamentos", "/transparencia/api"), {}).get("status") != 403:
+            erros.append("medição: o 403 das diárias não apareceu como status")
+    finally:
+        (clients.get_json, http.get_text, pref, nomes, fmt) = guardado
+        clients._PREFIXO_APRENDIDO.clear(); clients._PREFIXO_APRENDIDO.update(pref)
+        clients._NOME_APRENDIDO.clear(); clients._NOME_APRENDIDO.update(nomes)
+        clients._FORMATO_APRENDIDO.clear(); clients._FORMATO_APRENDIDO.update(fmt)
     return erros
 
 
