@@ -59,7 +59,10 @@ execução específica.
 - Cache de rede em `data/raw/` — reexecuções não repetem chamadas. Se a coleta
   parar (rate-limit, queda de sessão), rode de novo com `--retomar`: ele pula
   as etapas já concluídas e continua de onde parou.
-- **Google Colab**: abra `notebooks/queda_colab.ipynb`
+- **Google Colab**: abra `notebooks/queda_colab.ipynb` — seis células, todas
+  para executar em ordem a cada rodada; o que é diagnóstico pontual (`sondar`)
+  ou redundante (analisar sem coletar) não fica no caderno, porque célula
+  "opcional" acaba executada sempre e custa requisição
   ([link direto](https://colab.research.google.com/github/caiofvserra/queda/blob/claude/crea-sp-audit-tool-m9nw7t/notebooks/queda_colab.ipynb)) —
   recomendado, ver privacidade abaixo.
 
@@ -151,11 +154,14 @@ aparece na lista como se fosse da página. O contrato da API é o arquivo
 Adivinhar formato custa cinco requisições por janela num portal que responde
 403 por rajada. Dois caminhos custam quase nada:
 
-1. **`python main.py sondar`** abre a página de documentação, extrai dela a
+1. **`python main.py sondar`** — sob demanda, FORA do caderno: são ~60
+   requisições num portal que bloqueia por rajada, e o operador executa o
+   caderno inteiro a cada rodada. Abre a página de documentação, extrai dela a
    URL do OpenAPI (`apiDescriptionUrl` do Stoplight) e baixa o contrato; se
    isso falhar, tenta os caminhos usuais de swagger. Guarda o que responder em
    `data/raw/swagger/` e imprime, endpoint a endpoint, o que a coleta MANDA
-   contra o que o contrato ACEITA. Também mede qual prefixo serve o quê.
+   contra o que o contrato ACEITA. Mede qual prefixo serve o quê e quais hosts
+   `crea-XX` respondem.
 2. **O navegador.** Abrir o portal da transparência, F12 → aba Rede, clicar em
    "Quadro de Pessoal" (ou "Conselheiros", "Licitações") e ler a requisição
    que a própria página faz: o caminho e os parâmetros dela são os que a API
