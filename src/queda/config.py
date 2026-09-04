@@ -39,28 +39,35 @@ def onde_estao_os_dados() -> str:
 # ---------------------------------------------------------------- fontes
 IMPLANTA_HOST = "https://crea-sp.implanta.net.br"
 # Prefixos da API. O primeiro é o que serve Empenhos, Pagamentos e Contratos
-# com 200 e dado. O segundo é o que a DOCUMENTAÇÃO pública do produto usa
-# (https://confea-br.implanta.net.br/transparencia/ — Stoplight, mesma API em
-# todos os conselhos): o exemplo cURL dela chama `/transparencia/api/...`.
-# Na rodada de 04/09/2026, QuadrosPessoas e Conselheiros devolveram 200 com
-# lista vazia no primeiro prefixo, e os cinco caminhos de diárias, 403 — a
-# hipótese a testar é que esses endpoints só existem sob o prefixo documentado
-# e o WAF responde 403 para rota inexistente no antigo. Um endpoint que vier
-# vazio ou recusado no primeiro prefixo é tentado nos seguintes, UMA vez, e o
-# prefixo que responder com dado fica aprendido para o resto da rodada.
+# com 200 e dado. O segundo é o DOCUMENTADO: o exemplo cURL da documentação
+# do próprio Crea-SP (Stoplight, 04/09/2026) chama
+# `https://crea-sp.implanta.net.br/transparencia/api/v1.0/...`. Na rodada de
+# 04/09, QuadrosPessoas e Conselheiros devolveram 200 com lista vazia no
+# primeiro prefixo, e os cinco caminhos de diárias, 403 — a hipótese é que só
+# respondam no documentado, e o WAF devolva 403 para rota inexistente no
+# antigo. Um endpoint que vier vazio ou recusado no primeiro é tentado nos
+# seguintes, e o prefixo que responder com dado fica aprendido para o resto da
+# rodada. O antigo continua na frente porque é o que comprovadamente serve as
+# três maiores bases; trocar a ordem custaria uma requisição a mais por janela
+# na primeira rodada se o documentado não as servir.
 IMPLANTA_PREFIXOS = ["/portalTransparencia/api/v1.0",
                      "/transparencia/api/v1.0",
                      "/transparencia/api"]
 IMPLANTA_BASE = IMPLANTA_HOST + IMPLANTA_PREFIXOS[0]
 
-# Nomes candidatos por dataset, na ordem de tentativa. A documentação lista
-# "Rol de Mandatários" em Diversos; nós chamávamos `Conselheiros`, que responde
-# 200 vazio — provavelmente um endpoint que existe e não é esse. O primeiro
-# nome que devolver dado fica aprendido.
+# Nomes de endpoint por dataset, CONFIRMADOS pelo exemplo cURL da documentação
+# do próprio Crea-SP (04/09/2026):
+#   GET https://crea-sp.implanta.net.br/transparencia/api/v1.0/QuadrosPessoas
+#   GET https://crea-sp.implanta.net.br/transparencia/api/v1.0/Conselheiros
+# Os dois sem parâmetro de consulta. "Rol de Mandatários" na documentação É o
+# endpoint `Conselheiros` — o nome que usávamos estava certo; o que estava
+# errado era o PREFIXO. A versão anterior deste dicionário tinha palpites
+# (RolMandatarios, Mandatarios...) que custariam ~9 requisições em endpoints
+# inexistentes: saíram. Continua sendo lista para o dia em que um conselho
+# renomear algo.
 ENDPOINT_CANDIDATOS = {
-    "mandatarios": ["RolMandatarios", "Mandatarios", "RolDeMandatarios",
-                    "Conselheiros"],
-    "quadro_pessoal": ["QuadrosPessoas", "QuadroPessoas", "QuadrosPessoal"],
+    "mandatarios": ["Conselheiros"],
+    "quadro_pessoal": ["QuadrosPessoas"],
 }
 
 # Onde a documentação Stoplight do produto mora, para `sondar` extrair o

@@ -53,7 +53,10 @@ def session() -> requests.Session:
         s = requests.Session()
         s.headers.update({
             "User-Agent": config.USER_AGENT,
-            "Accept": "application/json",
+            # O que o cliente documentado manda (exemplo cURL da documentação
+            # do Crea-SP): `application/json, text/json`. Igualar custa nada e
+            # tira uma variável da conta quando um endpoint responde vazio.
+            "Accept": "application/json, text/json",
             "Accept-Language": "pt-BR,pt;q=0.9",
         })
         s.verify = _verify()

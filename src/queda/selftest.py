@@ -1422,25 +1422,40 @@ def _regressao_prefixo_e_nome() -> list[str]:
             erros.append("prefixo: endpoint que ninguém aceita devolveu lista em vez "
                          "de None — viraria checkpoint `.vazio`")
 
-        # 2. Nome: `RolMandatarios` com dado, `Conselheiros` vazio → aprende o
-        #    certo; nomes que não respondem não ganham as cinco variantes.
-        def _nomes(url, params=None, **kw):
-            ep = url.rsplit("/", 1)[1]
-            if ep == "RolMandatarios" and not params:
-                return [{"NOME_MANDATARIO": "X"}]
-            return [] if ep == "Conselheiros" else None
+        # 2. O cenário REAL, confirmado pelo cURL da documentação do Crea-SP:
+        #    `Conselheiros` é o nome certo; responde vazio no prefixo antigo e
+        #    com dado no documentado, SEM parâmetro. Tem de sair resolvido na
+        #    primeira passada (sem parâmetro) e com o prefixo aprendido.
+        chamadas.clear()
 
-        clients.get_json = _nomes
+        def _real(url, params=None, **kw):
+            caminho = url[len(host):]
+            chamadas.append((caminho, dict(params or {})))
+            if caminho == "/transparencia/api/v1.0/Conselheiros" and not params:
+                return [{"nomeMandatario": "X", "cargo": "Presidente"}]
+            return [] if caminho.endswith("/Conselheiros") else None
+
+        clients.get_json = _real
         clients._PREFIXO_APRENDIDO.clear()
         clients._NOME_APRENDIDO.clear()
         linhas, nome = clients.implanta_primeiro_nome(
             config.ENDPOINT_CANDIDATOS["mandatarios"], 2025)
-        if nome != "RolMandatarios" or not linhas:
-            erros.append(f"nome: 'Rol de Mandatários' não foi encontrado ({nome}) — "
-                         "mandatários seguem vazios chamando `Conselheiros`")
+        if nome != "Conselheiros" or not linhas:
+            erros.append(f"nome: Conselheiros com dado no prefixo documentado não "
+                         f"foi resolvido ({nome}) — mandatários seguem vazios")
+        if any(p for _, p in chamadas):
+            erros.append("nome: mandou parâmetro antes de tentar sem — a "
+                         "documentação não declara nenhum, e cada variante custa "
+                         "três requisições")
+        if clients._PREFIXO_APRENDIDO.get("Conselheiros") != "/transparencia/api/v1.0":
+            erros.append("nome: o prefixo documentado não ficou aprendido para "
+                         "Conselheiros")
+        # Nome que responde vazio em todo prefixo: só ele ganha a segunda
+        # passada com variantes, e o resultado é [] (respondeu), não None.
         clients.get_json = lambda url, params=None, **kw: (
             [] if url.endswith("/Conselheiros") else None)
         clients._NOME_APRENDIDO.clear()
+        clients._PREFIXO_APRENDIDO.clear()
         tentados: list[str] = []
         orig_var = clients.implanta_variantes
         clients.implanta_variantes = lambda ep, ano=None, **kw: (tentados.append(ep) or ([], {}))

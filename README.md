@@ -121,15 +121,26 @@ Mandatários**, Identificação, Planos de Contas, **Quadros de Pessoas**),
 **Passagens, Diárias e Deslocamentos** (cinco endpoints) e Portal da
 Transparência. Três coisas que ela já ensinou:
 
-- o exemplo cURL chama `/transparencia/api/...`, e nós chamamos
-  `/portalTransparencia/api/v1.0/...`. Os dois prefixos existem no Crea-SP
-  (o antigo serve Empenhos com dado); a hipótese é que QuadrosPessoas,
-  mandatários e diárias só respondam no documentado. `IMPLANTA_PREFIXOS` faz
-  a coleta tentar o segundo prefixo quando o primeiro vier vazio ou recusado;
-- "Rol de Mandatários" é um endpoint próprio. Chamávamos `Conselheiros`, que
-  existe e responde vazio — `ENDPOINT_CANDIDATOS` tenta os nomes prováveis;
-- Quadros de Pessoas **não tem parâmetro de consulta** na documentação. Os
-  cinco formatos que mandávamos eram ignorados, não recusados.
+- o exemplo cURL da documentação **do próprio Crea-SP** chama
+  `https://crea-sp.implanta.net.br/transparencia/api/v1.0/QuadrosPessoas` e
+  `.../transparencia/api/v1.0/Conselheiros`, sem parâmetro e com
+  `Accept: application/json, text/json`. Nós chamávamos
+  `/portalTransparencia/api/v1.0/...` — prefixo que existe e serve Empenhos com
+  dado, mas devolve vazio para esses dois. `IMPLANTA_PREFIXOS` faz a coleta
+  tentar o documentado quando o antigo vier vazio ou recusado, e aprender por
+  endpoint;
+- "Rol de Mandatários" na documentação **é** `Conselheiros`. O nome que
+  usávamos estava certo; o errado era o prefixo. (Uma versão intermediária
+  desta ferramenta chegou a listar palpites de nome — saíram.)
+- Quadros de Pessoas e Conselheiros **não têm parâmetro de consulta**. Os
+  cinco formatos que mandávamos eram ignorados, não recusados; a chamada passa
+  a ser sem parâmetro primeiro.
+
+Um cuidado ao copiar da aba Rede: em máquina com Kaspersky, o navegador injeta
+um script próprio em toda página (`me.kes.v2.scr.kaspersky-labs.com`), e ele
+aparece na lista como se fosse da página. O contrato da API é o arquivo
+`.json`/`.yaml` cujo host é `implanta.net.br` — filtre por `swagger` ou
+`openapi`.
 
 Adivinhar formato custa cinco requisições por janela num portal que responde
 403 por rajada. Dois caminhos custam quase nada:
