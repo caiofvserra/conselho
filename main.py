@@ -2,6 +2,7 @@
 """QUEDA — fiscalização de dados abertos do Crea-SP.
 
 Uso:
+  python main.py sondar                                      # o contrato da API: endpoints e parâmetros reais
   python main.py faltando [--desde AAAA|auto] [--ate AAAA]   # o que falta, sem rede
   python main.py fetch    [--desde AAAA|auto] [--ate AAAA]   # só coleta
   python main.py analyze                                     # checks sobre staged
@@ -51,7 +52,8 @@ def _parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("cmd", choices=["fetch", "analyze", "report", "all",
-                                   "faltando", "limpar", "selftest", "llm"])
+                                   "faltando", "limpar", "sondar", "selftest",
+                                   "llm"])
     p.add_argument("--etapa", default="",
                    help="limpar: etapas separadas por vírgula "
                         "(ex.: licitacoes,atas)")
@@ -68,6 +70,67 @@ def _parse_args():
                    help="rodar sem a camada de IA mesmo com o modelo local no ar")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
+
+
+def _sondar(pipeline) -> int:
+    """Buscar o CONTRATO da API em vez de adivinhar nome de endpoint e parâmetro.
+
+    Na rodada de 04/09/2026, QuadrosPessoas e Conselheiros aceitaram os cinco
+    formatos de parâmetro que conhecemos e devolveram lista vazia para todos;
+    Licitacoes devolveu 400 para um formato e 200-vazio para outro; sete
+    caminhos de diárias deram 403. Cada um desses casos tem uma explicação
+    diferente, e todas estão no swagger — se ele estiver publicado. Este
+    comando tenta os caminhos usuais, guarda o que responder em
+    `data/raw/swagger/` e cruza com o que a coleta chama.
+    """
+    from queda import clients
+    encontrados = clients.descobrir_swagger()
+    pasta = config.RAW_DIR / "swagger"
+    if not encontrados:
+        print("Nenhum caminho de swagger respondeu. Tentados:")
+        for u in config.SWAGGER_CANDIDATOS_IMPLANTA:
+            print("  ", u)
+        for base in config.DADOS_ABERTOS_CANDIDATES:
+            print("  ", base + "/swagger/...")
+        print("\nO que resolve isso em dois minutos, no navegador: abrir o portal "
+              "da transparência, F12 → aba Rede, clicar em 'Quadro de Pessoal' "
+              "(ou 'Conselheiros', 'Licitações') e copiar a requisição que a "
+              "própria página faz — o caminho e os parâmetros que ela manda são "
+              "os que a API aceita. Cole o JSON baixado em data/manual/<etapa>.json "
+              "e a etapa passa a ler dali sem ir à rede.")
+        return 1
+
+    pasta.mkdir(parents=True, exist_ok=True)
+    for i, e in enumerate(encontrados, 1):
+        host = e["url"].split("/")[2].replace(".", "_")
+        destino = pasta / f"{e['fonte']}-{host}-{i}.json"
+        destino.write_text(json.dumps(e["spec"], ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+        print(f"\n== {e['fonte']}: {e['url']}  →  {destino}")
+        resumo = clients.resumir_openapi(e["spec"])
+        largura = max((len(r["caminho"]) for r in resumo), default=20)
+        for r in resumo:
+            if r["metodo"] != "GET":
+                continue
+            q = ", ".join(r["query"]) or "(sem parâmetros de consulta)"
+            ob = f"  [obrigatórios: {', '.join(r['obrigatorios'])}]" if r["obrigatorios"] else ""
+            print(f"  {r['caminho']:{largura}}  {q}{ob}")
+
+        if e["fonte"] == "implanta":
+            print("\n  -- o que a coleta chama × o que o contrato declara --")
+            por_nome = {}
+            for r in resumo:
+                nome = r["caminho"].rstrip("/").split("/")[-1]
+                por_nome.setdefault(nome, r)
+            for ep, mandamos in clients.ENDPOINTS_IMPLANTA_USADOS.items():
+                r = por_nome.get(ep)
+                if r is None:
+                    print(f"  {ep:34} NÃO EXISTE no contrato  (mandamos: {mandamos})")
+                else:
+                    aceita = ", ".join(r["query"]) or "nenhum parâmetro"
+                    print(f"  {ep:34} aceita: {aceita}\n"
+                          f"  {'':34} mandamos: {mandamos}")
+    return 0
 
 
 def main():
@@ -103,6 +166,9 @@ def main():
 
     from queda.http import RateLimited
     desde = None if args.desde == "auto" else int(args.desde)
+
+    if args.cmd == "sondar":
+        return _sondar(pipeline)
 
     if args.cmd == "limpar":
         # A instrução anterior era "rode sem --retomar para forçar recoleta", e

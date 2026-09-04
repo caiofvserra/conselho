@@ -77,12 +77,48 @@ ORGAO_ALVO_CNPJ = ORGAO_ALVO_CNPJ_CANDIDATOS[0]
 ORGAO_ALVO_RAZAO = "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DE SAO PAULO"
 ORGAO_ALVO_UF = "SP"
 
-ORGAOS_RELACIONADOS_RAZAO = [
-    "CONSELHO FEDERAL DE ENGENHARIA E AGRONOMIA",
-    "MUTUA CAIXA DE ASSISTENCIA DOS PROFISSIONAIS DA ENGENHARIA",
-    "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DO RIO DE JANEIRO",
-    "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DE MINAS GERAIS",
-    "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO PARANA",
+# Órgãos relacionados para a rede entre entes do sistema. Cada um pode trazer
+# `cnpj_candidatos` (conferidos contra o PNCP antes do uso — um CNPJ errado aqui
+# é DESCARTADO com aviso, nunca aceito no escuro) e `termo_busca` (o texto que
+# vai na busca por razão social, quando o nome registrado no PNCP não começa
+# como o nosso).
+#
+# Na rodada de 04/09/2026 só o alvo foi resolvido. A busca do Confea devolveu
+# 1 resultado e ele não passou nos termos distintivos; a da Mútua devolveu
+# VAZIO, porque o termo era "mutua caixa de assistencia dos profissionais" e a
+# razão social no PNCP não é essa. Sem os dois, a "rede entre órgãos" fica
+# reduzida ao próprio Crea-SP — e o relatório dizia isso só no CSV.
+ORGAOS_RELACIONADOS = [
+    {"razao": "CONSELHO FEDERAL DE ENGENHARIA E AGRONOMIA",
+     # CNPJ do Confea segundo registros públicos; confirmado em tempo de
+     # execução por `_confere_orgao` (razão social + termos distintivos).
+     "cnpj_candidatos": ["33665647000191"]},
+    {"razao": "MUTUA DE ASSISTENCIA DOS PROFISSIONAIS DA ENGENHARIA ARQUITETURA E AGRONOMIA",
+     "termo_busca": "mutua"},
+    {"razao": "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DO RIO DE JANEIRO"},
+    {"razao": "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DE MINAS GERAIS"},
+    {"razao": "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO PARANA"},
+]
+# Compatibilidade: quem só quer os nomes.
+ORGAOS_RELACIONADOS_RAZAO = [o["razao"] for o in ORGAOS_RELACIONADOS]
+
+# Onde os portais costumam publicar o contrato da API (Swashbuckle/.NET e
+# afins). `main.py sondar` tenta cada um e guarda o que responder. É a
+# alternativa a ADIVINHAR nome de endpoint e de parâmetro: na rodada de
+# 04/09/2026, QuadrosPessoas e Conselheiros aceitaram os cinco formatos de
+# parâmetro que conhecemos e devolveram lista vazia para todos — o que sugere
+# um parâmetro que não estamos mandando, e só o contrato diz qual.
+SWAGGER_CANDIDATOS_IMPLANTA = [
+    "https://crea-sp.implanta.net.br/portalTransparencia/swagger/v1.0/swagger.json",
+    "https://crea-sp.implanta.net.br/portalTransparencia/swagger/v1/swagger.json",
+    "https://crea-sp.implanta.net.br/portalTransparencia/api/swagger/v1.0/swagger.json",
+    "https://crea-sp.implanta.net.br/portalTransparencia/api/v1.0/swagger.json",
+    "https://crea-sp.implanta.net.br/portalTransparencia/swagger/docs/v1.0",
+    "https://crea-sp.implanta.net.br/portalTransparencia/swagger/docs/v1",
+]
+SWAGGER_CANDIDATOS_DADOS_ABERTOS_SUFIXOS = [
+    "/swagger/v1/swagger.json", "/swagger/v1.0/swagger.json",
+    "/swagger/docs/v1", "/swagger.json", "/api-docs",
 ]
 
 # ---------------------------------------------------------------- período

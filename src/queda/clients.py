@@ -217,6 +217,80 @@ def implanta_variantes(endpoint: str, ano: int | None = None, *,
     return None, {}
 
 
+def resumir_openapi(spec: dict) -> list[dict]:
+    """[{caminho, metodo, query, obrigatorios}] de um Swagger 2 ou OpenAPI 3.
+
+    Só parâmetros declarados inline (`in: query`); `$ref` para componentes é
+    ignorado de propósito — o objetivo é saber o NOME do parâmetro que cada
+    endpoint aceita, e o nome está no inline em todos os portais que já vimos.
+    """
+    out: list[dict] = []
+    base = spec.get("basePath", "") or ""
+    for caminho, ops in (spec.get("paths") or {}).items():
+        if not isinstance(ops, dict):
+            continue
+        comuns = [p for p in ops.get("parameters", []) if isinstance(p, dict)]
+        for metodo, op in ops.items():
+            if metodo.lower() not in ("get", "post", "put", "delete", "patch"):
+                continue
+            if not isinstance(op, dict):
+                continue
+            params = comuns + [p for p in op.get("parameters", []) if isinstance(p, dict)]
+            query = [p.get("name") for p in params if p.get("in") == "query" and p.get("name")]
+            obrig = [p.get("name") for p in params
+                     if p.get("in") == "query" and p.get("required") and p.get("name")]
+            out.append({"caminho": base + caminho, "metodo": metodo.upper(),
+                        "query": query, "obrigatorios": obrig})
+    return out
+
+
+def descobrir_swagger() -> list[dict]:
+    """Tenta os caminhos usuais do contrato da API e devolve os que responderam.
+
+    Cada item: {"fonte": "implanta"|"dados_abertos", "url", "spec"}. Sondagem
+    sem cache e sem espera por rate-limit: um 403 aqui é "este caminho não
+    serve", e insistir custaria minutos por candidato.
+    """
+    achados: list[dict] = []
+    candidatos = [("implanta", u) for u in config.SWAGGER_CANDIDATOS_IMPLANTA]
+    for base in config.DADOS_ABERTOS_CANDIDATES:
+        for suf in config.SWAGGER_CANDIDATOS_DADOS_ABERTOS_SUFIXOS:
+            candidatos.append(("dados_abertos", base + suf))
+    for fonte, url in candidatos:
+        try:
+            data = get_json(url, use_cache=False, rate_limit_retries=0, retries=0)
+        except RuntimeError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("paths"), dict):
+            log.info("swagger encontrado: %s (%d caminho(s))", url, len(data["paths"]))
+            achados.append({"fonte": fonte, "url": url, "spec": data})
+    return achados
+
+
+# Endpoint que cada etapa da coleta chama na API Implanta, e o formato de
+# parâmetro que mandamos. `main.py sondar` compara isto com o que o swagger
+# declara — é onde "adivinhamos errado" vira uma linha de tabela.
+ENDPOINTS_IMPLANTA_USADOS: dict[str, str] = {
+    "Empenhos": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "Pagamentos": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "Contratos": "vigenciaInicio/vigenciaTermino (MM/AAAA)",
+    "ContratosAditivos": "vigenciaInicio/vigenciaTermino (MM/AAAA)",
+    "Licitacoes": "sondagem: exercicio | referencia* | data* | vigencia*",
+    "Convenios": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "ComparativoDespesa": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "DespesasCentroCusto": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "DemonstrativoEmpenhosPagamentos": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "PlanoDeContas": "exercicio",
+    "ProcessosComprasServicos": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "AtasColegiados": "sondagem: exercicio | referencia* | data* | vigencia*",
+    "BalancoOrcamentario": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "ComparativoReceita": "referenciaInicio/referenciaTermino (MM/AAAA)",
+    "QuadrosPessoas": "sondagem: sem filtro | exercicio | referencia* | data* | vigencia*",
+    "Conselheiros": "sondagem: sem filtro | exercicio | referencia* | data* | vigencia*",
+    **{ep: "sondagem: referenciaInicio/referenciaTermino" for ep in DIARIAS_PROBE},
+}
+
+
 def achatar_demonstrativo(rows: list, nivel: int = 0, pai: str = "") -> list[dict]:
     """DemonstrativoEmpenhosPagamentos vem em árvore (campo DETALHES). Achata
     preservando o caminho hierárquico, para permitir agregação por conta."""
@@ -332,10 +406,37 @@ def _tokens_distintivos(alvo: str) -> set[str]:
     Todos os 27 CREAs começam com "CONSELHO REGIONAL DE ENGENHARIA E
     AGRONOMIA"; o que distingue é o final ("SAO PAULO", "PARANA"...).
     """
-    genericas = {"CONSELHO", "REGIONAL", "FEDERAL", "DE", "DO", "DA", "DOS",
+    # "FEDERAL" NÃO é genérica: é a única palavra que separa o Confea dos 27
+    # Creas. Com ela na lista, o nome do Confea ficava sem nenhum token
+    # distintivo — e um conjunto vazio desligava a conferência inteira (ver
+    # `_exige_nome`). Medido: um CNPJ de prefeitura passava como Confea.
+    genericas = {"CONSELHO", "REGIONAL", "DE", "DO", "DA", "DOS",
                  "DAS", "E", "ENGENHARIA", "AGRONOMIA", "ESTADO", "CAIXA",
                  "ASSISTENCIA", "PROFISSIONAIS", "A"}
     return {t for t in alvo.split() if t not in genericas and len(t) > 2}
+
+
+_ARTIGOS = {"DE", "DO", "DA", "DOS", "DAS", "E", "A", "O", "AS", "OS", "EM", "NO", "NA"}
+
+
+def _exige_nome(nome_pncp: str, razao_esperada: str) -> bool:
+    """O nome devolvido pelo PNCP é mesmo o do órgão que esperamos?
+
+    Regra normal: TODOS os termos distintivos do esperado aparecem no nome.
+    Quando o esperado não tem termo distintivo nenhum (todas as palavras são
+    da lista genérica), a versão anterior fazia `if distintivos and ...` — e
+    um conjunto vazio pulava a checagem, aceitando QUALQUER órgão. Aqui o
+    vazio cai para a regra estrita: todas as palavras de conteúdo do esperado
+    (tudo menos artigo e preposição) têm de estar no nome. Nunca "sem termos,
+    sem conferência".
+    """
+    nome = set(_norm(nome_pncp).split())
+    alvo = _norm(razao_esperada)
+    distintivos = _tokens_distintivos(alvo)
+    if distintivos:
+        return distintivos <= nome
+    conteudo = {t for t in alvo.split() if t not in _ARTIGOS}
+    return bool(conteudo) and conteudo <= nome
 
 
 def _confere_orgao(cnpj: str, razao_esperada: str, uf: str | None) -> dict | None:
@@ -349,9 +450,7 @@ def _confere_orgao(cnpj: str, razao_esperada: str, uf: str | None) -> dict | Non
     dados = get_json(f"{config.PNCP_API}/v1/orgaos/{cnpj}")
     if not isinstance(dados, dict) or not dados.get("cnpj"):
         return None
-    nome = _norm(dados.get("razaoSocial") or "")
-    distintivos = _tokens_distintivos(_norm(razao_esperada))
-    if distintivos and not distintivos <= set(nome.split()):
+    if not _exige_nome(dados.get("razaoSocial") or "", razao_esperada):
         log.warning("PNCP: CNPJ %s pertence a %r, que não casa com %r — "
                     "descartado", cnpj, dados.get("razaoSocial"), razao_esperada)
         return None
@@ -363,8 +462,9 @@ def _confere_orgao(cnpj: str, razao_esperada: str, uf: str | None) -> dict | Non
             "_verificado": True}
 
 
-def pncp_resolver_orgao(razao_social: str, *, cnpj_fixo: str | None = None,
-                        uf: str | None = None) -> dict | None:
+def pncp_resolver_orgao(razao_social: str, *, cnpj_fixo=None,
+                        uf: str | None = None,
+                        termo_busca: str | None = None) -> dict | None:
     """Resolve o CNPJ de um órgão no PNCP.
 
     `cnpj_fixo` aceita um CNPJ ou uma lista de candidatos: cada um é
@@ -389,15 +489,20 @@ def pncp_resolver_orgao(razao_social: str, *, cnpj_fixo: str | None = None,
     def resolve():
         alvo = _norm(razao_social)
         distintivos = _tokens_distintivos(alvo)
-        termo = " ".join(alvo.split()[:6]).lower()
+        # `termo_busca` existe porque a busca do PNCP é por PREFIXO da razão
+        # social, e o nome registrado lá nem sempre começa como o nosso: a
+        # Mútua devolveu zero resultados para "mutua caixa de assistencia
+        # dos profissionais" na rodada de 04/09/2026. Um termo curto traz
+        # mais candidatos, e os termos distintivos continuam filtrando.
+        termo = (termo_busca or " ".join(alvo.split()[:6])).lower()
         data = get_json(f"{config.PNCP_API}/v1/orgaos/",
                         {"razaoSocial": termo, "pagina": 1})
         rows = data if isinstance(data, list) else (data or {}).get("data") or []
         for o in rows:
-            nome = _norm(o.get("razaoSocial", ""))
             # exige TODOS os termos distintivos — sem isso o Crea-PE respondia
-            # pela busca do Crea-SP
-            if distintivos and distintivos <= set(nome.split()):
+            # pela busca do Crea-SP. E sem termos distintivos, a regra estrita
+            # de `_exige_nome`: conjunto vazio nunca vale por "aceita tudo".
+            if _exige_nome(o.get("razaoSocial", ""), razao_social):
                 if uf and not _confere_uf(o.get("cnpj"), uf):
                     continue
                 return {"cnpj": o.get("cnpj"), "razaoSocial": o.get("razaoSocial")}

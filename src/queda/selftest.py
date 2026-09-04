@@ -1020,6 +1020,7 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_dado_nao_some())
     erros.extend(_regressao_recusa_do_portal())
     erros.extend(_regressao_coleta_converge())
+    erros.extend(_regressao_sondagem_e_orgaos())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1365,6 +1366,133 @@ def _regressao_recusa_do_portal() -> list[str]:
                 os.environ.pop("QUEDA_CHECKPOINT", None)
             else:
                 os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
+    return erros
+
+
+def _regressao_sondagem_e_orgaos() -> list[str]:
+    """Descobrir em vez de adivinhar — e não aceitar órgão errado no caminho.
+
+    Da leitura do ledger HTTP da rodada de 04/09/2026: QuadrosPessoas e
+    Conselheiros aceitaram os cinco formatos de parâmetro e devolveram vazio
+    para todos; `servicos.creasp.org.br` foi o único host de Dados Abertos a
+    responder 200, e o corpo (não-JSON) foi descartado sem ninguém ver; a
+    busca do Confea no PNCP devolveu 1 resultado que não passou, e a da Mútua
+    devolveu zero. As peças abaixo atacam cada um desses pontos, e a última
+    fecha um buraco que a solução do Confea teria ABERTO.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+    from . import clients, http
+
+    erros: list[str] = []
+
+    # 1. O leitor de contrato de API: Swagger 2 e OpenAPI 3, herdando os
+    #    parâmetros comuns do caminho e ignorando os de corpo.
+    v2 = {"swagger": "2.0", "basePath": "/api/v1.0", "paths": {
+        "/QuadrosPessoas": {"get": {"parameters": [
+            {"name": "competencia", "in": "query", "required": True},
+            {"name": "idUnidade", "in": "query"}]}},
+        "/Empenhos": {"parameters": [{"name": "referenciaInicio", "in": "query"}],
+                      "get": {"parameters": [{"name": "referenciaTermino", "in": "query"},
+                                             {"name": "body", "in": "body"}]}}}}
+    v3 = {"openapi": "3.0.1", "paths": {"/api/DadosAbertos/mandatarios": {
+        "get": {"parameters": [{"name": "exercicio", "in": "query"}]}}}}
+    por = {r["caminho"]: r for r in clients.resumir_openapi(v2) if r["metodo"] == "GET"}
+    q = por.get("/api/v1.0/QuadrosPessoas", {})
+    if q.get("query") != ["competencia", "idUnidade"] or q.get("obrigatorios") != ["competencia"]:
+        erros.append(f"sondagem: leitor de swagger v2 errou QuadrosPessoas: {q}")
+    e = por.get("/api/v1.0/Empenhos", {})
+    if e.get("query") != ["referenciaInicio", "referenciaTermino"]:
+        erros.append("sondagem: leitor de swagger não herdou o parâmetro comum do "
+                     f"caminho ou aceitou 'in: body': {e}")
+    if [r["query"] for r in clients.resumir_openapi(v3)] != [["exercicio"]]:
+        erros.append("sondagem: leitor de OpenAPI 3 falhou")
+
+    # 2. 200 sem JSON: o corpo tem de ser guardado — é a única pista do que o
+    #    host está dizendo.
+    raw_orig, sess_orig, thr_orig = config.RAW_DIR, http.session, http._throttle
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            config.RAW_DIR = Path(tmp) / "raw"
+            config.RAW_DIR.mkdir(parents=True)
+
+            class _Resp:
+                status_code = 200
+                headers = {"Content-Type": "text/html"}
+                text = "<html><body>Verificando seu navegador</body></html>"
+
+                def json(self):
+                    raise ValueError("não é JSON")
+
+            class _Sess:
+                def get(self, url, params=None, timeout=None):
+                    return _Resp()
+
+            http.session = lambda: _Sess()
+            http._throttle = lambda url: None
+            r = http.get_json("https://exemplo.invalid/service-api/api/DadosAbertos/x",
+                              use_cache=False)
+            guardados = list((config.RAW_DIR / "nao-json").glob("*.txt"))
+            if r is not None or not guardados:
+                erros.append("sondagem: o corpo de um 200 sem JSON não foi guardado "
+                             "— a única pista sobre o host se perde de novo")
+            elif "Verificando seu navegador" not in guardados[0].read_text(encoding="utf-8"):
+                erros.append("sondagem: o arquivo do corpo não-JSON não contém o corpo")
+        finally:
+            config.RAW_DIR, http.session, http._throttle = raw_orig, sess_orig, thr_orig
+
+    # 3. Resolver órgão no PNCP: CNPJ candidato ERRADO é descartado, o certo
+    #    passa, e `termo_busca` chega à busca.
+    get_orig, memo_orig = clients.get_json, clients.memo
+    chamadas: list = []
+
+    def _pncp(url, params=None, **kw):
+        chamadas.append((url, params))
+        if url.endswith("/orgaos/99999999000199"):
+            return {"cnpj": "99999999000199", "razaoSocial": "PREFEITURA MUNICIPAL DE XYZ"}
+        if url.endswith("/orgaos/33665647000191"):
+            return {"cnpj": "33665647000191",
+                    "razaoSocial": "CONSELHO FEDERAL DE ENGENHARIA E AGRONOMIA"}
+        if url.endswith("/orgaos/"):
+            return [{"cnpj": "11111111000111",
+                     "razaoSocial": "MUTUA DE ASSISTENCIA DOS PROFISSIONAIS DA "
+                                    "ENGENHARIA ARQUITETURA E AGRONOMIA"},
+                    {"cnpj": "22222222000122", "razaoSocial": "MUTUA DE SEGUROS LTDA"}]
+        return None
+
+    try:
+        clients.get_json = _pncp
+        clients.memo = lambda k, fn: fn()
+        o = clients.pncp_resolver_orgao("CONSELHO FEDERAL DE ENGENHARIA E AGRONOMIA",
+                                        cnpj_fixo=["99999999000199", "33665647000191"])
+        if not o or o.get("cnpj") != "33665647000191":
+            erros.append(
+                "órgãos: um CNPJ candidato ERRADO foi aceito como Confea "
+                f"({o}) — 'FEDERAL' na lista de genéricas zerava os termos "
+                "distintivos, e conjunto vazio desligava a conferência. Todo o "
+                "bloco PNCP passaria a falar de outro órgão")
+        chamadas.clear()
+        o = clients.pncp_resolver_orgao(
+            "MUTUA DE ASSISTENCIA DOS PROFISSIONAIS DA ENGENHARIA ARQUITETURA E AGRONOMIA",
+            termo_busca="mutua")
+        if not any(p and p.get("razaoSocial") == "mutua" for _, p in chamadas):
+            erros.append("órgãos: `termo_busca` não chegou à busca do PNCP")
+        if not o or o.get("cnpj") != "11111111000111":
+            erros.append(f"órgãos: a Mútua não foi resolvida pela busca curta ({o}) "
+                         "— ou a homônima 'MUTUA DE SEGUROS' passou no lugar")
+        # 4. Nome esperado feito só de palavras genéricas não pode virar
+        #    "aceita qualquer um".
+        if clients._exige_nome("PREFEITURA MUNICIPAL DE XYZ",
+                               "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA"):
+            erros.append("órgãos: nome esperado sem termo distintivo aceitou um "
+                         "órgão qualquer — o conjunto vazio voltou a valer por "
+                         "'sem conferência'")
+        if not clients._exige_nome("CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA - CREA",
+                                   "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA"):
+            erros.append("órgãos: a regra estrita rejeitou o próprio nome esperado")
+    finally:
+        clients.get_json, clients.memo = get_orig, memo_orig
     return erros
 
 

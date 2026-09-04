@@ -1124,10 +1124,15 @@ def stage_pncp(desde, ate):
     else:
         log.warning("PNCP: órgão-alvo não resolvido — o bloco PNCP virá vazio "
                     "em vez de trazer contratos de outro conselho")
-    for razao in config.ORGAOS_RELACIONADOS_RAZAO:
-        o = clients.pncp_resolver_orgao(razao)
+    for rel in config.ORGAOS_RELACIONADOS:
+        o = clients.pncp_resolver_orgao(
+            rel["razao"], cnpj_fixo=rel.get("cnpj_candidatos"),
+            termo_busca=rel.get("termo_busca"))
         if o and o.get("cnpj") and o["cnpj"] != (alvo or {}).get("cnpj"):
             orgaos.append({**o, "papel": "relacionado"})
+        else:
+            log.warning("PNCP: órgão relacionado %r não resolvido — a rede "
+                        "entre órgãos do sistema fica sem ele", rel["razao"])
     _salvar("pncp_orgaos", pd.DataFrame(orgaos))
 
     contratos, cobrancas = [], []

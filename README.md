@@ -22,6 +22,7 @@ rede de influência entre órgãos do sistema Confea/Crea e fornecedores suspeit
 
 ```bash
 pip install -r requirements.txt
+python main.py sondar                            # o contrato da API: endpoints e parâmetros REAIS
 python main.py faltando --desde auto --ate 2026  # o que falta coletar, sem rede
 python main.py all --desde auto --ate 2026   # coleta + análise + relatório
 python main.py selftest                      # valida o pipeline sem rede (fixtures)
@@ -98,6 +99,32 @@ pronta e o buraco não fechava em rodada nenhuma. Hoje ela é refeita, e refazer
 `python main.py faltando` responde, sem gastar uma requisição, quantos
 exercícios faltam em cada etapa e quais são — é o mesmo laço da coleta rodando
 em seco, para que o inventário não possa divergir do que a coleta faria.
+
+### Quando uma fonte vem vazia e não se sabe por quê
+
+Cinco fontes seguem em zero depois de quatro rodadas: `licitacoes`, `atas`,
+`quadro_pessoal`, `mandatarios`, `indenizacoes_endpoint`. O ledger HTTP diz o
+que cada uma respondeu, e as respostas pedem remédios diferentes:
+
+| fonte | o que o servidor disse | o que isso significa |
+|---|---|---|
+| QuadrosPessoas, Conselheiros | 200 com lista vazia, para os 5 formatos de parâmetro | o endpoint existe e ignora o que mandamos — falta um parâmetro que não conhecemos |
+| Licitacoes | 400 para um formato, 200-vazio para outro | idem: formato errado |
+| 7 caminhos de diárias | 403 no mesmo host que serve Empenhos | o WAF barra esses caminhos; provavelmente não existem nesta instalação |
+| Dados Abertos (6 hosts) | 403, timeout, ou **200 sem JSON** em `servicos.creasp.org.br` | um host respondeu; o corpo agora fica em `data/raw/nao-json/` para leitura |
+
+Adivinhar formato custa cinco requisições por janela num portal que responde
+403 por rajada. Dois caminhos custam quase nada:
+
+1. **`python main.py sondar`** tenta os caminhos usuais do contrato da API
+   (swagger) nos dois serviços, guarda o que responder em `data/raw/swagger/`
+   e imprime, endpoint a endpoint, o que a coleta MANDA contra o que o
+   contrato ACEITA.
+2. **O navegador.** Abrir o portal da transparência, F12 → aba Rede, clicar em
+   "Quadro de Pessoal" (ou "Conselheiros", "Licitações") e ler a requisição
+   que a própria página faz: o caminho e os parâmetros dela são os que a API
+   aceita. O JSON que a página baixou pode ir direto para
+   `data/manual/<etapa>.json` — a etapa passa a ler dali e não vai à rede.
 
 Nem todo payload cabe num CSV: `contratos` e `processos_itens` trazem listas
 dentro da linha, e uma lista num CSV vira texto irreversível. Essas janelas

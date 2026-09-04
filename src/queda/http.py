@@ -343,6 +343,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
         except ValueError:
             registrar(url, params, resultado=R_SEM_JSON, status=r.status_code,
                       tentativa=tentativa, itens=0, duracao=duracao)
+            _guardar_corpo_nao_json(url, r)
             return _store(None, r.status_code)
         # A distinção que justifica o ledger inteiro: 200 com lista vazia é o
         # órgão dizendo "não tenho isso publicado", e não uma falha nossa.
@@ -352,6 +353,39 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
                   itens=n, duracao=duracao)
         return _store(data, r.status_code)
     raise RuntimeError(f"Falha após retries: {url}") from last_err
+
+
+def _guardar_corpo_nao_json(url: str, r) -> None:
+    """Um 2xx que não é JSON é a única resposta que o ledger registrava sem
+    dizer O QUE veio — e é justamente a que mais explica.
+
+    Na rodada de 04/09/2026, `servicos.creasp.org.br` foi o ÚNICO host de Dados
+    Abertos a responder 200 ao caminho `/DadosAbertos/mandatarios`; os outros
+    cinco deram 403, timeout ou conexão recusada. O ledger anotou `sem-json` e
+    o corpo foi descartado. Se era uma página de desafio do WAF, um redirect
+    para outro caminho ou um HTML embrulhando o JSON, cada caso pede uma
+    correção diferente — e sem o corpo não dá para saber qual.
+
+    Guarda o começo do corpo em `data/raw/nao-json/`, um arquivo por URL, e
+    loga um trecho legível. Só o começo: uma página inteira de SPA são
+    centenas de KB de JavaScript que não dizem mais do que os primeiros 600
+    bytes.
+    """
+    try:
+        pasta = config.RAW_DIR / "nao-json"
+        pasta.mkdir(parents=True, exist_ok=True)
+        nome = hashlib.sha1(url.encode()).hexdigest()[:16]
+        corpo = r.text or ""
+        (pasta / f"{nome}.txt").write_text(
+            f"{url}\ncontent-type: {r.headers.get('Content-Type')}\n"
+            f"status: {r.status_code}\n---\n{corpo[:4000]}", encoding="utf-8")
+        trecho = re.sub(r"<[^>]+>", " ", corpo[:600])
+        trecho = re.sub(r"\s+", " ", trecho).strip()[:160]
+        log.warning("%s respondeu %s sem JSON (%s): \"%s\" — corpo em %s",
+                    url, r.status_code, r.headers.get("Content-Type", "?"),
+                    trecho, pasta / f"{nome}.txt")
+    except Exception as e:                     # diagnóstico nunca derruba coleta
+        log.debug("não foi possível guardar corpo não-JSON de %s (%s)", url, e)
 
 
 def memo(name: str, fn):
