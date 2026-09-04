@@ -26,10 +26,25 @@ def implanta(endpoint: str, params: dict | None = None):
     todas as rodadas seguintes.
     """
     respondeu_vazio = False
+    algum_recusou = False
+    ultimo_erro: Exception | None = None
     for base in _bases_para(endpoint):
-        data = get_json(f"{base}/{endpoint}", params)
+        try:
+            data = get_json(f"{base}/{endpoint}", params)
+        except RuntimeError as e:
+            # 5xx esgotado ou rede caída NESTE prefixo. Na rodada de 04/09 um
+            # prefixo de reserva respondia 500 para tudo; o RuntimeError subia
+            # e derrubava a etapa inteira ("2 etapa(s) falharam com erro") —
+            # o prefixo que serve nem chegou a ser tentado. Aqui vira "sem
+            # resposta neste prefixo"; só se TODOS falharem assim é indisponi-
+            # bilidade de verdade, e o erro sobe.
+            log.warning("%s em %s: %s — tentando o próximo prefixo", endpoint,
+                        base[len(config.IMPLANTA_HOST):], e)
+            ultimo_erro = e
+            continue
         if data is None:
-            continue                       # recusado/inexistente NESTE prefixo
+            algum_recusou = True           # recusado/inexistente NESTE prefixo
+            continue
         linhas = data if isinstance(data, list) else (data or [])
         if linhas:
             prefixo = base[len(config.IMPLANTA_HOST):]
@@ -40,8 +55,13 @@ def implanta(endpoint: str, params: dict | None = None):
             return linhas
         respondeu_vazio = True
     # Vazio em todo prefixo que respondeu: o servidor disse que não há nada.
-    # Nenhum respondeu: a pergunta não foi aceita em lugar nenhum.
-    return [] if respondeu_vazio else None
+    # Nenhum respondeu: a pergunta não foi aceita em lugar nenhum. Se nenhum
+    # respondeu E todos caíram por 5xx/rede, é indisponibilidade — sobe.
+    if respondeu_vazio:
+        return []
+    if ultimo_erro is not None and not algum_recusou:
+        raise ultimo_erro                  # TODOS caíram por 5xx/rede: fora do ar
+    return None
 
 
 # Prefixo que devolveu DADO para cada endpoint. A API existe sob dois prefixos

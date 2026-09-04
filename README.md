@@ -123,12 +123,18 @@ Transparência. Três coisas que ela já ensinou:
 
 - o exemplo cURL da documentação **do próprio Crea-SP** chama
   `https://crea-sp.implanta.net.br/transparencia/api/v1.0/QuadrosPessoas` e
-  `.../transparencia/api/v1.0/Conselheiros`, sem parâmetro e com
-  `Accept: application/json, text/json`. Nós chamávamos
-  `/portalTransparencia/api/v1.0/...` — prefixo que existe e serve Empenhos com
-  dado, mas devolve vazio para esses dois. `IMPLANTA_PREFIXOS` faz a coleta
-  tentar o documentado quando o antigo vier vazio ou recusado, e aprender por
-  endpoint;
+  `.../transparencia/api/v1.0/Conselheiros`, sem parâmetro. A hipótese era que
+  esse prefixo destravasse o que vinha vazio no antigo
+  (`/portalTransparencia/api/v1.0`). **Medido em 04/09/2026 (`sondar`,
+  exercício 2025): os dois prefixos são espelhos.** Empenhos devolve os mesmos
+  12.575 itens nos dois; QuadrosPessoas e Conselheiros devolvem 200 com **zero**
+  itens nos dois. A hipótese caiu, e o veredito "o órgão não publica por esses
+  endpoints" ficou com evidência nos dois caminhos. `IMPLANTA_PREFIXOS` mantém
+  os dois porque não custam nada quando o primeiro responde — e porque
+  `Licitacoes` respondeu 403 no antigo e 200-vazio no documentado, o único caso
+  em que diferiram. `DiariasDeslocamentos` respondeu **404 com corpo JSON** nos
+  dois: o NOME está errado — a documentação lista "Diárias/Deslocamentos", e o
+  caminho exato ainda não foi copiado dela;
 - "Rol de Mandatários" na documentação **é** `Conselheiros`. O nome que
   usávamos estava certo; o errado era o prefixo. (Uma versão intermediária
   desta ferramenta chegou a listar palpites de nome — saíram.)

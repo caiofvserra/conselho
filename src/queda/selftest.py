@@ -1674,8 +1674,35 @@ def _regressao_prefixo_e_nome() -> list[str]:
         for k, v in esperado.items():
             if por.get(k, {}).get("itens") != v:
                 erros.append(f"medição: {k} deu {por.get(k, {}).get('itens')!r}, esperado {v!r}")
-        if por.get(("DiariasDeslocamentos", "/transparencia/api"), {}).get("status") != 403:
+        if por.get(("DiariasDeslocamentos", "/transparencia/api/v1.0"), {}).get("status") != 403:
             erros.append("medição: o 403 das diárias não apareceu como status")
+
+        # 5. 5xx esgotado num prefixo de RESERVA não derruba a etapa. Na rodada
+        #    de 04/09 o terceiro prefixo (hoje removido) respondia 500 para tudo,
+        #    o RuntimeError subia e "quadro_pessoal" e "indenizacoes_endpoint"
+        #    saíram como "etapa falhou com erro" — sem o prefixo que serve ter
+        #    sido tentado. Só sobe se TODOS caírem.
+        def _500_na_reserva(url, params=None, **kw):
+            if "/transparencia/api/v1.0/" in url:
+                raise RuntimeError("HTTP 500")
+            return []                      # primário responde vazio
+        clients.get_json = _500_na_reserva
+        clients._PREFIXO_APRENDIDO.clear()
+        try:
+            r = clients.implanta("QuadrosPessoas")
+        except RuntimeError:
+            r = "RAISE"
+        if r != []:
+            erros.append(f"prefixo: 500 na reserva derrubou a etapa ({r!r}) — o "
+                         "primário tinha respondido vazio")
+        clients.get_json = lambda url, params=None, **kw: (_ for _ in ()).throw(RuntimeError("500"))
+        try:
+            clients.implanta("QuadrosPessoas")
+            erros.append("prefixo: todos os prefixos fora do ar e a etapa NÃO "
+                         "sinalizou indisponibilidade — viraria 'não coletado' "
+                         "silencioso")
+        except RuntimeError:
+            pass
     finally:
         (clients.get_json, http.get_text, pref, nomes, fmt) = guardado
         clients._PREFIXO_APRENDIDO.clear(); clients._PREFIXO_APRENDIDO.update(pref)

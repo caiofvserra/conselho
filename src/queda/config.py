@@ -50,9 +50,15 @@ IMPLANTA_HOST = "https://crea-sp.implanta.net.br"
 # rodada. O antigo continua na frente porque é o que comprovadamente serve as
 # três maiores bases; trocar a ordem custaria uma requisição a mais por janela
 # na primeira rodada se o documentado não as servir.
+# MEDIDO em 04/09/2026 (`sondar`, exercício 2025): os dois prefixos versionados
+# são ESPELHOS — Empenhos devolve os mesmos 12.575 itens nos dois, e
+# QuadrosPessoas e Conselheiros devolvem 200 com ZERO itens nos dois. A
+# hipótese de que o prefixo documentado destravaria essas fontes caiu; o que
+# ficou de pé é o veredito "o órgão não publica por esses endpoints", agora
+# com evidência nos dois caminhos. `/transparencia/api` sem versão respondia
+# 404 ou 500 para tudo e derrubava etapas inteiras: saiu.
 IMPLANTA_PREFIXOS = ["/portalTransparencia/api/v1.0",
-                     "/transparencia/api/v1.0",
-                     "/transparencia/api"]
+                     "/transparencia/api/v1.0"]
 IMPLANTA_BASE = IMPLANTA_HOST + IMPLANTA_PREFIXOS[0]
 
 # Nomes de endpoint por dataset, CONFIRMADOS pelo exemplo cURL da documentação
