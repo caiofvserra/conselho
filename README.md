@@ -99,6 +99,15 @@ pronta e o buraco não fechava em rodada nenhuma. Hoje ela é refeita, e refazer
 exercícios faltam em cada etapa e quais são — é o mesmo laço da coleta rodando
 em seco, para que o inventário não possa divergir do que a coleta faria.
 
+O portal **recusa** algumas janelas com HTTP 400 — na rodada de 04/09/2026 foram
+o exercício 2026 em onze endpoints e 2010–2020 no `DespesasCentroCusto`. Recusa
+não é "o órgão não publica": é pergunta não aceita, e pode ser do nosso formato
+de parâmetro, então ela nunca vira `.vazio`. É anotada por 12h para a rodada
+seguinte não queimar ritmo insistindo, e reaparece depois; a coluna
+`recusados_pelo_portal` de `faltando` diz quais são. Sem isso, `faltando` e a
+coleta nunca convergiam: ~25 requisições por rodada em perguntas que não seriam
+aceitas, num host que responde 403 por rajada.
+
 Para forçar recoleta de um período, `python main.py limpar --etapa licitacoes,atas`
 apaga os marcadores de janela vazia dessas etapas (`--tudo` apaga também os
 checkpoints com dado). Rodar **sem** `--retomar` não serve para isso: `--retomar`

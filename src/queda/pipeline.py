@@ -35,6 +35,16 @@ CHECKPOINT_SUBDIR = "checkpoints"
 # Exercício ainda EM CURSO muda todo dia: um checkpoint dele vale poucas horas.
 # Exercício encerrado não muda mais e o checkpoint vale para sempre.
 CHECKPOINT_TTL_HORAS = 12.0
+# Janela que o portal RECUSA (400) não pode virar checkpoint permanente — a
+# recusa pode ser do nosso formato de parâmetro, e congelá-la desfaria a própria
+# correção. Mas também não pode ser retentada em toda rodada: medido na rodada
+# real de 04/09, o portal devolve 400 para o exercício 2026 em ONZE endpoints e
+# para 2010-2020 no DespesasCentroCusto — ~25 requisições por rodada que nunca
+# vão dar certo, num host que responde 403 por rajada (e que abortou aquela
+# rodada). A recusa é anotada com validade CURTA: dentro dela a rodada seguinte
+# pula a janela e gasta o ritmo no que ainda pode vir; passada, tenta de novo,
+# porque a correção pode ter sido nossa ou o exercício pode ter sido publicado.
+CHECKPOINT_RECUSA_TTL_HORAS = 12.0
 # Escotilha de emergência: QUEDA_CHECKPOINT=0 desliga leitura e gravação, para
 # o caso de um checkpoint ruim precisar ser contornado sem apagar nada à mão.
 _ENV_CHECKPOINT = "QUEDA_CHECKPOINT"
@@ -163,17 +173,49 @@ def _checkpoint_dir(etapa: str) -> Path:
     return config.RAW_DIR / CHECKPOINT_SUBDIR / etapa
 
 
-def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path]:
-    """(csv com linhas, marcador de janela vazia).
+def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path, Path]:
+    """(csv com linhas, marcador de janela vazia, marcador de janela recusada).
 
-    São dois arquivos porque um CSV de zero linhas é ambíguo: pode ser "o
-    servidor respondeu que não há nada neste exercício" ou "a gravação foi
-    interrompida". O marcador `.vazio` afirma a primeira coisa e só é escrito
-    quando o servidor de fato respondeu.
+    Três arquivos para três afirmações distintas, e a distinção é o que impede
+    a ferramenta de mentir sobre o fiscalizado:
+
+    * `.csv`      — o servidor respondeu e há dado;
+    * `.vazio`    — o servidor respondeu que NÃO HÁ nada neste exercício. Vale
+                    para sempre num exercício encerrado, e é o único dos três
+                    que pode sustentar "o órgão não publica";
+    * `.recusado` — o servidor não aceitou a pergunta (400). Não diz nada sobre
+                    o dado: diz que ainda não sabemos. Validade curta.
+
+    Um CSV de zero linhas seria ambíguo entre os três, e foi por confundir os
+    dois últimos que um 400 por formato de parâmetro já entrou no relatório
+    como "exercício sem despesa".
     """
     base = _checkpoint_dir(etapa) / "".join(
         c if c.isalnum() or c in "-_" else "_" for c in str(janela))
-    return base.with_suffix(".csv"), base.with_suffix(".vazio")
+    return (base.with_suffix(".csv"), base.with_suffix(".vazio"),
+            base.with_suffix(".recusado"))
+
+
+def _recusa_fresca(etapa: str, janela: str) -> bool:
+    """A janela foi recusada há pouco? Então não vale gastar ritmo com ela agora."""
+    if not _checkpoint_ligado():
+        return False
+    _, _, recusado = _checkpoint_arquivos(etapa, janela)
+    if not recusado.exists():
+        return False
+    idade_h = (time.time() - recusado.stat().st_mtime) / 3600.0
+    return idade_h <= CHECKPOINT_RECUSA_TTL_HORAS
+
+
+def _marcar_recusa(etapa: str, janela: str) -> None:
+    if not _checkpoint_ligado():
+        return
+    _, _, recusado = _checkpoint_arquivos(etapa, janela)
+    try:
+        recusado.parent.mkdir(parents=True, exist_ok=True)
+        recusado.write_text(f"{datetime.now().isoformat(timespec='seconds')}\n")
+    except OSError as e:
+        log.debug("não foi possível anotar a recusa %s/%s (%s)", etapa, janela, e)
 
 
 def _exercicio_encerrado(ano: int | None) -> bool:
@@ -225,7 +267,7 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
     """
     if not _checkpoint_ligado():
         return None
-    csv, vazio = _checkpoint_arquivos(etapa, janela)
+    csv, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
     if _checkpoint_utilizavel(csv, ano):
         try:
             d = pd.read_csv(csv, dtype=str, keep_default_na=False,
@@ -251,11 +293,13 @@ def _janela_estado(etapa: str, janela: str, ano: int | None = None) -> str | Non
     """
     if not _checkpoint_ligado():
         return None
-    csv, vazio = _checkpoint_arquivos(etapa, janela)
+    csv, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
     if _checkpoint_utilizavel(csv, ano):
         return "linhas"
     if _checkpoint_utilizavel(vazio, ano):
         return "vazio"
+    if _recusa_fresca(etapa, janela):
+        return "recusado"
     return None
 
 
@@ -288,6 +332,11 @@ def janelas_pendentes(etapa: str, ate: int, desde: int | None) -> list[int]:
         estado = _janela_estado(etapa, str(ano), ano)
         if estado is None:
             pendentes.append(ano)
+            vazios = 0
+        elif estado == "recusado":
+            # Não entra em "pendente" porque a rodada NÃO vai buscá-la agora —
+            # o inventário tem de prever o que a coleta faz, não o que seria
+            # bom. Sai numa coluna própria, para não passar por coletada.
             vazios = 0
         elif estado == "vazio":
             vazios += 1
@@ -324,12 +373,13 @@ def _checkpoint_gravar(etapa: str, janela: str, rows: list) -> None:
     falha viraria falha permanente."""
     if not _checkpoint_ligado():
         return
-    csv, vazio = _checkpoint_arquivos(etapa, janela)
+    csv, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
     try:
         csv.parent.mkdir(parents=True, exist_ok=True)
         if not rows:
             vazio.write_text(f"{datetime.now().isoformat(timespec='seconds')}\n")
             csv.unlink(missing_ok=True)
+            _recusa.unlink(missing_ok=True)
             return
         if not _plano_para_csv(rows):
             log.debug("%s/%s: payload aninhado — sem checkpoint", etapa, janela)
@@ -344,6 +394,7 @@ def _checkpoint_gravar(etapa: str, janela: str, rows: list) -> None:
         pd.DataFrame(limpos).to_csv(parcial, index=False)
         os.replace(parcial, csv)
         vazio.unlink(missing_ok=True)
+        _recusa.unlink(missing_ok=True)
     except OSError as e:
         # Disco cheio ou Drive desmontado não podem derrubar a coleta: o
         # checkpoint é otimização, não requisito.
@@ -353,7 +404,7 @@ def _checkpoint_gravar(etapa: str, janela: str, rows: list) -> None:
 
 
 def _registrar_janelas(dataset: str, falhas: list, do_disco: int,
-                       coletadas: int) -> None:
+                       coletadas: int, recusadas: list | None = None) -> None:
     """Fecha a contabilidade de janelas de uma etapa: log + diagnóstico.
 
     Acumula em vez de sobrescrever porque uma etapa pode ter mais de um laço de
@@ -362,13 +413,31 @@ def _registrar_janelas(dataset: str, falhas: list, do_disco: int,
     """
     log.info("%s: %d janela(s) do checkpoint, %d coletada(s) agora, "
              "%d sem coleta", dataset, do_disco, coletadas, len(falhas))
-    if falhas:
-        log.warning("%s: %d janela(s) ficaram FORA desta rodada (%s). Rode de "
-                    "novo: as janelas já gravadas em checkpoint não são "
-                    "refeitas e só estas voltam à rede.",
-                    dataset, len(falhas), ", ".join(str(f) for f in falhas[:12]))
+    recusadas = list(recusadas or [])
+    # Recusa e falha ficam separadas na mensagem porque a instrução ao operador
+    # é OPOSTA: falha de rede pede "rode de novo"; recusa do portal (400) não
+    # melhora rodando de novo, e dizer que melhora manda o operador queimar
+    # ritmo num host que responde 403 por rajada.
+    so_falharam = [f for f in falhas if f not in set(recusadas)]
+    if so_falharam:
+        log.warning("%s: %d janela(s) ficaram FORA por falha de rede (%s). "
+                    "Rode de novo: as janelas já gravadas em checkpoint não "
+                    "são refeitas e só estas voltam à rede.", dataset,
+                    len(so_falharam),
+                    ", ".join(str(f) for f in so_falharam[:12]))
+    if recusadas:
+        log.warning("%s: o portal RECUSOU %d janela(s) (%s) — 400, pergunta "
+                    "não aceita. Anotado por %.0fh: a rodada seguinte não "
+                    "insiste nelas e gasta o ritmo no que ainda pode vir. Isso "
+                    "NÃO afirma que o exercício está vazio.", dataset,
+                    len(recusadas), ", ".join(str(f) for f in recusadas[:12]),
+                    CHECKPOINT_RECUSA_TTL_HORAS)
     d = _JANELAS.setdefault(dataset, {"janelas_sem_coleta": 0})
     d["janelas_sem_coleta"] += len(falhas)
+    if recusadas:
+        texto = ", ".join(str(r) for r in recusadas)
+        d["janelas_recusadas"] = ", ".join(
+            x for x in (d.get("janelas_recusadas"), texto) if x)
     if falhas:
         texto = ", ".join(str(f) for f in falhas)
         d["janelas_falhas"] = ", ".join(x for x in (d.get("janelas_falhas"),
@@ -386,10 +455,14 @@ def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None
     out: list[dict] = []
     falhas: list[str] = []
     do_disco = coletadas = 0
+    recusadas: list[str] = []
     for rotulo, ano, *args in janelas:
         rows = _checkpoint_ler(etapa, rotulo, ano)
         if rows is not None:
             do_disco += 1
+        elif _recusa_fresca(etapa, rotulo):
+            recusadas.append(rotulo)
+            continue
         else:
             try:
                 rows = buscar(*args)
@@ -402,12 +475,15 @@ def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None
                 continue
             if not isinstance(rows, list):
                 log.warning("%s/%s: sem resposta utilizável", etapa, rotulo)
+                _marcar_recusa(etapa, rotulo)
                 falhas.append(rotulo)
+                recusadas.append(rotulo)
                 continue
             _checkpoint_gravar(etapa, rotulo, rows)
             coletadas += 1
         out.extend(rows)
-    _registrar_janelas(dataset or etapa, falhas, do_disco, coletadas)
+    _registrar_janelas(dataset or etapa, falhas, do_disco, coletadas,
+                       recusadas=recusadas)
     return out
 
 
@@ -496,6 +572,7 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
     frames: list[dict] = []
     vazios = 0
     falhas: list[int] = []
+    recusadas: list[int] = []
     do_disco = coletadas = 0
     ano = ate
     piso = desde or config.ANO_PISO
@@ -503,6 +580,15 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
         rows = _checkpoint_ler(etapa, str(ano), ano)
         if rows is not None:
             do_disco += 1
+        elif _recusa_fresca(etapa, str(ano)):
+            # O portal já recusou esta janela há pouco. Insistir agora gasta o
+            # ritmo — e é o ritmo que decide até onde a rodada chega antes do
+            # 403. Recusa NÃO é exercício vazio: o contador de vazios zera,
+            # senão a sondagem retroativa encerraria a série no ano errado.
+            recusadas.append(ano)
+            vazios = 0
+            ano -= 1
+            continue
         else:
             try:
                 rows = fetch_ano(ano)
@@ -524,7 +610,9 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
                 log.warning("%s/%d: sem resposta utilizável (%s) — não conta "
                             "como exercício vazio", etapa, ano,
                             type(rows).__name__)
+                _marcar_recusa(etapa, str(ano))
                 falhas.append(ano)
+                recusadas.append(ano)
                 vazios = 0
                 ano -= 1
                 continue
@@ -541,7 +629,8 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
                 break
         ano -= 1
 
-    _registrar_janelas(etapa, sorted(falhas, reverse=True), do_disco, coletadas)
+    _registrar_janelas(etapa, sorted(falhas, reverse=True), do_disco, coletadas,
+                       recusadas=sorted(set(recusadas), reverse=True))
     return frames
 
 
@@ -1100,6 +1189,43 @@ ETAPAS_JANELA_ANUAL: dict[str, tuple[str, ...]] = {
 }
 
 
+def _etapas(desde: int | None, ate: int) -> dict:
+    """Etapa -> como executá-la. ORDEM É A DA COLETA.
+
+    Fonte única do universo esperado: `DATASETS_ESPERADOS` sai daqui, e o check
+    de cobertura compara o que veio contra ela. Enquanto a lista morava dentro
+    de `build_staged`, o diagnóstico só conseguia falar das etapas que a rodada
+    chegou a executar — e uma rodada que abortou na terceira etapa publicava
+    "Coleta completa: 3 de 3 datasets com dados", medido. Etapa nunca alcançada
+    não é uma etapa vazia: é uma etapa invisível, e invisível se parece com
+    regular.
+    """
+    return {
+        "empenhos": lambda: stage_empenhos(desde, ate),
+        "pagamentos": lambda: stage_pagamentos(desde, ate),
+        "contratos": lambda: stage_contratos(desde, ate),
+        "aditivos": lambda: stage_aditivos(desde, ate),
+        "licitacoes": lambda: stage_licitacoes(desde, ate),
+        "convenios": lambda: stage_convenios(desde, ate),
+        "comparativo_despesa": lambda: stage_comparativo_despesa(desde, ate),
+        "despesas_centro_custo": lambda: stage_despesas_centro_custo(desde, ate),
+        "demonstrativo": lambda: stage_demonstrativo(desde, ate),
+        "plano_contas": lambda: stage_plano_contas(ate),
+        "processos_itens": lambda: stage_processos_compras(desde, ate),
+        "atas": lambda: stage_atas(desde, ate),
+        "comparativo_receita": lambda: stage_orcamento(desde, ate),
+        "quadro_pessoal": lambda: stage_quadro_pessoal(ate),
+        "mandatarios": lambda: stage_mandatarios(ate),
+        "indenizacoes_endpoint": lambda: stage_indenizacoes(desde, ate),
+        "pncp_contratos": lambda: stage_pncp(desde, ate),
+    }
+
+
+# As lambdas nunca são chamadas aqui: só as CHAVES interessam, e o dict do
+# Python preserva a ordem de inserção, que é a ordem da coleta.
+DATASETS_ESPERADOS: tuple[str, ...] = tuple(_etapas(None, 0))
+
+
 def etapa_pronta(nome: str, desde: int | None,
                  ate: int) -> tuple[pd.DataFrame | None, list[int]]:
     """(DataFrame pronto ou None, exercícios pendentes).
@@ -1132,14 +1258,19 @@ def _inventario_pncp(staged, manual: bool, ate: int) -> dict:
     TTL de 12h para sempre — o PNCP apareceria como pendente em toda rodada.
     """
     raiz = _checkpoint_dir("pncp_contratos")
-    com_dado = vazias = 0
+    com_dado = vazias = recusadas = 0
     if raiz.is_dir():
         for arq in raiz.rglob("*"):
-            if not arq.is_file() or arq.suffix not in (".csv", ".vazio"):
+            if not arq.is_file() or arq.suffix not in (".csv", ".vazio",
+                                                       ".recusado"):
                 continue
             try:
                 ano = int(arq.stem[:4])
             except ValueError:
+                continue
+            if arq.suffix == ".recusado":
+                recusadas += _recusa_fresca(
+                    f"pncp_contratos/{arq.parent.name}", arq.stem)
                 continue
             if not _checkpoint_utilizavel(arq, ano):
                 continue
@@ -1151,6 +1282,8 @@ def _inventario_pncp(staged, manual: bool, ate: int) -> dict:
         "linhas_staged": 0 if staged is None else int(len(staged)),
         "janelas_com_dado": com_dado,
         "janelas_vazias": vazias,
+        "janelas_recusadas": recusadas,
+        "recusados_pelo_portal": "",
         # Quantas FALTAM não é calculável sem resolver os CNPJs dos órgãos, o
         # que é uma consulta de rede — e este comando promete não fazer nenhuma.
         # Declarar o que se sabe e o que não se sabe, em vez de estimar.
@@ -1173,12 +1306,16 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
     for nome, chaves in ETAPAS_JANELA_ANUAL.items():
         staged = _ja_coletado(nome)
         _, pend = etapa_pronta(nome, desde, ate)
-        com_dado = vazias = 0
+        com_dado = vazias = recusadas = 0
+        anos_recusados: list[int] = []
         for chave in chaves:
             for ano in range(desde or config.ANO_PISO, ate + 1):
                 estado = _janela_estado(chave, str(ano), ano)
                 com_dado += estado == "linhas"
                 vazias += estado == "vazio"
+                if estado == "recusado":
+                    recusadas += 1
+                    anos_recusados.append(ano)
         # A ingestão manual curto-circuita a etapa ANTES de qualquer checkpoint
         # (`stage_licitacoes` e `stage_atas` chamam `manual_rows` na primeira
         # linha). Sem consultar isso, o inventário anunciava 14 exercícios a
@@ -1189,10 +1326,16 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
             "linhas_staged": 0 if staged is None else int(len(staged)),
             "janelas_com_dado": com_dado,
             "janelas_vazias": vazias,
+            # O portal recusou a pergunta (400). Não é dado, não é ausência de
+            # dado: é pergunta não aceita, e fica visível para não passar por
+            # nenhum dos dois.
+            "janelas_recusadas": recusadas,
             "janelas_faltando": 0 if manual else len(pend),
             "exercicios_faltando": (f"arquivo manual em data/{MANUAL_SUBDIR}/"
                                     if manual else
                                     ", ".join(str(a) for a in pend)),
+            "recusados_pelo_portal": ", ".join(
+                str(a) for a in sorted(set(anos_recusados), reverse=True)),
             "vai_a_rede": bool(pend) and not manual,
         })
     for nome in ("processos_itens", "indenizacoes_endpoint", "plano_contas",
@@ -1205,7 +1348,9 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
         linhas.append({
             "etapa": nome,
             "linhas_staged": 0 if staged is None else int(len(staged)),
-            "janelas_com_dado": "", "janelas_vazias": "", "janelas_faltando": "",
+            "janelas_com_dado": "", "janelas_vazias": "",
+            "janelas_recusadas": "", "janelas_faltando": "",
+            "recusados_pelo_portal": "",
             # Sem janela anual própria: o critério é o antigo — vazio se
             # recoleta, cheio se pula. Declarado, para o inventário não dar a
             # entender que conferiu exercício por exercício aqui.
@@ -1231,25 +1376,7 @@ def build_staged(desde: int | None, ate: int, *,
     que faltam. É a diferença entre reprocessar dezessete exercícios e
     reprocessar o exercício em que a sessão caiu.
     """
-    etapas = [
-        ("empenhos", lambda: stage_empenhos(desde, ate)),
-        ("pagamentos", lambda: stage_pagamentos(desde, ate)),
-        ("contratos", lambda: stage_contratos(desde, ate)),
-        ("aditivos", lambda: stage_aditivos(desde, ate)),
-        ("licitacoes", lambda: stage_licitacoes(desde, ate)),
-        ("convenios", lambda: stage_convenios(desde, ate)),
-        ("comparativo_despesa", lambda: stage_comparativo_despesa(desde, ate)),
-        ("despesas_centro_custo", lambda: stage_despesas_centro_custo(desde, ate)),
-        ("demonstrativo", lambda: stage_demonstrativo(desde, ate)),
-        ("plano_contas", lambda: stage_plano_contas(ate)),
-        ("processos_itens", lambda: stage_processos_compras(desde, ate)),
-        ("atas", lambda: stage_atas(desde, ate)),
-        ("comparativo_receita", lambda: stage_orcamento(desde, ate)),
-        ("quadro_pessoal", lambda: stage_quadro_pessoal(ate)),
-        ("mandatarios", lambda: stage_mandatarios(ate)),
-        ("indenizacoes_endpoint", lambda: stage_indenizacoes(desde, ate)),
-        ("pncp_contratos", lambda: stage_pncp(desde, ate)),
-    ]
+    etapas = list(_etapas(desde, ate).items())
 
     # Lista de MÓDULO: duas coletas no mesmo processo (o Colab reaproveita o
     # kernel) empilhavam duas linhas por dataset em `_coleta_diagnostico.csv`, e

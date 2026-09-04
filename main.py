@@ -122,13 +122,18 @@ def main():
             if not pasta.is_dir():
                 print(f"{etapa}: sem checkpoint em {pasta}")
                 continue
-            padrao = "*" if args.tudo else "*.vazio"
-            alvos = [f for f in pasta.rglob(padrao) if f.is_file()]
+            # Sem `--tudo`, apaga os dois marcadores NEGATIVOS e preserva os
+            # `.csv`: `.vazio` ("o servidor disse que não há nada") e
+            # `.recusado` ("o portal não aceitou a pergunta"). São eles que
+            # fazem uma janela deixar de ser buscada; o dado coletado não.
+            alvos = ([f for f in pasta.rglob("*") if f.is_file()] if args.tudo
+                     else [f for f in pasta.rglob("*")
+                           if f.is_file() and f.suffix in (".vazio", ".recusado")])
             for f in alvos:
                 f.unlink()
             total += len(alvos)
             print(f"{etapa}: {len(alvos)} checkpoint(s) apagado(s) "
-                  f"({'todos' if args.tudo else 'só os de janela vazia'})")
+                  f"({'todos' if args.tudo else 'vazios e recusados; o dado ficou'})")
         print(f"\n{total} arquivo(s) removido(s). A próxima rodada vai à rede "
               "por essas janelas.")
         return 0

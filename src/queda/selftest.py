@@ -844,6 +844,11 @@ ESPERADOS = [
     "empenhos-fracionamento",
     "empenhos-pago-maior-que-empenhado",
     "empenhos-fantasma",               # taxa, com a rotina de abertura separada
+    # A fixture não monta `processos_itens` (o payload tem ITENS aninhados e não
+    # sobrevive a CSV), então o universo esperado tem 17 etapas e ela cobre 16.
+    # O achado ter de aparecer AQUI é o teste: sem ele, uma rodada que abortou
+    # na terceira etapa publicaria "Coleta completa: 3 de 3 datasets".
+    "diagnostico-etapas-nao-alcancadas",
     "empenhos-vinculo-empenho-ausente",  # art. 60: a chave não é publicada — um
                                          # achado de metodologia, não 7.059 acusações
     "contratos-aditivos-limite",
@@ -978,7 +983,15 @@ def _confere_metricas(achados) -> list[str]:
                      "(chave indisponível não casa zero: não é tentada)")
     erros.extend(_regressao_chave_empenho())
     erros.extend(_regressao_retomada())
+    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 17)
+    exige("diagnostico-etapas-nao-alcancadas", "etapas_nao_alcancadas", 1)
+    f = por_id.get("diagnostico-etapas-nao-alcancadas")
+    if f is not None and f.metricas.get("quais") != "processos_itens":
+        erros.append("diagnostico-etapas-nao-alcancadas.quais = "
+                     f"{f.metricas.get('quais')!r}, esperado 'processos_itens' "
+                     "— se outra etapa sumiu da fixture, é regressão dela")
     erros.extend(_regressao_dado_nao_some())
+    erros.extend(_regressao_recusa_do_portal())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1228,6 +1241,102 @@ def _regressao_retomada() -> list[str]:
     finally:
         clients.implanta = orig
 
+    return erros
+
+
+def _regressao_recusa_do_portal() -> list[str]:
+    """Janela que o portal RECUSA não pode ser repetida em toda rodada.
+
+    Medido na rodada real de 04/09/2026, sobre o Drive do operador: o portal
+    devolve HTTP 400 para o exercício 2026 em ONZE endpoints, e para 2010-2020
+    no DespesasCentroCusto. Como 400 (corretamente) não vira checkpoint, o
+    inventário anunciava essas janelas como pendentes PARA SEMPRE e cada rodada
+    gastava ~25 requisições que nunca dariam certo — num host que responde 403
+    por rajada, e que abortou aquela rodada.
+
+    A recusa é anotada com validade curta: dentro dela a rodada seguinte pula a
+    janela; passada, tenta de novo, porque a recusa pode ter sido do NOSSO
+    formato de parâmetro. O que ela nunca pode virar é `.vazio`, que afirmaria
+    "o órgão não publica este exercício".
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+    from . import clients, pipeline
+
+    erros: list[str] = []
+    guardado = (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+                config.CACHE_DIR, os.environ.get("QUEDA_CHECKPOINT"),
+                clients.implanta_ano)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        try:
+            os.environ["QUEDA_CHECKPOINT"] = "1"
+            config.DATA_DIR = base
+            config.CACHE_DIR = base / "cache"
+            config.RAW_DIR = base / "raw"
+            config.STAGED_DIR = base / "staged"
+            config.STAGED_DIR.mkdir(parents=True)
+
+            rede: list[int] = []
+
+            def portal(endpoint, ano, **kw):
+                rede.append(ano)
+                if ano >= 2026:
+                    return None                    # 400: pergunta não aceita
+                if ano <= 2011:
+                    return []                      # servidor: nada neste ano
+                return [{"NUMERO": ano, "VALOR": 1.0,
+                         "DATA_EMPENHO": f"01/01/{ano}"}]
+
+            clients.implanta_ano = portal
+            pipeline.stage_empenhos(None, 2026)
+            if 2026 not in rede:
+                erros.append("regressão da recusa: a primeira rodada nem "
+                             "tentou o exercício recusado")
+            rede.clear()
+            pipeline.stage_empenhos(None, 2026)
+            if rede:
+                erros.append(
+                    "regressão da recusa: a segunda rodada voltou à rede pelas "
+                    f"janelas {rede} que o portal já recusou — cada rodada "
+                    "queima ritmo em pergunta que não vai ser aceita")
+
+            _, _, marcador = pipeline._checkpoint_arquivos("empenhos", "2026")
+            _, vazio, _ = pipeline._checkpoint_arquivos("empenhos", "2026")
+            if not marcador.exists():
+                erros.append("regressão da recusa: o marcador `.recusado` não "
+                             "foi gravado")
+            if vazio.exists():
+                erros.append(
+                    "regressão da recusa: a recusa virou `.vazio` — isso "
+                    "AFIRMA que o órgão não publica o exercício, a partir de "
+                    "um 400 que pode ser do nosso formato de parâmetro")
+            if pipeline._janela_estado("empenhos", "2026", 2026) != "recusado":
+                erros.append("regressão da recusa: o estado da janela recusada "
+                             f"saiu {pipeline._janela_estado('empenhos', '2026', 2026)!r}")
+
+            inv = pipeline.inventario(None, 2026)
+            linha = inv[inv["etapa"] == "empenhos"].iloc[0]
+            if linha["vai_a_rede"] or linha["janelas_recusadas"] != 1:
+                erros.append(
+                    "regressão da recusa: o inventário ainda manda a etapa à "
+                    f"rede (vai_a_rede={linha['vai_a_rede']}, "
+                    f"recusadas={linha['janelas_recusadas']}) — `faltando` e a "
+                    "coleta nunca convergem")
+            if str(linha["recusados_pelo_portal"]) != "2026":
+                erros.append(
+                    "regressão da recusa: o inventário não nomeia o exercício "
+                    f"recusado ({linha['recusados_pelo_portal']!r}) — o "
+                    "operador não tem como distinguir 'coletado' de 'o portal "
+                    "não aceita a pergunta'")
+        finally:
+            (config.RAW_DIR, config.STAGED_DIR, config.DATA_DIR,
+             config.CACHE_DIR, checkpoint_antes, clients.implanta_ano) = guardado
+            if checkpoint_antes is None:
+                os.environ.pop("QUEDA_CHECKPOINT", None)
+            else:
+                os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
     return erros
 
 

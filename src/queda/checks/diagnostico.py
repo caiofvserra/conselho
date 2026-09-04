@@ -393,6 +393,51 @@ def run(staged) -> list[Finding]:
     if diag.empty:
         return achados
 
+    # ---- etapas que a rodada NUNCA ALCANÇOU
+    #
+    # `diag` só tem linha para etapa que passou por `_salvar` ou foi pulada pelo
+    # `--retomar`. A que a rodada não chegou a executar — porque abortou por
+    # bloqueio de ritmo antes dela — não aparece como vazia: não aparece. E o
+    # título saía "Coleta completa: 3 de 3 datasets com dados" numa rodada de 3
+    # de 17 etapas (medido). Como o relatório passou a sair SEMPRE, inclusive
+    # depois de um abort, esse silêncio virou o caminho mais provável para um
+    # atestado de saúde sobre coleta pela metade.
+    from ..pipeline import DATASETS_ESPERADOS
+    vistos = set(diag["dataset"].astype(str))
+    nunca = [d for d in DATASETS_ESPERADOS if d not in vistos]
+    if nunca:
+        # De propósito FORA de `diag`: "nunca tentada" e "veio vazia" são
+        # categorias diferentes, e é a confusão entre as duas que este módulo
+        # existe para desfazer. Misturá-las mandaria cada etapa não alcançada
+        # para a análise de "por que veio vazia", que responderia "sem registro
+        # de tentativa — indeterminado" para algo que tem causa conhecida: a
+        # rodada parou antes.
+        achados.append(Finding(
+            id="diagnostico-etapas-nao-alcancadas", frente=FRENTE,
+            gravidade="alta",
+            titulo=(f"{len(nunca)} de {len(DATASETS_ESPERADOS)} etapas da "
+                    "coleta não chegaram a ser executadas nesta rodada"),
+            descricao=(
+                "Estas fontes não vieram vazias — elas **não foram tentadas**. "
+                "A rodada parou antes delas, quase sempre por bloqueio de ritmo "
+                "do portal (403 em rajada), e o relatório abaixo cobre só o que "
+                "já estava em disco.\n\n"
+                "A distinção importa para ler qualquer número deste relatório: "
+                "uma frente sem achado porque a fonte não foi coletada não é "
+                "uma frente sem irregularidade. **Poucos achados numa frente "
+                "cuja fonte não foi tentada não é sinal de regularidade.**\n\n"
+                "`python main.py faltando` mostra o que ficou, e `python "
+                "main.py all --retomar` vai à rede só por isso — as janelas já "
+                "gravadas em checkpoint saem do disco."),
+            evidencia=pd.DataFrame({"etapa_nao_alcancada": nunca}),
+            como_verificar=("Rodar de novo com `--retomar` até `python main.py "
+                            "faltando` não listar mais nenhuma etapa indo à "
+                            "rede."),
+            metricas={"etapas_esperadas": len(DATASETS_ESPERADOS),
+                      "etapas_nao_alcancadas": len(nunca),
+                      "quais": ", ".join(nunca)},
+        ))
+
     # ---- etapas que falharam com erro (fonte fora do ar, formato mudou)
     if "erro" in diag.columns:
         falhas = diag[diag["erro"].notna() & (diag["erro"].astype(str) != "")]
@@ -416,10 +461,16 @@ def run(staged) -> list[Finding]:
 
     achados.append(Finding(
         id="diagnostico-cobertura", frente=FRENTE,
-        gravidade="alta" if graves else ("media" if faltando else "info"),
+        gravidade=("alta" if graves or nunca else
+                   ("media" if faltando else "info")),
+        # `nunca` entra no título porque sem ele a frase "Coleta completa" era
+        # LITERALMENTE falsa numa rodada abortada: ela contava o que estava no
+        # inventário, e o inventário só tem as etapas que a rodada alcançou.
         titulo=(f"{len(graves)} fonte(s) essencial(is) não foram coletadas — "
                 "há análises desligadas neste relatório"
                 if graves else
+                f"{len(nunca)} etapa(s) não chegaram a ser executadas — a "
+                "cobertura deste relatório é parcial" if nunca else
                 f"Coleta completa: {len(diag[diag['linhas'] > 0])} de "
                 f"{len(diag)} datasets com dados"),
         descricao=(
@@ -432,7 +483,8 @@ def run(staged) -> list[Finding]:
             "já veio) ou mudança no formato de parâmetro do endpoint."),
         evidencia=diag.sort_values("linhas", ascending=False),
         metricas={"datasets_vazios": vazios,
-                  "essenciais_ausentes": [f[0] for f in graves]},
+                  "essenciais_ausentes": [f[0] for f in graves],
+                  "etapas_nao_alcancadas": nunca},
     ))
 
     if faltando:
