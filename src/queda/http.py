@@ -380,6 +380,47 @@ def get_text(url: str, params: dict | None = None):
     return r.status_code, r.text or ""
 
 
+def get_bytes(url: str, params: dict | None = None, *,
+              retries: int | None = None) -> bytes | None:
+    """GET de arquivo binário (ZIP do CEIS/CNEP), sem cache em JSON.
+
+    Devolve os bytes em 2xx, `None` em 4xx (o Portal da Transparência responde
+    404 para data sem publicação — dia não útil — e o chamador recua um dia),
+    e levanta RuntimeError depois de esgotar os retries em 5xx/rede, como
+    `get_json`. Passa pelo throttle e pelo ledger.
+    """
+    limite = config.RETRIES if retries is None else retries
+    for tentativa in range(1, limite + 2):
+        _throttle(url)
+        t0 = time.monotonic()
+        try:
+            r = session().get(url, params=params, timeout=max(config.TIMEOUT, 120))
+        except requests.RequestException as e:
+            registrar(url, params, resultado=R_ERRO_REDE, status=type(e).__name__,
+                      tentativa=tentativa, duracao=time.monotonic() - t0)
+            if tentativa > limite:
+                raise RuntimeError(f"Falha após retries: {url}") from e
+            time.sleep(2.0 * (2 ** (tentativa - 1)))
+            continue
+        dur = time.monotonic() - t0
+        if r.status_code >= 500:
+            registrar(url, params, resultado=R_ERRO_SERVIDOR, status=r.status_code,
+                      tentativa=tentativa, duracao=dur)
+            if tentativa > limite:
+                raise RuntimeError(f"HTTP {r.status_code} em {url}")
+            time.sleep(2.0 * (2 ** (tentativa - 1)))
+            continue
+        if r.status_code >= 400:
+            registrar(url, params, resultado=R_RECUSADO if r.status_code != 404
+                      else R_INEXISTENTE, status=r.status_code, tentativa=tentativa,
+                      duracao=dur)
+            return None
+        registrar(url, params, resultado=R_OK, status=r.status_code,
+                  tentativa=tentativa, itens=len(r.content), duracao=dur)
+        return r.content
+    return None
+
+
 def _guardar_corpo_nao_json(url: str, r) -> None:
     """Um 2xx que não é JSON é a única resposta que o ledger registrava sem
     dizer O QUE veio — e é justamente a que mais explica.

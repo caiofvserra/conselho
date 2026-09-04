@@ -1047,6 +1047,113 @@ def _ultimo_pagamento(staged) -> dict[str, pd.Timestamp]:
     return {} if g is None else g.max().to_dict()
 
 
+def _achados_sancoes(staged) -> list[Finding]:
+    """Pagamento a fornecedor que constava no CEIS/CNEP na data do pagamento.
+
+    Duas listas, porque a lei separa: inidoneidade e proibição de contratar
+    valem para toda a administração (efeito nacional); impedimento e suspensão
+    valem para o órgão que os aplicou. Pagar a empresa impedida por um
+    município não é irregularidade do Crea-SP — é contexto. Misturar as duas
+    acusaria onde não há o que acusar.
+    """
+    san = df(staged, "sancoes")
+    pg = _pagamentos_pj(staged)
+    if san.empty:
+        return [Finding(
+            id="fornecedores-sancionados-indisponivel", frente=FRENTE, gravidade="info",
+            titulo="Cruzamento com CEIS/CNEP não realizado: cadastros de sanção não coletados",
+            descricao=("Os cadastros da CGU (CEIS: inidôneas e suspensas; CNEP: "
+                       "Lei Anticorrupção) são baixados em ZIP diário do Portal da "
+                       "Transparência. Nesta rodada nenhuma data respondeu, ou a "
+                       "etapa não rodou. Sem eles, nenhum pagamento foi conferido "
+                       "contra sanção — o que não é o mesmo que não haver."),
+            como_verificar="Rodar de novo com rede; ou baixar o CSV do CEIS em "
+                           "portaldatransparencia.gov.br/download-de-dados/ceis e "
+                           "salvar em data/manual/sancoes.csv.",
+        )]
+    if pg.empty or "cnpj" not in pg.columns:
+        return []
+    san = san.copy()
+    san["documento"] = san["documento"].astype(str).str.replace(r"\D", "", regex=True)
+    san = san[san["documento"].str.len() == 14]
+    pagos = pg.copy()
+    pagos["DATA"] = pd.to_datetime(coluna(pagos, "DATA", None), errors="coerce")
+    j = pagos.merge(san, left_on="cnpj", right_on="documento", how="inner")
+    if j.empty:
+        return [Finding(
+            id="fornecedores-sancionados", frente=FRENTE, gravidade="info",
+            titulo="Nenhum fornecedor pago consta no CEIS/CNEP",
+            descricao=(f"{pg['cnpj'].nunique()} CNPJ(s) pagos conferidos contra "
+                       f"{san['documento'].nunique()} sancionados. A foto dos "
+                       "cadastros é a de hoje: sanção já expirada e removida não "
+                       "aparece."),
+            metricas={"cnpjs_conferidos": int(pg["cnpj"].nunique()),
+                      "sancionados_no_cadastro": int(san["documento"].nunique())},
+        )]
+    ini = pd.to_datetime(j["inicio"], errors="coerce")
+    fim = pd.to_datetime(j["fim"], errors="coerce")
+    dentro = j["DATA"].notna() & ini.notna() & (j["DATA"] >= ini) & (fim.isna() | (j["DATA"] <= fim))
+    j["pagamento_durante_sancao"] = dentro
+    cols = [c for c in ("cnpj", "FAVORECIDO_NORM", "DATA", "VALOR", "cadastro", "categoria",
+                        "inicio", "fim", "orgao_sancionador", "esfera", "efeito_nacional")
+            if c in j.columns]
+    nac = j[dentro & j["efeito_nacional"].astype(bool)]
+    esc = j[dentro & ~j["efeito_nacional"].astype(bool)]
+    achados: list[Finding] = []
+    if not nac.empty:
+        v = float(pd.to_numeric(nac["VALOR"], errors="coerce").fillna(0).sum())
+        achados.append(Finding(
+            id="fornecedores-sancionados", frente=FRENTE, gravidade="alta",
+            titulo=(f"{nac['cnpj'].nunique()} fornecedor(es) receberam {fmt_brl(v)} "
+                    "enquanto constavam como inidôneos ou proibidos de contratar "
+                    "(efeito em toda a administração)"),
+            descricao=(
+                "Pagamento com data dentro do período de uma sanção de EFEITO "
+                "NACIONAL: declaração de inidoneidade (Lei 8.666, art. 87, IV; "
+                "Lei 14.133, art. 156, IV) ou proibição de contratar (Lei "
+                "12.846). Essas sanções valem para toda a administração pública, "
+                "não só para o órgão que as aplicou.\n\n"
+                "**O que isto não prova:** que o contrato foi firmado durante a "
+                "sanção. Pagamento de contrato anterior à sanção é execução de "
+                "obrigação já assumida — a data da assinatura decide, e ela está "
+                "no portal de contratos. O cruzamento aponta onde olhar."),
+            evidencia=nac[cols].sort_values("VALOR", ascending=False).head(100),
+            base_legal="Lei 8.666/1993, art. 87, IV; Lei 14.133/2021, art. 156, IV; "
+                       "Lei 12.846/2013, art. 19, IV.",
+            como_verificar="Para cada par, comparar a data de assinatura do contrato "
+                           "com o início da sanção; pedir ao órgão a consulta ao "
+                           "CEIS feita à época (art. 91, §4º, Lei 14.133).",
+            metricas={"fornecedores": int(nac["cnpj"].nunique()),
+                      "pagamentos": int(len(nac)), "valor": round(v, 2)},
+        ))
+    if not esc.empty:
+        v = float(pd.to_numeric(esc["VALOR"], errors="coerce").fillna(0).sum())
+        achados.append(Finding(
+            id="fornecedores-sancionados-outro-orgao", frente=FRENTE, gravidade="info",
+            titulo=(f"{esc['cnpj'].nunique()} fornecedor(es) pagos ({fmt_brl(v)}) tinham "
+                    "impedimento ou suspensão aplicados por OUTRO órgão"),
+            descricao=(
+                "Contexto, **não achado**: impedimento e suspensão (Lei 8.666, art. "
+                "87, III; Lei 14.133, art. 156, III) valem para o ente que os "
+                "aplicou. Um impedimento de um município não proíbe o Crea-SP de "
+                "contratar a empresa. A lista existe porque quem cruzar as bases "
+                "sem ler a categoria da sanção vai publicar isto como "
+                "irregularidade — e não é."),
+            evidencia=esc[cols].sort_values("VALOR", ascending=False).head(100),
+            metricas={"fornecedores": int(esc["cnpj"].nunique()), "valor": round(v, 2)},
+        ))
+    if not achados:
+        achados.append(Finding(
+            id="fornecedores-sancionados", frente=FRENTE, gravidade="info",
+            titulo=(f"{j['cnpj'].nunique()} fornecedor(es) pagos constam no CEIS/CNEP, "
+                    "mas nenhum pagamento caiu dentro do período da sanção"),
+            descricao="Sanção anterior ou posterior aos pagamentos. Sem sobreposição "
+                      "de datas não há o que apontar.",
+            evidencia=j[cols].sort_values("DATA").head(100),
+        ))
+    return achados
+
+
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
     fichas = fichas_cnpj(staged)
@@ -1113,6 +1220,9 @@ def run(staged) -> list[Finding]:
                       "empresa de fachada/direcionamento.",
             evidencia=pd.DataFrame(jovens),
         ))
+
+    # ------------------------------------------------ sanções (CEIS/CNEP, CGU)
+    achados.extend(_achados_sancoes(staged))
 
     # ---------------------------------------------- geografia, porte e CNAE
     perfil = _perfil_fichas(fichas)

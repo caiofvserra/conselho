@@ -736,6 +736,70 @@ def _staged() -> dict[str, pd.DataFrame]:
     # espelha stage_pncp
     pncp["_ano"] = pd.to_numeric(pncp["anoContrato"], errors="coerce")
 
+    # Contratações (editais) no PNCP. As duas primeiras são as compras de
+    # origem dos contratos acima (`numeroControlePNCPCompra`): uma por pregão,
+    # outra por inexigibilidade — é o que dá modalidade de origem ao contrato.
+    # A terceira é uma dispensa sem contrato ligado.
+    licitacoes_pncp = pd.DataFrame([
+        {"numeroControlePNCP": "00000000000191-1-000123/2023", "anoCompra": 2023,
+         "modalidadeId": 6, "modalidadeNome": "Pregão - Eletrônico",
+         "objeto": "instalação elétrica da sede", "valorTotalEstimado": 2_500_000.0,
+         "valorTotalHomologado": 2_400_000.0, "amparoLegalNome": "Lei 14.133/2021, Art. 28, I",
+         "situacaoCompraNome": "Divulgada no PNCP", "_ano": 2023},
+        {"numeroControlePNCP": "00000000000191-1-000456/2023", "anoCompra": 2023,
+         "modalidadeId": 9, "modalidadeNome": "Inexigibilidade",
+         "objeto": "reforma da cobertura", "valorTotalEstimado": 1_800_000.0,
+         "valorTotalHomologado": 1_800_000.0, "amparoLegalNome": "Lei 14.133/2021, Art. 74, I",
+         "situacaoCompraNome": "Divulgada no PNCP", "_ano": 2023},
+        {"numeroControlePNCP": "00000000000191-1-000789/2024", "anoCompra": 2024,
+         "modalidadeId": 8, "modalidadeNome": "Dispensa",
+         "objeto": "manutenção de elevadores", "valorTotalEstimado": 90_000.0,
+         "valorTotalHomologado": 88_000.0, "amparoLegalNome": "Lei 14.133/2021, Art. 75, II",
+         "situacaoCompraNome": "Divulgada no PNCP", "_ano": 2024},
+    ])
+
+    # CEIS/CNEP. ALFA SERVICOS (99888777000155) recebe em março/2024 e está
+    # INIDÔNEA em 2024 → efeito nacional, achado alto. DELTA COMERCIO
+    # (_CNPJ_BAIXADO) recebe R$ 120 mil em 10/05/2023 com IMPEDIMENTO aplicado
+    # por um município → contexto, não achado. A terceira linha é sanção fora
+    # de qualquer data de pagamento.
+    sancoes = pd.DataFrame([
+        {"cadastro": "ceis", "documento": "99888777000155", "nome": _FORN_FRACIONA,
+         "categoria": "Declaração de Inidoneidade", "inicio": pd.Timestamp("2024-01-01"),
+         "fim": pd.Timestamp("2024-12-31"), "orgao_sancionador": "MINISTERIO X",
+         "esfera": "FEDERAL", "uf_orgao": "DF", "fundamento": "Lei 8.666, art. 87, IV",
+         "efeito_nacional": True},
+        {"cadastro": "ceis", "documento": _CNPJ_BAIXADO, "nome": "DELTA COMERCIO LTDA",
+         "categoria": "Impedimento de licitar e contratar", "inicio": pd.Timestamp("2023-01-01"),
+         "fim": pd.Timestamp("2023-12-31"), "orgao_sancionador": "PREFEITURA MUNICIPAL DE Y",
+         "esfera": "MUNICIPAL", "uf_orgao": "SP", "fundamento": "Lei 14.133, art. 156, III",
+         "efeito_nacional": False},
+        {"cadastro": "cnep", "documento": "77888999000122", "nome": "CONSTRUTORA NOVA SEDE",
+         "categoria": "Multa", "inicio": pd.Timestamp("2015-01-01"),
+         "fim": pd.Timestamp("2015-06-30"), "orgao_sancionador": "CGU",
+         "esfera": "FEDERAL", "uf_orgao": "DF", "fundamento": "Lei 12.846",
+         "efeito_nacional": False},
+    ])
+
+    # Comparação entre Creas: 6 conselhos × 2 exercícios, mesmas contas. SP com
+    # a maior parcela em verbas (diárias + jetons), para o ranking ter um 1º.
+    _bench = []
+    _perfis = {"SP": (60e6, 30e6), "MG": (30e6, 6e6), "RJ": (25e6, 5e6),
+               "PR": (15e6, 3e6), "RS": (14e6, 2e6), "BA": (10e6, 1.5e6)}
+    for uf, (folha, verbas) in _perfis.items():
+        for ano in (2023, 2024):
+            _bench += [
+                {"_uf": uf, "_host": f"crea-{uf.lower()}", "_ano": ano,
+                 "NOME_CONTA": "Vencimentos e Vantagens Fixas", "VALOR_PAGO": folha},
+                {"_uf": uf, "_host": f"crea-{uf.lower()}", "_ano": ano,
+                 "NOME_CONTA": "Diárias no País", "VALOR_PAGO": verbas * 0.6},
+                {"_uf": uf, "_host": f"crea-{uf.lower()}", "_ano": ano,
+                 "NOME_CONTA": "Jetons a Conselheiros", "VALOR_PAGO": verbas * 0.4},
+                {"_uf": uf, "_host": f"crea-{uf.lower()}", "_ano": ano,
+                 "NOME_CONTA": "Serviços de Terceiros PJ", "VALOR_PAGO": folha * 0.5},
+            ]
+    benchmark_creas = pd.DataFrame(_bench)
+
     return {
         "pagamentos": _pagamentos(), "empenhos": empenhos, "contratos": contratos,
         "aditivos": aditivos, "licitacoes": pd.DataFrame(), "convenios": convenios,
@@ -745,6 +809,8 @@ def _staged() -> dict[str, pd.DataFrame]:
         "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
+        "licitacoes_pncp": licitacoes_pncp, "sancoes": sancoes,
+        "benchmark_creas": benchmark_creas,
         "plano_contas": _plano_contas(), "_coleta_http": _coleta_http(),
     }
 
@@ -867,6 +933,13 @@ ESPERADOS = [
     "atas-llm-desligado",
     # casos concentrados
     "contratos-certame-no-pncp",       # o PNCP diz qual compra originou o contrato
+    "licitacoes-pncp-rol",             # o rol que o portal não publica está no PNCP
+    "contratos-modalidade-de-origem",  # pregão × dispensa × inexigibilidade, por contrato
+    "fornecedores-sancionados",        # pago durante inidoneidade (efeito nacional)
+    "fornecedores-sancionados-outro-orgao",  # impedimento de outro ente: contexto
+    "benchmark-cobertura",             # quantos Creas responderam
+    "benchmark-despesa-por-profissional",
+    "benchmark-verbas-share",
     "casos-entidade-da-casa",
     "casos-obras",
     # forense estatística
@@ -1010,7 +1083,30 @@ def _confere_metricas(achados) -> list[str]:
                      f"{por_id['contratos-fora-do-pncp-convivencia'].gravidade} "
                      "— é contexto declarado, não achado")
 
-    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 17)
+    # PNCP: dois contratos ligados à compra de origem; a inexigibilidade (1,8 mi)
+    # é 42,9% do valor dos dois (4,2 mi) — abaixo de 50%, gravidade info.
+    exige("contratos-modalidade-de-origem", "contratos_com_origem", 2)
+    exige("contratos-modalidade-de-origem", "valor_contratacao_direta", 1_800_000)
+    exige("licitacoes-pncp-rol", "contratacoes", 3)
+    # Sanções: só ALFA cai em inidoneidade dentro da janela; REFORMA TOTAL é
+    # impedimento de outro ente e NÃO pode entrar no achado alto.
+    exige("fornecedores-sancionados", "fornecedores", 1)
+    f = por_id.get("fornecedores-sancionados")
+    if f is not None and f.gravidade != "alta":
+        erros.append(f"fornecedores-sancionados saiu {f.gravidade}, esperado alta "
+                     "(inidoneidade vale para toda a administração)")
+    f = por_id.get("fornecedores-sancionados-outro-orgao")
+    if f is not None and f.gravidade != "info":
+        erros.append("fornecedores-sancionados-outro-orgao saiu "
+                     f"{f.gravidade} — impedimento de OUTRO ente é contexto, não achado")
+    # Benchmark: SP tem a maior parcela em verbas (33% da despesa) → 1º de 6.
+    f = por_id.get("benchmark-verbas-share")
+    if f is not None and f.metricas.get("posicao") != 1:
+        erros.append("benchmark-verbas-share: SP deveria ser 1º em parcela de verbas "
+                     f"na fixture, saiu {f.metricas.get('posicao')}º")
+    exige("benchmark-despesa-por-profissional", "conselhos", 6)
+
+    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 20)
     exige("diagnostico-etapas-nao-alcancadas", "etapas_nao_alcancadas", 1)
     f = por_id.get("diagnostico-etapas-nao-alcancadas")
     if f is not None and f.metricas.get("quais") != "processos_itens":
@@ -1022,6 +1118,7 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_coleta_converge())
     erros.extend(_regressao_sondagem_e_orgaos())
     erros.extend(_regressao_prefixo_e_nome())
+    erros.extend(_regressao_novas_fontes())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1367,6 +1464,86 @@ def _regressao_recusa_do_portal() -> list[str]:
                 os.environ.pop("QUEDA_CHECKPOINT", None)
             else:
                 os.environ["QUEDA_CHECKPOINT"] = checkpoint_antes
+    return erros
+
+
+def _regressao_novas_fontes() -> list[str]:
+    """CEIS/CNEP e efeito da sanção — o que não pode quebrar em silêncio.
+
+    Nada disto foi testado contra a rede na sessão em que foi escrito. O que
+    fica trancado é o contrato: o leitor de ZIP/CSV resolve colunas com acento
+    e caixa variável, recua dia a dia até achar publicação, separa `None`
+    (rede) de `[]` (sem coluna de documento), e a regra de efeito nacional
+    distingue inidoneidade de impedimento.
+    """
+    import io as _io
+    import zipfile
+    from datetime import date
+    from . import clients
+
+    erros: list[str] = []
+
+    # 1. Colunas por trecho normalizado, com acento e ordem diferentes.
+    mapa = clients._resolver_colunas_sancao([
+        "TIPO DE PESSOA", "CPF OU CNPJ DO SANCIONADO", "NOME DO SANCIONADO",
+        "CATEGORIA DA SANÇÃO", "DATA INÍCIO SANÇÃO", "DATA FINAL SANÇÃO",
+        "ÓRGÃO SANCIONADOR", "ESFERA ÓRGÃO SANCIONADOR", "FUNDAMENTAÇÃO LEGAL"])
+    esperado = {"documento": "CPF OU CNPJ DO SANCIONADO", "categoria": "CATEGORIA DA SANÇÃO",
+                "inicio": "DATA INÍCIO SANÇÃO", "fim": "DATA FINAL SANÇÃO",
+                "orgao": "ÓRGÃO SANCIONADOR", "esfera": "ESFERA ÓRGÃO SANCIONADOR",
+                "fundamento": "FUNDAMENTAÇÃO LEGAL"}
+    for k, v in esperado.items():
+        if mapa.get(k) != v:
+            erros.append(f"sanções: coluna {k!r} resolvida como {mapa.get(k)!r}, esperado {v!r}")
+
+    # 2. Recuo de data: 404 nos dois primeiros dias, ZIP no terceiro.
+    csv = ("TIPO DE PESSOA;CPF OU CNPJ DO SANCIONADO;NOME DO SANCIONADO;CATEGORIA DA SANÇÃO;"
+           "DATA INÍCIO SANÇÃO;DATA FINAL SANÇÃO;ÓRGÃO SANCIONADOR;ESFERA ÓRGÃO SANCIONADOR;"
+           "FUNDAMENTAÇÃO LEGAL\n"
+           "J;99.888.777/0001-55;ALFA;Declaração de Inidoneidade;01/01/2024;31/12/2024;"
+           "MIN X;FEDERAL;Lei 8.666 art. 87 IV\n")
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("20260902_CEIS.csv", csv.encode("latin-1"))
+    pedidos: list[str] = []
+
+    def _bytes(url, params=None, **kw):
+        pedidos.append(url)
+        return buf.getvalue() if url.endswith("20260902") else None
+
+    from . import http
+    orig = http.get_bytes
+    http.get_bytes = _bytes
+    try:
+        linhas, meta = clients.baixar_sancoes("ceis", hoje=date(2026, 9, 4))
+    finally:
+        http.get_bytes = orig
+    if len(pedidos) != 3 or not pedidos[-1].endswith("20260902"):
+        erros.append(f"sanções: o recuo de data não parou na primeira publicação ({pedidos})")
+    if not linhas or linhas[0].get("documento") != "99888777000155":
+        erros.append(f"sanções: o CSV do ZIP não foi lido/normalizado ({linhas[:1]})")
+    if meta.get("data") != "2026-09-02":
+        erros.append(f"sanções: meta.data = {meta.get('data')!r}, esperado 2026-09-02")
+
+    # 3. Rede caída em todas as datas → None (indisponível), nunca [].
+    http.get_bytes = lambda url, params=None, **kw: (_ for _ in ()).throw(RuntimeError("rede"))
+    try:
+        linhas, _ = clients.baixar_sancoes("ceis", hoje=date(2026, 9, 4))
+    finally:
+        http.get_bytes = orig
+    if linhas is not None:
+        erros.append("sanções: rede caída devolveu lista em vez de None — a frente "
+                     "publicaria 'nenhum fornecedor sancionado' sem ter conferido")
+
+    # 4. Efeito da sanção.
+    casos = [("Declaração de Inidoneidade", None, True),
+             ("Impedimento de licitar e contratar", None, False),
+             ("Suspensão temporária", "Lei 8.666 art. 87 III", False),
+             ("Proibição de contratar com o Poder Público", None, True),
+             ("Multa", "Lei 12.846", False)]
+    for cat, fund, esperado_ in casos:
+        if clients.efeito_nacional(cat, fund) != esperado_:
+            erros.append(f"sanções: efeito_nacional({cat!r}) deveria ser {esperado_}")
     return erros
 
 

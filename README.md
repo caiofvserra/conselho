@@ -156,6 +156,12 @@ Adivinhar formato custa cinco requisições por janela num portal que responde
    aceita. O JSON que a página baixou pode ir direto para
    `data/manual/<etapa>.json` — a etapa passa a ler dali e não vai à rede.
 
+**Nada das fontes novas (PNCP contratações, CEIS/CNEP, outros Creas) pôde ser
+testado contra a rede na sessão em que foi escrito** — o proxy bloqueava os
+hosts. URLs e nomes de coluna são os publicados até onde se sabe; o código
+resolve colunas por aproximação, recua dia a dia até achar publicação e declara
+"indisponível" quando falha. A primeira rodada real confirma ou desmente.
+
 Nem todo payload cabe num CSV: `contratos` e `processos_itens` trazem listas
 dentro da linha, e uma lista num CSV vira texto irreversível. Essas janelas
 viram checkpoint **JSON**, que devolve o que a API mandou. Sem isso a etapa não
@@ -383,7 +389,30 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     pagamentos que apontam para ele. Reprovado na conferência, o casamento é
     descartado e o caso vira diagnóstico (`empenhos-chave-nao-casa`), nunca
     acusação. `_regressao_chave_empenho`, no selftest, tranca as duas.
-19. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
+19. **Contratações no PNCP e modalidade de origem** — o portal do conselho não
+    publica o rol de licitações nem o certame de cada contrato. O PNCP publica
+    as contratações que a Lei 14.133 obriga (desde 30/12/2023), e liga cada
+    contrato à compra de origem pelo `numeroControlePNCPCompra`. Daí sai a
+    pergunta que "100% sem licitação vinculada" deixava aberta: **pregão,
+    dispensa ou inexigibilidade?** Contratação direta é legal quando cabe numa
+    hipótese dos arts. 74–75; a coluna `amparo_legal` traz a declarada. Só as
+    modalidades típicas de um conselho são varridas (pregão, concorrência,
+    dispensa, inexigibilidade, credenciamento), por mês e com checkpoint.
+20. **Fornecedores sancionados (CEIS/CNEP, CGU)** — pagamento com data dentro
+    de uma sanção. Duas listas, porque a lei separa: **inidoneidade e
+    proibição de contratar valem para toda a administração** (achado alto);
+    **impedimento e suspensão valem só para o ente que os aplicou** — pagar a
+    empresa impedida por um município não é irregularidade do Crea-SP, e sai
+    como contexto. O que o cruzamento não prova: que o contrato foi firmado
+    durante a sanção — a data de assinatura decide.
+21. **Comparação entre Creas** (opt-in, `--comparar-creas`) — a mesma API
+    serve os 27 conselhos e o Confea. Despesa por profissional ativo e parcela
+    em diárias/jetons/indenizações, pelo mesmo endpoint e pela mesma taxonomia,
+    para cada `crea-XX.implanta.net.br` que responder. Denominador: profissionais
+    ativos por Crea (Confea/SIC, estoque 2026-08-30 — copiado do projeto
+    engineer-statistics). Ranking só com 5+ conselhos; a coluna
+    `nao_classificado_pct` diz quanto de cada um a régua não alcançou.
+22. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
     o que faltou, que exercícios ficaram fora, **qual análise está desligada
     por falta de qual fonte** e, lido do registro de status HTTP, **por que**
     cada fonte vazia veio vazia — separando "o órgão não publica" (achado de

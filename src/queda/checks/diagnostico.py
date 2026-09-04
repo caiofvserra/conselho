@@ -55,6 +55,12 @@ CRITICOS = {
     "pncp_contratos": ("contratos no PNCP e rede entre órgãos do sistema",
                        "media"),
     "licitacoes": ("vinculação contrato × certame", "baixa"),
+    "licitacoes_pncp": ("rol de contratações pós-2023 e modalidade de origem "
+                        "de cada contrato (o portal não publica)", "media"),
+    "sancoes": ("pagamento a fornecedor inidôneo/impedido na data do pagamento "
+                "(CEIS/CNEP)", "media"),
+    "benchmark_creas": ("posição do Crea-SP entre os pares por profissional "
+                        "ativo (opt-in)", "baixa"),
 }
 
 
@@ -95,6 +101,11 @@ ENDPOINTS: dict[str, tuple[str, ...]] = {
                               + _implanta(*clients.DIARIAS_PROBE)),
     "pncp_contratos": ("/api/consulta/v1/contratos",),
     "pncp_cobrancas": ("/api/consulta/v1/instrumentoscobranca/inclusao",),
+    "licitacoes_pncp": ("/api/consulta/v1/contratacoes/publicacao",),
+    "sancoes": ("/download-de-dados/ceis", "/download-de-dados/cnep"),
+    # opt-in: vazio por padrão não é falha de coleta, é escolha (ver `desligado`
+    # no inventário)
+    "benchmark_creas": ("/ComparativoDespesa",),
 }
 
 # Os dois vereditos que a tarefa inteira existe para separar.

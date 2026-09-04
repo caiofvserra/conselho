@@ -24,6 +24,7 @@ executivo, sem a leitura das atas e sem o refino da taxonomia.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import logging
 import sys
@@ -57,6 +58,10 @@ def _parse_args():
     p.add_argument("--etapa", default="",
                    help="limpar: etapas separadas por vírgula "
                         "(ex.: licitacoes,atas)")
+    p.add_argument("--comparar-creas", action="store_true",
+                   help="fetch/all: coletar o ComparativoDespesa dos outros "
+                        "conselhos para a frente 'Comparação entre Creas' "
+                        "(~28 hosts × exercícios de requisições)")
     p.add_argument("--tudo", action="store_true",
                    help="limpar: apagar também os checkpoints COM dado, não só "
                         "os marcadores de janela vazia")
@@ -95,6 +100,14 @@ def _sondar(pipeline) -> int:
     print("  (controle: Empenhos deve vir com itens no primeiro prefixo. Um endpoint "
           "vazio no primeiro e com itens no segundo é a hipótese confirmada; vazio "
           "em todos é o órgão não publicando.)\n")
+
+    print("== quais conselhos respondem na mesma API (para --comparar-creas) ==")
+    creas = clients.sondar_creas(2025)
+    ok = [c for c in creas if c["responde"]]
+    print("  respondem:", ", ".join(f"{c['uf']}({c['linhas']})" for c in ok) or "nenhum")
+    print("  não respondem:", ", ".join(c["uf"] for c in creas if not c["responde"]) or "nenhum")
+    print(f"  ({len(ok)} de {len(creas)} hosts candidatos; o ranking exige pelo menos "
+          "5 para ser publicado)\n")
 
     encontrados = clients.descobrir_swagger()
     pasta = config.RAW_DIR / "swagger"
@@ -145,6 +158,16 @@ def _sondar(pipeline) -> int:
                     aceita = ", ".join(r["query"]) or "nenhum parâmetro"
                     print(f"  {ep:34} aceita: {aceita}\n"
                           f"  {'':34} mandamos: {mandamos}")
+            # O que o contrato oferece e a coleta ainda não pega: é a lista de
+            # candidatos a próxima fonte, tirada do contrato e não de palpite.
+            usados = set(clients.ENDPOINTS_IMPLANTA_USADOS)
+            sobra = sorted(n for n in por_nome if n not in usados
+                           and por_nome[n]["metodo"] == "GET")
+            if sobra:
+                print("\n  -- documentados e NÃO coletados --")
+                for n in sobra:
+                    q = ", ".join(por_nome[n]["query"]) or "sem parâmetros"
+                    print(f"  {n:34} {q}")
     return 0
 
 
@@ -181,6 +204,8 @@ def main():
 
     from queda.http import RateLimited
     desde = None if args.desde == "auto" else int(args.desde)
+    if getattr(args, "comparar_creas", False):
+        os.environ[config.BENCHMARK_LIGADO_ENV] = "1"
 
     if args.cmd == "sondar":
         return _sondar(pipeline)

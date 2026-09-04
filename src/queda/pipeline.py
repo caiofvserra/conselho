@@ -470,10 +470,13 @@ def _registrar_janelas(dataset: str, falhas: list, do_disco: int,
                     len(so_falharam),
                     ", ".join(str(f) for f in so_falharam[:12]))
     if recusadas:
-        log.warning("%s: o portal RECUSOU %d janela(s) (%s) — 400, pergunta "
-                    "não aceita. Anotado por %.0fh: a rodada seguinte não "
-                    "insiste nelas e gasta o ritmo no que ainda pode vir. Isso "
-                    "NÃO afirma que o exercício está vazio.", dataset,
+        # Sem afirmar o status: aqui chega tanto o 400 (pergunta não aceita)
+        # quanto host que não existe ou não respondeu de forma utilizável — o
+        # ledger `_coleta_http.csv` tem o código exato de cada um.
+        log.warning("%s: %d janela(s) sem resposta utilizável (%s) — recusa ou "
+                    "caminho que não serve. Anotado por %.0fh: a rodada seguinte "
+                    "não insiste nelas e gasta o ritmo no que ainda pode vir. "
+                    "Isso NÃO afirma que o exercício está vazio.", dataset,
                     len(recusadas), ", ".join(str(f) for f in recusadas[:12]),
                     CHECKPOINT_RECUSA_TTL_HORAS)
     d = _JANELAS.setdefault(dataset, {"janelas_sem_coleta": 0})
@@ -1249,6 +1252,107 @@ ETAPAS_JANELA_ANUAL: dict[str, tuple[str, ...]] = {
 }
 
 
+def stage_licitacoes_pncp(desde, ate):
+    """Contratações (editais) do órgão-alvo no PNCP, por modalidade × mês.
+
+    É a fonte alternativa para `licitacoes`, que o portal próprio não publica:
+    sob a Lei 14.133 (obrigatória desde 30/12/2023) toda contratação tem de
+    estar no PNCP. E é o que permite ligar contrato → compra de origem
+    (`numeroControlePNCPCompra`) → modalidade: o portal não diz se um contrato
+    veio de pregão ou de dispensa; o PNCP diz.
+    """
+    manual = manual_rows("licitacoes_pncp")
+    if manual is not None:
+        _marcar_manual("licitacoes_pncp", len(manual))
+        return _salvar("licitacoes_pncp", pd.DataFrame(manual))
+    alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO,
+                                       cnpj_fixo=config.ORGAO_ALVO_CNPJ_CANDIDATOS,
+                                       uf=config.ORGAO_ALVO_UF)
+    if not alvo or not alvo.get("cnpj"):
+        log.warning("licitacoes_pncp: órgão-alvo não resolvido — etapa vazia")
+        return _salvar("licitacoes_pncp", pd.DataFrame())
+    ini = max(desde or config.LICITACOES_PNCP_DESDE, config.LICITACOES_PNCP_DESDE)
+    linhas: list[dict] = []
+    for mod, nome_mod in config.PNCP_MODALIDADES_CONSELHO.items():
+        def buscar(jini, jfim, mod=mod):
+            rows = clients.pncp_contratacoes_mes(alvo["cnpj"], jini, jfim, mod)
+            if rows is None:
+                return None
+            return [clients._projetar_contratacao(r) for r in rows]
+        linhas.extend(_janelas_nomeadas(
+            f"licitacoes_pncp/{mod}",
+            ((jini[:6], int(jini[:4]), jini, jfim)
+             for jini, jfim in clients.pncp_meses(ini, ate)),
+            buscar, dataset="licitacoes_pncp"))
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        df["_ano"] = pd.to_numeric(df.get("anoCompra"), errors="coerce")
+        for c in ("valorTotalEstimado", "valorTotalHomologado"):
+            if c in df:
+                df[c] = df[c].map(parse_valor)
+    return _salvar("licitacoes_pncp", df)
+
+
+def stage_sancoes(ate=None):
+    """CEIS + CNEP (CGU), a foto de hoje. Tiro único; a retomada é o cache."""
+    manual = manual_rows("sancoes")
+    if manual is not None:
+        _marcar_manual("sancoes", len(manual))
+        return _salvar("sancoes", pd.DataFrame(manual))
+    todas: list[dict] = []
+    metas: list[dict] = []
+    for cadastro in config.SANCOES_CADASTROS:
+        linhas, meta = clients.baixar_sancoes(cadastro)
+        metas.append(meta)
+        if linhas is None:
+            log.warning("sancoes: %s indisponível (nenhuma data respondeu)", cadastro)
+            continue
+        todas.extend(linhas)
+    df = pd.DataFrame(todas)
+    if not df.empty:
+        df["inicio"] = parse_data(df["inicio"])
+        df["fim"] = parse_data(df["fim"])
+        df["efeito_nacional"] = [clients.efeito_nacional(c, f)
+                                 for c, f in zip(df["categoria"], df["fundamento"])]
+    out = _salvar("sancoes", df)
+    _DIAGNOSTICO[-1]["fontes"] = "; ".join(
+        f"{m['cadastro']}: {m.get('data') or 'sem resposta'}" for m in metas)
+    return out
+
+
+def stage_benchmark_creas(ate):
+    """ComparativoDespesa dos outros conselhos, para comparar o alvo com os pares.
+
+    OPT-IN (`QUEDA_COMPARAR_CREAS=1` / `--comparar-creas`): são até 28 hosts ×
+    exercícios. Desligado, grava vazio e diz por quê — não conta como etapa
+    não alcançada.
+    """
+    if os.environ.get(config.BENCHMARK_LIGADO_ENV, "").strip().lower() not in ("1", "true", "sim"):
+        out = _salvar("benchmark_creas", pd.DataFrame())
+        _DIAGNOSTICO[-1]["desligado"] = (f"opt-in: {config.BENCHMARK_LIGADO_ENV}=1 "
+                                         "ou --comparar-creas")
+        return out
+    anos = list(range(ate - config.BENCHMARK_EXERCICIOS, ate))   # encerrados
+    linhas: list[dict] = []
+    for uf, host in config.CREAS_IMPLANTA.items():
+        def buscar(ano, host=host, uf=uf):
+            rows = clients.implanta_em(host, "ComparativoDespesa", {
+                "referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"})
+            if rows is None:
+                return None
+            return [{**r, "_uf": uf, "_host": host} for r in rows]
+        linhas.extend(_janelas_nomeadas(
+            f"benchmark/{host}", ((str(a), a, a) for a in anos), buscar,
+            dataset="benchmark_creas"))
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        for c in ("VALOR", "VALOR_EMPENHADO", "VALOR_PAGO", "VALOR_LIQUIDADO",
+                  "VALOR_ORCADO", "REALIZADO_EXERCICIO"):
+            if c in df:
+                df[c] = df[c].map(parse_valor)
+    return _salvar("benchmark_creas", df)
+
+
 def _etapas(desde: int | None, ate: int) -> dict:
     """Etapa -> como executá-la. ORDEM É A DA COLETA.
 
@@ -1278,6 +1382,9 @@ def _etapas(desde: int | None, ate: int) -> dict:
         "mandatarios": lambda: stage_mandatarios(ate),
         "indenizacoes_endpoint": lambda: stage_indenizacoes(desde, ate),
         "pncp_contratos": lambda: stage_pncp(desde, ate),
+        "licitacoes_pncp": lambda: stage_licitacoes_pncp(desde, ate),
+        "sancoes": lambda: stage_sancoes(ate),
+        "benchmark_creas": lambda: stage_benchmark_creas(ate),
     }
 
 
@@ -1399,7 +1506,8 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
             "vai_a_rede": bool(pend) and not manual,
         })
     for nome in ("processos_itens", "indenizacoes_endpoint", "plano_contas",
-                 "quadro_pessoal", "mandatarios", "pncp_contratos"):
+                 "quadro_pessoal", "mandatarios", "pncp_contratos",
+                 "licitacoes_pncp", "sancoes", "benchmark_creas"):
         staged = _ja_coletado(nome)
         manual = manual_rows(nome) is not None
         if nome == "pncp_contratos":

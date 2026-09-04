@@ -95,6 +95,61 @@ DADOS_ABERTOS_CANDIDATES = [
 PNCP_CONSULTA = "https://pncp.gov.br/api/consulta"
 PNCP_API = "https://pncp.gov.br/api/pncp"
 
+# ---------------------------------------------------------------- fontes novas
+# Nada abaixo pôde ser testado contra a rede na sessão em que foi escrito (o
+# proxy bloqueava os hosts). URLs e nomes de coluna são os publicados pelas
+# fontes até onde se sabe; o código resolve colunas por aproximação e declara
+# "indisponível" quando não encontra — nunca inventa.
+
+# Contratações (editais) do órgão no PNCP — `/v1/contratacoes/publicacao` EXIGE
+# a modalidade. Para um conselho profissional, as que importam: sem as demais
+# (leilão, concurso, diálogo competitivo) a varredura cai de 13 para 5
+# modalidades × meses. Códigos da Lei 14.133 no PNCP.
+PNCP_MODALIDADES_CONSELHO = {4: "Concorrência eletrônica", 6: "Pregão eletrônico",
+                             8: "Dispensa", 9: "Inexigibilidade", 12: "Credenciamento"}
+# Só faz sentido a partir de quando a Lei 14.133 passou a ser obrigatória
+# (30/12/2023): antes, contratação sob a 8.666 não tinha de ir ao PNCP.
+LICITACOES_PNCP_DESDE = 2023
+
+# Cadastros de sanção do Portal da Transparência (CGU), em ZIP diário. Não há
+# publicação em dia não útil: o cliente recua dia a dia até achar. CEIS =
+# inidôneas e suspensas (8.666 art. 87 e 14.133 art. 156); CNEP = punidas pela
+# Lei Anticorrupção (12.846).
+SANCOES_CADASTROS = {
+    "ceis": "https://portaldatransparencia.gov.br/download-de-dados/ceis/{data}",
+    "cnep": "https://portaldatransparencia.gov.br/download-de-dados/cnep/{data}",
+}
+SANCOES_RECUO_DIAS = 10
+
+# Comparação entre Creas: a MESMA API Implanta serve os 27 conselhos e o
+# Confea — o host segue o padrão `crea-XX.implanta.net.br` (confirmado para
+# crea-sp e confea-br pela documentação pública; os demais são CANDIDATOS que
+# `sondar` confere com uma requisição cada). Opt-in: QUEDA_COMPARAR_CREAS=1 ou
+# `--comparar-creas`, porque são ~27 hosts × exercícios de requisições.
+CREAS_IMPLANTA = {uf: f"crea-{uf.lower()}" for uf in (
+    "AC AL AM AP BA CE DF ES GO MA MG MS MT PA PB PE PI PR RJ RN RO RR RS SC SE SP TO"
+).split()}
+CREAS_IMPLANTA["BR"] = "confea-br"
+BENCHMARK_EXERCICIOS = 3
+BENCHMARK_LIGADO_ENV = "QUEDA_COMPARAR_CREAS"
+
+# Denominador da comparação: profissionais ATIVOS por Crea. Copiado do dataset
+# `confea-uf` do projeto engineer-statistics (fonte: SIC do Confea, estoque em
+# 2026-08-30, consulta
+# https://relatorio.confea.org.br/Profissional/ProfissionaisPorGenero/Buscar).
+# 27 UFs, soma 1.217.708 = total publicado pelo Confea. Profissional ≠ título:
+# um profissional pode ter mais de um título; aqui são PESSOAS.
+PROFISSIONAIS_ATIVOS_FONTE = {"fonte": "Confea/SIC — estoque 2026-08-30",
+                              "url": "https://relatorio.confea.org.br/Profissional/ProfissionaisPorGenero/Buscar",
+                              "capturado_em": "2026-08-30"}
+PROFISSIONAIS_ATIVOS_POR_CREA = {
+    "RO": 8048, "AC": 2742, "AM": 16888, "RR": 1795, "PA": 36583, "AP": 1879,
+    "TO": 7755, "MA": 17034, "PI": 10580, "CE": 25279, "RN": 15190, "PB": 14137,
+    "PE": 28626, "AL": 9382, "SE": 7970, "BA": 54481, "MG": 161214, "ES": 25300,
+    "RJ": 119957, "SP": 346824, "PR": 76749, "SC": 50887, "RS": 69604, "MS": 18033,
+    "MT": 29253, "GO": 37988, "DF": 23530,
+}
+
 CNPJ_APIS = [
     "https://brasilapi.com.br/api/cnpj/v1/{cnpj}",
     "https://minhareceita.org/{cnpj}",

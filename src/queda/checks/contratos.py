@@ -725,8 +725,105 @@ def run(staged) -> list[Finding]:
                                 "valorGlobal", "valorAcumulado"]],
             ))
 
+    # --------------------------- modalidade de origem, via PNCP (o portal não diz)
+    achados.extend(_achados_modalidade_origem(pncp, df(staged, "licitacoes_pncp")))
+
     # ------------------------------------ razão pago/contratado por fornecedor
     achados.extend(_achados_razao(ctr, adt, pg, sem_carteira_confiavel))
+    return achados
+
+
+def _achados_modalidade_origem(pncp: pd.DataFrame, lic: pd.DataFrame) -> list[Finding]:
+    """De que certame veio cada contrato? O portal do conselho não publica
+    número de licitação em nenhum dos seus contratos; o PNCP publica, e liga
+    contrato → compra pelo `numeroControlePNCPCompra`. Cruzando com as
+    contratações, cada contrato ganha a MODALIDADE de origem — pregão,
+    dispensa, inexigibilidade — que é a pergunta que "100% sem licitação
+    vinculada" deixava sem resposta.
+    """
+    achados: list[Finding] = []
+    if lic.empty:
+        return achados
+    mods = lic.copy()
+    mods["modalidadeNome"] = coluna(mods, "modalidadeNome", "").fillna("").astype(str)
+    valor_est = pd.to_numeric(coluna(mods, "valorTotalEstimado", 0), errors="coerce").fillna(0)
+    por_mod = (mods.assign(_v=valor_est).groupby("modalidadeNome")
+               .agg(contratacoes=("_v", "size"), valor_estimado=("_v", "sum"))
+               .sort_values("valor_estimado", ascending=False).reset_index())
+    total_v = float(por_mod["valor_estimado"].sum())
+    diretas = por_mod[por_mod["modalidadeNome"].str.upper().str.contains(
+        "DISPENSA|INEXIGIB", regex=True, na=False)]
+    pct_direta = 100 * float(diretas["valor_estimado"].sum()) / total_v if total_v else 0.0
+    achados.append(Finding(
+        id="licitacoes-pncp-rol", frente=FRENTE,
+        gravidade="media" if pct_direta >= 50 else "info",
+        titulo=(f"O rol de contratações está no PNCP: {len(mods)} desde "
+                f"{int(pd.to_numeric(mods.get('_ano'), errors='coerce').min()) if '_ano' in mods else config.LICITACOES_PNCP_DESDE}"
+                f" — {pct_direta:.0f}% do valor estimado por dispensa ou inexigibilidade"),
+        descricao=(
+            "O portal próprio do conselho não publica o rol de licitações, e "
+            "seus contratos não informam certame de origem. O PNCP publica as "
+            "contratações que a Lei 14.133 obriga a divulgar (a partir de "
+            "30/12/2023), com modalidade e valor estimado.\n\n"
+            "A tabela é o rol por modalidade. **Contratação direta não é "
+            "irregularidade**: dispensa e inexigibilidade têm hipóteses legais "
+            "(arts. 74 e 75 da Lei 14.133). O que este número mostra é a "
+            "proporção — e a lista, com objeto e valor, é o ponto de partida "
+            "para conferir a hipótese invocada em cada uma.\n\n"
+            "Varredura por modalidade: " + ", ".join(config.PNCP_MODALIDADES_CONSELHO.values()) +
+            ". Modalidades fora dessa lista (leilão, concurso, diálogo "
+            "competitivo) não foram consultadas."),
+        evidencia=por_mod,
+        base_legal="Lei 14.133/2021, arts. 54, 74, 75 e 94.",
+        como_verificar="Abrir cada contratação em pncp.gov.br pelo "
+                       "`numeroControlePNCP` e ler o amparo legal declarado.",
+        metricas={"contratacoes": int(len(mods)),
+                  "valor_estimado_total": round(total_v, 2),
+                  "pct_valor_contratacao_direta": round(pct_direta, 1),
+                  "modalidades_consultadas": list(config.PNCP_MODALIDADES_CONSELHO.values())},
+    ))
+
+    if pncp.empty or "numeroControlePNCPCompra" not in pncp.columns:
+        return achados
+    alvo = pncp[pncp.get("orgao_papel") == "alvo"].copy()
+    chave = alvo["numeroControlePNCPCompra"].fillna("").astype(str)
+    lic_k = mods.set_index(mods["numeroControlePNCP"].fillna("").astype(str))
+    lic_k = lic_k[~lic_k.index.duplicated()]
+    alvo["modalidade_origem"] = chave.map(lic_k["modalidadeNome"]).fillna("")
+    alvo["amparo_legal"] = chave.map(coluna(lic_k, "amparoLegalNome", "")).fillna("")
+    com = alvo[alvo["modalidade_origem"].ne("")]
+    if com.empty:
+        return achados
+    vg = pd.to_numeric(com["valorGlobal"], errors="coerce").fillna(0)
+    resumo = (com.assign(_v=vg).groupby("modalidade_origem")
+              .agg(contratos=("_v", "size"), valor_global=("_v", "sum"))
+              .sort_values("valor_global", ascending=False).reset_index())
+    direta = com[com["modalidade_origem"].str.upper().str.contains("DISPENSA|INEXIGIB", regex=True)]
+    vd = float(pd.to_numeric(direta["valorGlobal"], errors="coerce").fillna(0).sum())
+    vt = float(vg.sum())
+    achados.append(Finding(
+        id="contratos-modalidade-de-origem", frente=FRENTE,
+        gravidade="media" if vt and vd / vt >= 0.5 else "info",
+        titulo=(f"{len(com)} de {len(alvo)} contratos no PNCP têm a compra de origem "
+                f"identificada — {100 * vd / vt if vt else 0:.0f}% do valor veio de "
+                "dispensa ou inexigibilidade"),
+        descricao=(
+            "Ligação contrato → compra pelo `numeroControlePNCPCompra` do próprio "
+            "PNCP, e da compra à modalidade. É a informação que o portal do "
+            "conselho não dá em nenhum dos seus 965 contratos.\n\n"
+            "Contratação direta é legal quando cabe numa hipótese dos arts. 74 "
+            "e 75 da Lei 14.133; a coluna `amparo_legal` traz a hipótese "
+            "declarada. O que merece conferência é o par objeto × amparo — um "
+            "serviço continuado de valor alto sob inexigibilidade pede a "
+            "justificativa de fornecedor exclusivo."),
+        evidencia=com[["numeroContrato", "fornecedor_nome", "objeto", "valorGlobal",
+                       "modalidade_origem", "amparo_legal", "numeroControlePNCPCompra"]]
+        .sort_values("valorGlobal", ascending=False).head(100),
+        base_legal="Lei 14.133/2021, arts. 74 e 75 (contratação direta); art. 94 (divulgação).",
+        metricas={"contratos_com_origem": int(len(com)), "contratos_pncp": int(len(alvo)),
+                  "valor_contratacao_direta": round(vd, 2), "valor_total": round(vt, 2),
+                  "resumo_por_modalidade": resumo.to_dict("records")},
+    ))
     return achados
 
 

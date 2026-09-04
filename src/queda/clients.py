@@ -759,6 +759,192 @@ def pncp_contratacoes(cnpj: str, ano_ini: int, ano_fim: int,
     return out
 
 
+def pncp_contratacoes_mes(cnpj: str, ini: str, fim: str, modalidade: int):
+    """Contratações (editais/avisos) do órgão numa janela mensal e UMA modalidade.
+
+    O endpoint exige `codigoModalidadeContratacao`; por isso a varredura é
+    modalidade × mês, cada par com checkpoint próprio no chamador. Devolve
+    `None` quando o servidor não respondeu de forma utilizável (o chamador
+    trata como janela não coletada, não como vazia).
+    """
+    try:
+        rows = pncp_paginado("/v1/contratacoes/publicacao", {
+            "dataInicial": ini, "dataFinal": fim, "cnpj": cnpj,
+            "codigoModalidadeContratacao": modalidade, "tamanhoPagina": 50,
+        }, retries=4, espera_base=4.0)
+    except RuntimeError:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def _projetar_contratacao(r: dict) -> dict:
+    return {
+        "numeroControlePNCP": r.get("numeroControlePNCP"),
+        "anoCompra": r.get("anoCompra"),
+        "sequencialCompra": r.get("sequencialCompra"),
+        "modalidadeId": r.get("modalidadeId"),
+        "modalidadeNome": r.get("modalidadeNome"),
+        "modoDisputaNome": r.get("modoDisputaNome"),
+        "situacaoCompraNome": r.get("situacaoCompraNome"),
+        "objeto": r.get("objetoCompra"),
+        "valorTotalEstimado": r.get("valorTotalEstimado"),
+        "valorTotalHomologado": r.get("valorTotalHomologado"),
+        "dataPublicacaoPncp": r.get("dataPublicacaoPncp"),
+        "dataAberturaProposta": r.get("dataAberturaProposta"),
+        "processo": r.get("processo"),
+        "amparoLegalNome": (r.get("amparoLegal") or {}).get("nome") if isinstance(r.get("amparoLegal"), dict) else r.get("amparoLegalNome"),
+        "srp": r.get("srp"),
+    }
+
+
+# ============================================================ sanções (CGU)
+def _norm_coluna(c: str) -> str:
+    import unicodedata
+    c = unicodedata.normalize("NFD", str(c or ""))
+    c = "".join(ch for ch in c if unicodedata.category(ch) != "Mn")
+    return re.sub(r"[^A-Z0-9]+", " ", c.upper()).strip()
+
+
+def _resolver_colunas_sancao(colunas: list[str]) -> dict[str, str | None]:
+    """Acha as colunas por trecho do nome, não por nome exato.
+
+    Os cabeçalhos do CEIS/CNEP têm acento, mudam de caixa entre versões e já
+    ganharam palavras ao longo dos anos. Casar por igualdade quebraria em
+    silêncio na primeira mudança; casar por trecho normalizado declara o que
+    achou e o que não achou.
+    """
+    norm = {c: _norm_coluna(c) for c in colunas}
+
+    def acha(*trechos):
+        for c, n in norm.items():
+            if all(t in n for t in trechos):
+                return c
+        return None
+
+    return {
+        "documento": acha("CPF", "CNPJ") or acha("CNPJ"),
+        "nome": acha("NOME", "SANCIONADO") or acha("RAZAO", "SOCIAL"),
+        "categoria": acha("CATEGORIA", "SANCAO") or acha("TIPO", "SANCAO"),
+        "inicio": acha("INICIO", "SANCAO") or acha("DATA", "INICIO"),
+        "fim": acha("FINAL", "SANCAO") or acha("FIM", "SANCAO") or acha("DATA", "FIM"),
+        "orgao": acha("ORGAO", "SANCIONADOR"),
+        "esfera": acha("ESFERA"),
+        "uf_orgao": acha("UF", "ORGAO"),
+        "fundamento": acha("FUNDAMENTACAO") or acha("FUNDAMENTO"),
+    }
+
+
+def baixar_sancoes(cadastro: str, hoje=None) -> tuple[list[dict] | None, dict]:
+    """ZIP diário do CEIS/CNEP → linhas normalizadas. (linhas, meta).
+
+    `linhas` é None quando nenhuma data recente respondeu (rede) — o chamador
+    declara a fonte indisponível. Meta traz a data usada, a URL e o mapa de
+    colunas resolvido, para o relatório dizer exatamente o que leu.
+    """
+    import csv
+    import io as _io
+    import zipfile
+    from datetime import date, timedelta
+    from .http import get_bytes
+
+    tpl = config.SANCOES_CADASTROS[cadastro]
+    hoje = hoje or date.today()
+    meta: dict = {"cadastro": cadastro, "tentativas": []}
+    for recuo in range(config.SANCOES_RECUO_DIAS + 1):
+        d = hoje - timedelta(days=recuo)
+        url = tpl.format(data=d.strftime("%Y%m%d"))
+        meta["tentativas"].append(url)
+        try:
+            corpo = get_bytes(url)
+        except RuntimeError as e:
+            log.warning("%s: %s", cadastro, e)
+            return None, meta
+        if not corpo:
+            continue                                   # 404: sem publicação no dia
+        try:
+            zf = zipfile.ZipFile(_io.BytesIO(corpo))
+            nomes = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not nomes:
+                log.warning("%s: ZIP sem CSV (%s)", cadastro, zf.namelist()[:3])
+                continue
+            texto = zf.read(nomes[0]).decode("latin-1", "replace")
+        except zipfile.BadZipFile:
+            log.warning("%s: resposta não é ZIP (%d bytes)", cadastro, len(corpo))
+            continue
+        leitor = csv.DictReader(_io.StringIO(texto), delimiter=";")
+        colunas = list(leitor.fieldnames or [])
+        mapa = _resolver_colunas_sancao(colunas)
+        meta.update({"data": d.isoformat(), "url": url, "arquivo": nomes[0],
+                     "colunas": colunas, "mapa": mapa})
+        if not mapa["documento"]:
+            log.warning("%s: não achei a coluna de CPF/CNPJ em %s", cadastro, colunas[:8])
+            return [], meta
+        linhas = []
+        for r in leitor:
+            doc = re.sub(r"\D", "", r.get(mapa["documento"]) or "")
+            if not doc:
+                continue
+            linhas.append({
+                "cadastro": cadastro, "documento": doc,
+                "nome": r.get(mapa["nome"]) if mapa["nome"] else None,
+                "categoria": r.get(mapa["categoria"]) if mapa["categoria"] else None,
+                "inicio": r.get(mapa["inicio"]) if mapa["inicio"] else None,
+                "fim": r.get(mapa["fim"]) if mapa["fim"] else None,
+                "orgao_sancionador": r.get(mapa["orgao"]) if mapa["orgao"] else None,
+                "esfera": r.get(mapa["esfera"]) if mapa["esfera"] else None,
+                "uf_orgao": r.get(mapa["uf_orgao"]) if mapa["uf_orgao"] else None,
+                "fundamento": r.get(mapa["fundamento"]) if mapa["fundamento"] else None,
+            })
+        log.info("%s: %d sanção(ões) em %s (%s)", cadastro, len(linhas), d, nomes[0])
+        return linhas, meta
+    return None, meta
+
+
+def efeito_nacional(categoria: str | None, fundamento: str | None = None) -> bool:
+    """A sanção vale para TODA a administração ou só para quem a aplicou?
+
+    Impedimento e suspensão (8.666 art. 87 III; 14.133 art. 156 III) valem
+    para o órgão/ente sancionador — um impedimento aplicado por um município
+    não proíbe o Crea-SP de contratar. Declaração de inidoneidade (8.666 art.
+    87 IV; 14.133 art. 156 IV) e proibição de contratar (12.846) valem para
+    toda a administração. Cruzar pagamento com sanção sem esta distinção
+    acusaria o conselho de contratar impedido onde não há impedimento.
+    """
+    t = _norm_coluna(f"{categoria or ''} {fundamento or ''}")
+    return ("INIDON" in t) or ("PROIBICAO DE CONTRATAR" in t) or ("PROIBIDA DE CONTRATAR" in t)
+
+
+# ====================================================== outros conselhos
+def implanta_em(host: str, endpoint: str, params: dict | None = None):
+    """`implanta()` apontado para OUTRO conselho da mesma API (comparação).
+
+    Mesma convenção de retorno ([] / None), mesmos prefixos; sem aprendizado
+    de prefixo por host para não misturar com o do alvo.
+    """
+    for prefixo in config.IMPLANTA_PREFIXOS:
+        data = get_json(f"https://{host}.implanta.net.br{prefixo}/{endpoint}", params,
+                        rate_limit_retries=0)
+        if data is None:
+            continue
+        return data if isinstance(data, list) else (data or [])
+    return None
+
+
+def sondar_creas(ano: int) -> list[dict]:
+    """Quais hosts `crea-XX.implanta.net.br` existem e respondem? Uma requisição
+    cada (ComparativoDespesa de um exercício), sem espera por rate-limit."""
+    out = []
+    for uf, host in config.CREAS_IMPLANTA.items():
+        params = {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"}
+        try:
+            data = implanta_em(host, "ComparativoDespesa", params)
+        except RuntimeError:
+            data = None
+        out.append({"uf": uf, "host": f"{host}.implanta.net.br",
+                    "responde": data is not None, "linhas": len(data) if data else 0})
+    return out
+
+
 # ================================================================ CNPJ
 def consultar_cnpj(cnpj: str) -> dict | None:
     """Ficha cadastral de um CNPJ (fornecedores PJ apenas — nunca CPFs)."""
