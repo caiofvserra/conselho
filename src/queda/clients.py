@@ -1576,6 +1576,54 @@ def baixar_tcu(cadastro: str) -> tuple[list[dict] | None, dict]:
     return None, meta
 
 
+_TCU_ACORDAOS_URL: dict[str, str] = {}
+
+
+def tcu_acordaos_bloco(inicio: int, quantidade: int) -> list | None:
+    """Um bloco de acórdãos do TCU (`recupera-acordaos?inicio&quantidade`).
+
+    Devolve a lista (vazia quando o bloco não tem registro — fim da base) ou
+    **None** quando nenhum caminho respondeu. A assinatura documentada é só de
+    paginação: não há busca por texto, então quem filtra somos nós.
+    """
+    candidatos = list(config.TCU_ACORDAOS_URLS)
+    aprendida = _TCU_ACORDAOS_URL.get("url")
+    if aprendida in candidatos:
+        candidatos.remove(aprendida)
+        candidatos.insert(0, aprendida)
+    for url in candidatos:
+        try:
+            data = get_json(url, {"inicio": inicio, "quantidade": quantidade})
+        except RuntimeError as e:
+            log.warning("tcu/acordaos: %s", e)
+            return None
+        if data is None:
+            continue
+        rows = _tcu_linhas(data)
+        if rows is None:
+            log.info("tcu/acordaos: %s respondeu sem lista — próximo caminho", url)
+            continue
+        _TCU_ACORDAOS_URL["url"] = url
+        return rows
+    return None
+
+
+def tcu_tipos_certidoes() -> list | None:
+    """Catálogo das certidões da Administração Pública Federal (uma requisição).
+
+    Não cruza com nada sozinho: serve para DESCOBRIR quais certidões o TCU
+    publica e com que nome, que é como se acha o caminho da consulta por
+    CPF/CNPJ sem adivinhar. O resultado é gravado em `data/raw/sondar/` para a
+    rodada seguinte — o mesmo caminho que resolveu o contrato da API do portal.
+    """
+    try:
+        data = get_json(config.TCU_TIPOS_CERTIDOES)
+    except RuntimeError as e:
+        log.warning("tcu/certidoes: %s", e)
+        return None
+    return _tcu_linhas(data)
+
+
 def consultar_cnpj(cnpj: str) -> dict | None:
     """Ficha cadastral de um CNPJ (fornecedores PJ apenas — nunca CPFs)."""
     cnpj = re.sub(r"\D", "", cnpj or "")

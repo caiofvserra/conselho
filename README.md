@@ -553,7 +553,26 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     foi verificado contra a rede na sessão em que isto foi escrito: o cliente
     sonda candidatos em ordem, aprende o que responder, guarda o corpo de
     cada recusa em `data/raw/http-4xx/` e declara a fonte **indisponível**
-    enquanto nenhum responder — nunca "não há inidôneo".
+    enquanto nenhum responder — nunca "não há inidôneo". Quando nenhum
+    candidato serve, uma requisição ao **catálogo de certidões da APF**
+    (`certidoes-apf.apps.tcu.gov.br/api/rest/publico/tipos-certidoes`) grava
+    em `data/raw/sondar/` quais listas o TCU publica e com que nome — é como
+    a rodada seguinte acerta o caminho em vez de adivinhar de novo.
+20c. **Acórdãos do TCU** (`dados-abertos.apps.tcu.gov.br`) — decisão do
+    Tribunal sobre contas, inclusive as do conselho: quem julga as contas de
+    um conselho de fiscalização profissional é o TCU (Lei 8.443/1992, art.
+    5º, V; STF, MS 21.797). É a única fonte que diz o que já foi APURADO,
+    por quem tem competência para apurar — e o primeiro lugar a conferir
+    antes de afirmar qualquer coisa que este relatório levante sozinho.
+    A API só pagina (`inicio`, `quantidade`): não há busca por texto, então
+    a varredura é sequencial e o filtro é local (nome do conselho, CNPJ do
+    conselho, CNPJ de cada fornecedor). Por isso ela é **limitada por
+    rodada** (`QUEDA_TCU_ACORDAOS_BLOCOS`, 40 blocos de 500 por padrão) e
+    **retomável**, com o progresso em `data/raw/tcu-acordaos/progresso.json`;
+    só o que casa é guardado. Todo achado publica quantos acórdãos foram
+    lidos: **ausência de citação não é prova de que não exista**. Acórdão
+    que cita só um fornecedor, em processo de outro jurisdicionado, vai para
+    achado separado com gravidade `info` — não é decisão sobre o Crea-SP.
 21. **Comparação entre Creas** (opt-in, `--comparar-creas`) — a mesma API
     serve os 27 conselhos e o Confea. Despesa por profissional ativo e parcela
     em diárias/jetons/indenizações, pelo mesmo endpoint e pela mesma taxonomia,

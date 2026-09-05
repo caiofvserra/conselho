@@ -24,8 +24,8 @@ import pandas as pd
 
 from . import clients, config
 from .http import RateLimited
-from .utils import (RX_CNPJ_FORMATADO, classificar_pessoa, coluna, norm_nome,
-                    parse_data, parse_valor, so_digitos)
+from .utils import (RX_CNPJ_FORMATADO, classificar_pessoa, cnpj14, coluna,
+                    norm_nome, parse_data, parse_valor, so_digitos)
 
 log = logging.getLogger("queda.pipeline")
 
@@ -1702,6 +1702,161 @@ def stage_sancoes(ate=None):
     return out
 
 
+# As âncoras não são decoração: sem elas o padrão casa uma JANELA de 14
+# dígitos dentro de um número maior (um id de 16 dígitos virava um CNPJ que
+# não existe), e CNPJ inventado num acórdão vira citação falsa de fornecedor.
+_RE_CNPJ_TEXTO = re.compile(
+    r"(?<!\d)\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2}(?!\d)")
+_RE_DIGITOS_14 = re.compile(r"(?<!\d)\d{14}(?!\d)")
+
+
+def _texto_do_registro(r: dict) -> str:
+    """Todo o conteúdo textual de um registro, achatado e sem acento — é sobre
+    isto que a busca por termo e por CNPJ acontece."""
+    partes = []
+
+    def anda(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                anda(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                anda(x)
+        elif v is not None:
+            partes.append(str(v))
+    anda(r)
+    return norm_nome(" ".join(partes))
+
+
+def _cnpjs_no_texto(texto: str) -> set[str]:
+    """CNPJs citados num texto, formatados ou não, já normalizados."""
+    achados = {so_digitos(m) for m in _RE_CNPJ_TEXTO.findall(texto)}
+    achados |= set(_RE_DIGITOS_14.findall(texto))
+    return {c for c in achados if len(c) == 14}
+
+
+def _acordao_linha(r: dict, texto: str, citados: set[str]) -> dict:
+    """Projeta um acórdão nas colunas que a análise usa."""
+    def ci(*nomes):
+        for n in nomes:
+            v = _chave_ci(r, n)
+            if v not in (None, "", {}, []):
+                return v
+        return None
+    return {
+        "numero": ci("numeroAcordao", "numero", "acordao"),
+        "ano": ci("anoAcordao", "ano"),
+        "colegiado": ci("colegiado", "orgaoColegiado"),
+        "relator": ci("relator", "nomeRelator"),
+        "data_sessao": ci("dataSessao", "data"),
+        "processo": ci("numeroProcesso", "processo"),
+        "tipo_processo": ci("tipoProcesso", "tipo"),
+        "url": ci("urlAcordao", "url", "link"),
+        "cnpjs_citados": ", ".join(sorted(citados)),
+        "trecho": texto[:600],
+    }
+
+
+def stage_tcu_acordaos(ate=None):
+    """Acórdãos do TCU que citam o conselho ou um fornecedor dele.
+
+    Por que existe: o acórdão é a decisão de quem TEM competência para julgar
+    as contas de um conselho federal. É a única fonte que diz o que já foi
+    apurado — e, sobre um fornecedor, o que já foi apurado em qualquer
+    jurisdicionado.
+
+    Como funciona: a API só pagina (`inicio`, `quantidade`), sem busca por
+    texto, então a varredura é sequencial e o filtro é local. Ela é LIMITADA
+    por rodada (`TCU_ACORDAOS_BLOCOS_POR_RODADA`) e retoma de onde parou, com o
+    progresso em `data/raw/tcu-acordaos/progresso.json`. Só os acórdãos que
+    casam são guardados; os demais são descartados depois de lidos.
+
+    Ressalva que o relatório publica: a base do TCU não tem tamanho declarado
+    aqui e a ordem dos blocos não é garantida entre rodadas. O que sai é uma
+    varredura PARCIAL de tamanho conhecido — ausência não é prova de nada.
+    """
+    alvo_cnpjs = {so_digitos(c) for c in config.ORGAO_ALVO_CNPJ_CANDIDATOS}
+    fornecedores: set[str] = set()
+    ctr = _ja_coletado("contratos", exigir_esquema=False)
+    if ctr is not None and "CONTRATADA_CNPJ" in ctr.columns:
+        fornecedores |= {c for c in cnpj14(ctr["CONTRATADA_CNPJ"], presumir_cnpj=True)
+                         if len(c) == 14}
+    pncp = _ja_coletado("pncp_contratos", exigir_esquema=False)
+    if pncp is not None and "fornecedor_ni" in pncp.columns:
+        fornecedores |= {c for c in cnpj14(pncp["fornecedor_ni"], presumir_cnpj=True)
+                         if len(c) == 14}
+    fornecedores -= alvo_cnpjs
+    termos = tuple(norm_nome(t) for t in config.TCU_ACORDAOS_TERMOS_ALVO)
+
+    progresso_dir = config.RAW_DIR / "tcu-acordaos"
+    progresso_dir.mkdir(parents=True, exist_ok=True)
+    arquivo = progresso_dir / "progresso.json"
+    try:
+        progresso = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        progresso = {}
+    inicio = int(progresso.get("proximo_inicio") or 0)
+    varridos_antes = int(progresso.get("varridos") or 0)
+
+    quantidade = config.TCU_ACORDAOS_QUANTIDADE
+    limite = config.TCU_ACORDAOS_BLOCOS_POR_RODADA
+    novos: list[dict] = []
+    blocos = varridos = 0
+    fim_da_base = False
+    indisponivel = ""
+    while limite <= 0 or blocos < limite:
+        rows = clients.tcu_acordaos_bloco(inicio, quantidade)
+        if rows is None:
+            indisponivel = ("nenhum caminho de acórdãos respondeu"
+                            if blocos == 0 else
+                            f"a varredura parou no bloco {blocos} (host não respondeu)")
+            break
+        if not rows:
+            fim_da_base = True
+            break
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            texto = _texto_do_registro(r)
+            citados = _cnpjs_no_texto(texto)
+            cita_alvo = bool(citados & alvo_cnpjs) or any(t and t in texto for t in termos)
+            cita_forn = citados & fornecedores
+            if cita_alvo or cita_forn:
+                linha = _acordao_linha(r, texto, citados & (alvo_cnpjs | fornecedores))
+                linha["cita_o_conselho"] = bool(cita_alvo)
+                novos.append(linha)
+        varridos += len(rows)
+        inicio += len(rows)
+        blocos += 1
+
+    anterior = _ja_coletado("tcu_acordaos", exigir_esquema=False)
+    df = pd.DataFrame(novos)
+    if anterior is not None and not anterior.empty:
+        df = pd.concat([anterior, df], ignore_index=True) if not df.empty else anterior
+    if not df.empty:
+        chaves = [c for c in ("numero", "ano", "processo") if c in df.columns]
+        if chaves:
+            df = df.drop_duplicates(subset=chaves)
+    try:
+        arquivo.write_text(json.dumps({
+            "proximo_inicio": 0 if fim_da_base else inicio,
+            "varridos": varridos_antes + varridos,
+            "fim_da_base": fim_da_base,
+            "atualizado_em": datetime.now().isoformat(timespec="seconds"),
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log.debug("tcu/acordaos: não foi possível gravar o progresso (%s)", e)
+
+    out = _salvar("tcu_acordaos", df)
+    _DIAGNOSTICO[-1]["fontes"] = (
+        f"varridos {varridos_antes + varridos} acórdão(s) no total "
+        f"({varridos} nesta rodada, {blocos} bloco(s) de {quantidade})"
+        + ("; base percorrida até o fim" if fim_da_base else ""))
+    if indisponivel:
+        _DIAGNOSTICO[-1]["indisponivel"] = indisponivel
+    return out
+
+
 def stage_tcu_responsaveis(ate=None):
     """Pessoas condenadas pelo TCU: inabilitadas para função de confiança
     (Lei 8.443/1992, art. 60) e com contas julgadas irregulares (que é o
@@ -1725,9 +1880,33 @@ def stage_tcu_responsaveis(ate=None):
     out = _salvar("tcu_responsaveis", pd.DataFrame(linhas))
     _DIAGNOSTICO[-1]["fontes"] = "; ".join(metas)
     if indisponiveis:
+        # Nenhum caminho candidato serviu. Uma requisição ao CATÁLOGO de
+        # certidões da APF diz quais listas o TCU publica e com que nome —
+        # é assim que a rodada seguinte acerta o caminho em vez de adivinhar
+        # de novo. Mesmo padrão do `sondar` do portal.
+        catalogo = clients.tcu_tipos_certidoes()
+        nomes = ""
+        if catalogo:
+            alvo = config.RAW_DIR / "sondar"
+            alvo.mkdir(parents=True, exist_ok=True)
+            try:
+                (alvo / "tcu-tipos-certidoes.json").write_text(
+                    json.dumps(catalogo, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+            except OSError as e:
+                log.debug("tcu: catálogo não gravado (%s)", e)
+            rotulos = []
+            for c in catalogo[:20]:
+                if isinstance(c, dict):
+                    v = (_chave_ci(c, "nome") or _chave_ci(c, "descricao")
+                         or _chave_ci(c, "tipo"))
+                    if v:
+                        rotulos.append(str(v))
+            nomes = ("; certidões publicadas pelo TCU: " + ", ".join(rotulos)
+                     + " (catálogo em data/raw/sondar/)") if rotulos else ""
         _DIAGNOSTICO[-1]["indisponivel"] = (
             "TCU não respondeu a nenhum caminho candidato de: "
-            + ", ".join(indisponiveis))
+            + ", ".join(indisponiveis) + nomes)
     return out
 
 
@@ -1798,6 +1977,7 @@ def _etapas(desde: int | None, ate: int) -> dict:
         "pncp_atas": lambda: stage_pncp_atas(desde, ate),
         "sancoes": lambda: stage_sancoes(ate),
         "tcu_responsaveis": lambda: stage_tcu_responsaveis(ate),
+        "tcu_acordaos": lambda: stage_tcu_acordaos(ate),
         "benchmark_creas": lambda: stage_benchmark_creas(ate),
     }
 

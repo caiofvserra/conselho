@@ -180,27 +180,65 @@ SANCOES_RECUO_DIAS = 10
 # um a um, guarda o corpo de cada 4xx em data/raw/http-4xx/ e aprende o que
 # respondeu. Enquanto nenhum responder, a fonte fica declarada indisponível —
 # nunca "não há inidôneos".
+# Hosts REAIS do TCU (informados em 05/09/2026). O serviço de dados abertos é
+# `dados-abertos.apps.tcu.gov.br`; as certidões da Administração Pública Federal
+# ficam em `certidoes-apf.apps.tcu.gov.br`. Os caminhos `ords/condenacao/...`
+# continuam como último recurso porque foram PALPITE — se algum existir, a
+# sondagem descobre; se não, o corpo do 404 fica em data/raw/http-4xx/.
 TCU_CADASTROS: dict[str, tuple[str, ...]] = {
     # empresas: liga por CNPJ, direto no cruzamento de fornecedores
     "tcu_inidoneos": (
+        "https://dados-abertos.apps.tcu.gov.br/api/licitante-inidoneo/recupera-licitantes-inidoneos",
+        "https://dados-abertos.apps.tcu.gov.br/api/inidoneo/recupera-inidoneos",
+        "https://certidoes-apf.apps.tcu.gov.br/api/rest/publico/licitantes-inidoneos",
         "https://contas.tcu.gov.br/ords/condenacao/consulta/inidoneos",
-        "https://contas.tcu.gov.br/ords/api/condenacao/consulta/inidoneos",
-        "https://contas.tcu.gov.br/ords/condenacao/consulta/licitantes-inidoneos",
     ),
     # pessoas: liga por CPF do sócio nas fichas cadastrais
     "tcu_inabilitados": (
+        "https://dados-abertos.apps.tcu.gov.br/api/inabilitado/recupera-inabilitados",
+        "https://certidoes-apf.apps.tcu.gov.br/api/rest/publico/inabilitados",
         "https://contas.tcu.gov.br/ords/condenacao/consulta/inabilitados",
-        "https://contas.tcu.gov.br/ords/api/condenacao/consulta/inabilitados",
     ),
     "tcu_contas_irregulares": (
+        "https://dados-abertos.apps.tcu.gov.br/api/conta-irregular/recupera-contas-irregulares",
+        "https://certidoes-apf.apps.tcu.gov.br/api/rest/publico/contas-irregulares",
         "https://contas.tcu.gov.br/ords/condenacao/consulta/contas-irregulares",
-        "https://contas.tcu.gov.br/ords/api/condenacao/consulta/contas-irregulares",
-        "https://contas.tcu.gov.br/ords/condenacao/consulta/responsaveis-contas-irregulares",
     ),
 }
 # O ORDS pagina com offset; 500 por página é o teto usual.
 TCU_PAGINA = 500
 TCU_MAX_PAGINAS = 200
+
+# Catálogo das certidões da APF: UMA requisição que diz quais certidões existem
+# e com que nome. É por onde se descobre o caminho da consulta por CPF/CNPJ sem
+# adivinhar — o resultado fica em data/raw/sondar/ para a rodada seguinte usar.
+TCU_TIPOS_CERTIDOES = "https://certidoes-apf.apps.tcu.gov.br/api/rest/publico/tipos-certidoes"
+
+# ------------------------------------------------------ acórdãos do TCU
+# Decisão do Tribunal sobre contas — inclusive as dos conselhos de fiscalização
+# profissional. É a única fonte que diz o que já foi APURADO sobre o Crea-SP e
+# sobre seus fornecedores, por quem tem competência para apurar.
+#
+# A assinatura documentada é só de paginação (`inicio`, `quantidade`): não há
+# busca por texto, então a varredura é sequencial e o filtro é nosso. Por isso
+# ela é LIMITADA por rodada e retomável — cada bloco vira checkpoint, e o
+# relatório publica quantos acórdãos foram varridos em vez de fingir cobertura
+# total. Ausência aqui nunca significa que não exista.
+TCU_ACORDAOS_URLS = (
+    "https://dados-abertos.apps.tcu.gov.br/api/acordao/recupera-acordaos",
+    "http://dados-abertos.apps.tcu.gov.br/api/acordao/recupera-acordaos",
+)
+TCU_ACORDAOS_QUANTIDADE = int(os.environ.get("QUEDA_TCU_ACORDAOS_PAGINA") or 500)
+# Blocos por rodada. 40 × 500 = 20 mil acórdãos por execução, retomando de onde
+# parou. `0` = sem limite (varredura completa, cara na primeira vez).
+TCU_ACORDAOS_BLOCOS_POR_RODADA = int(
+    os.environ.get("QUEDA_TCU_ACORDAOS_BLOCOS") or 40)
+# Termos que fazem um acórdão ser guardado. O CNPJ do alvo entra em tempo de
+# execução; estes são os nomes pelos quais o conselho aparece no texto.
+TCU_ACORDAOS_TERMOS_ALVO = (
+    "CREA-SP", "CREA/SP", "CREA SP",
+    "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DE SAO PAULO",
+)
 
 # Comparação entre Creas: a MESMA API Implanta serve os 27 conselhos e o
 # Confea — o host segue o padrão `crea-XX.implanta.net.br` (confirmado para

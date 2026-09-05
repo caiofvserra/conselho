@@ -777,6 +777,24 @@ def _staged() -> dict[str, pd.DataFrame]:
          "deliberacao": "Acórdão 777/2019", "uf": "RJ"},
     ])
 
+    # Acórdãos do TCU já filtrados por `stage_tcu_acordaos`: um cita o próprio
+    # conselho, outro cita só um fornecedor dele num processo de outro órgão —
+    # e esse segundo NÃO pode virar achado contra o conselho.
+    tcu_acordaos = pd.DataFrame([
+        {"numero": "1234", "ano": 2022, "colegiado": "Plenário",
+         "relator": "Ministro X", "data_sessao": "2022-06-15",
+         "processo": "TC 010.111/2021-3", "tipo_processo": "Prestação de Contas",
+         "url": "https://pesquisa.apps.tcu.gov.br/#/documento/acordao/1234/2022",
+         "cnpjs_citados": "00000000000191", "trecho": "CONTAS DO CREA SP",
+         "cita_o_conselho": True},
+        {"numero": "5678", "ano": 2024, "colegiado": "Segunda Câmara",
+         "relator": "Ministro Y", "data_sessao": "2024-03-20",
+         "processo": "TC 020.222/2023-7", "tipo_processo": "Representação",
+         "url": "https://pesquisa.apps.tcu.gov.br/#/documento/acordao/5678/2024",
+         "cnpjs_citados": "55666777000188", "trecho": "REPRESENTACAO CONTRA "
+         "ELETRICA PREDIAL EM CONTRATO DE OUTRO ORGAO", "cita_o_conselho": False},
+    ])
+
     pncp["fornecedor_norm"] = pncp["fornecedor_nome"].map(norm_nome)
     # espelha stage_pncp
     pncp["_ano"] = pd.to_numeric(pncp["anoContrato"], errors="coerce")
@@ -876,7 +894,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pncp_cobrancas,
-        "tcu_responsaveis": tcu_responsaveis,
+        "tcu_responsaveis": tcu_responsaveis, "tcu_acordaos": tcu_acordaos,
         "licitacoes_pncp": licitacoes_pncp, "sancoes": sancoes,
         "pncp_atas": pncp_atas,
         "benchmark_creas": benchmark_creas,
@@ -1008,6 +1026,8 @@ ESPERADOS = [
     "licitacoes-pncp-rol",             # o rol que o portal não publica está no PNCP
     "contratos-modalidade-de-origem",  # pregão × dispensa × inexigibilidade, por contrato
     "fornecedores-socio-condenado-tcu",  # sócio condenado pelo TCU, casado por nome E documento
+    "tcu-acordaos-conselho",           # o que o Tribunal já decidiu sobre as contas
+    "tcu-acordaos-fornecedores",       # fornecedor citado em processo de OUTRO órgão
     "contratos-faturamento-pncp",      # nota fiscal: a entrega, terceira fonte do contrato
     "contratos-nota-de-terceiro",      # quem emitiu a nota não é quem venceu o certame
     "fornecedores-sancionados",        # pago durante inidoneidade (efeito nacional)
@@ -1190,6 +1210,11 @@ def _confere_metricas(achados) -> list[str]:
     # TCU: um par publicado (nome E dígitos batem). O homônimo — mesmo nome,
     # documento diferente — NÃO entra: seis dígitos mascarados não identificam
     # ninguém sozinhos, e nome sozinho acusa terceiro.
+    # O acórdão que cita só um FORNECEDOR não pode entrar na conta do que o
+    # Tribunal decidiu sobre o conselho: são processos de outro jurisdicionado.
+    exige("tcu-acordaos-conselho", "acordaos", 1)
+    exige("tcu-acordaos-fornecedores", "acordaos", 1)
+    exige("tcu-acordaos-fornecedores", "fornecedores_citados", 1)
     exige("fornecedores-socio-condenado-tcu", "fornecedores", 1)
     exige("fornecedores-socio-condenado-tcu", "socios", 1)
     exige("contratos-nota-de-terceiro", "notas", 1)
@@ -1214,7 +1239,7 @@ def _confere_metricas(achados) -> list[str]:
                      f"na fixture, saiu {f.metricas.get('posicao')}º")
     exige("benchmark-despesa-por-profissional", "conselhos", 6)
 
-    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 22)
+    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 23)
     exige("diagnostico-etapas-nao-alcancadas", "etapas_nao_alcancadas", 1)
     f = por_id.get("diagnostico-etapas-nao-alcancadas")
     if f is not None and f.metricas.get("quais") != "processos_itens":
@@ -1229,12 +1254,13 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_novas_fontes())
     from .regressoes import (http_config as _reg_http, rodada11 as _reg_r11,
                             rodada12 as _reg_r12, rodada13 as _reg_r13,
-                            rodada14 as _reg_r14)
+                            rodada14 as _reg_r14, rodada15 as _reg_r15)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
     erros.extend(_reg_r13.run())
     erros.extend(_reg_r14.run())
+    erros.extend(_reg_r15.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa

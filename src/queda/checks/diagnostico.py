@@ -61,6 +61,8 @@ CRITICOS = {
                 "(CEIS/CNEP da CGU e inidôneos do TCU)", "media"),
     "tcu_responsaveis": ("sócio de fornecedor com contas julgadas irregulares ou "
                          "inabilitado pelo TCU", "baixa"),
+    "tcu_acordaos": ("decisões do TCU sobre as contas do conselho e sobre seus "
+                     "fornecedores", "baixa"),
     "benchmark_creas": ("posição do Crea-SP entre os pares por profissional "
                         "ativo (opt-in)", "baixa"),
 }
@@ -110,9 +112,11 @@ ENDPOINTS: dict[str, tuple[str, ...]] = {
                 "/download-de-dados/cepim",
                 "/ords/condenacao/consulta/inidoneos",
                 "/ords/condenacao/consulta/licitantes-inidoneos"),
-    "tcu_responsaveis": ("/ords/condenacao/consulta/inabilitados",
-                         "/ords/condenacao/consulta/contas-irregulares",
-                         "/ords/condenacao/consulta/responsaveis-contas-irregulares"),
+    "tcu_responsaveis": ("/api/inabilitado/recupera-inabilitados",
+                         "/api/conta-irregular/recupera-contas-irregulares",
+                         "/ords/condenacao/consulta/inabilitados",
+                         "/ords/condenacao/consulta/contas-irregulares"),
+    "tcu_acordaos": ("/api/acordao/recupera-acordaos",),
     # opt-in: vazio por padrão não é falha de coleta, é escolha (ver `desligado`
     # no inventário)
     "benchmark_creas": ("/ComparativoDespesa",),
