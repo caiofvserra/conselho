@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+from datetime import date
 
 from . import config
 from .http import get_json, memo
@@ -82,34 +84,115 @@ def _bases_para(endpoint: str) -> list[str]:
     return [config.IMPLANTA_HOST + p for p in prefixos]
 
 
+# Mês final que o portal ACEITOU para o exercício em curso, aprendido uma vez
+# por execução. Medido no ledger da rodada 10 (05/09/2026): todo endpoint anual
+# devolveu HTTP 400 para `referenciaInicio=01/2026&referenciaTermino=12/2026`
+# nos dois prefixos, enquanto 2011–2025 (com 12/AAAA) responderam 200. A
+# hipótese forte é que o serviço rejeita período cujo mês final ainda não
+# fechou; como o corpo do 400 nunca foi guardado, a fronteira exata (mês
+# corrente? mês anterior?) só se descobre tentando. Chaves: "mes" = o "MM"
+# que funcionou; "esgotado" = já recuamos nesta execução sem sucesso (não
+# repetir o custo em cada endpoint).
+_FIM_CORRENTE_APRENDIDO: dict[str, str] = {}
+_RECUOS_MES_FINAL = 3
+
+
+def _mes_final(ano: int) -> str:
+    """Mês final ("MM") da janela anual pedida ao portal.
+
+    Exercício encerrado: "12". Exercício em curso: o mês corrente — ou o mês
+    que o recuo de `implanta_ano` já descobriu funcionar. Exercício futuro:
+    "01" (janela mínima; quem chama normalmente nem pede). `date` é
+    referenciado pelo módulo para que testes congelem a data sem rede.
+    """
+    hoje = date.today()
+    a = int(ano)
+    if a < hoje.year:
+        return "12"
+    if a > hoje.year:
+        return "01"
+    return _FIM_CORRENTE_APRENDIDO.get("mes") or f"{hoje.month:02d}"
+
+
+def _params_ano(ano: int, fim: str, formato: str) -> dict:
+    chave = "vigencia" if formato == "vigencia" else "referencia"
+    return {f"{chave}Inicio": f"01/{ano}", f"{chave}Termino": f"{fim}/{ano}"}
+
+
 def implanta_ano(endpoint: str, ano: int, *, formato: str = "mensal"):
     """Busca um endpoint para o exercício inteiro.
 
     formato: "mensal" -> referencia MM/AAAA; "vigencia" -> vigenciaInicio/Termino.
+
+    Para o exercício em curso a janela vai até `_mes_final(ano)`. Se mesmo
+    assim o portal recusar (None nos dois prefixos, que `implanta` já
+    percorre), recua um mês por vez, até três vezes, e guarda o mês que
+    funcionou em `_FIM_CORRENTE_APRENDIDO` para as etapas seguintes usarem
+    direto. O recuo acontece UMA vez por execução: no pior caso são
+    3 × 2 requisições extras, não 3 × 2 por endpoint.
     """
-    if formato == "vigencia":
-        params = {"vigenciaInicio": f"01/{ano}", "vigenciaTermino": f"12/{ano}"}
-    else:
-        params = {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"}
-    return implanta(endpoint, params)
+    fim = _mes_final(ano)
+    linhas = implanta(endpoint, _params_ano(ano, fim, formato))
+    if linhas is not None or int(ano) != date.today().year:
+        return linhas
+    if "mes" in _FIM_CORRENTE_APRENDIDO or "esgotado" in _FIM_CORRENTE_APRENDIDO:
+        return None                        # já recuamos nesta execução
+    _FIM_CORRENTE_APRENDIDO["esgotado"] = "1"
+    mes = int(fim)
+    for _ in range(_RECUOS_MES_FINAL):
+        mes -= 1
+        if mes < 1:
+            break
+        linhas = implanta(endpoint, _params_ano(ano, f"{mes:02d}", formato))
+        if linhas is not None:
+            _FIM_CORRENTE_APRENDIDO["mes"] = f"{mes:02d}"
+            _FIM_CORRENTE_APRENDIDO.pop("esgotado", None)
+            log.info("%s: o portal aceitou %s/%s como mês final do exercício em "
+                     "curso (recusou %s/%s) — aprendido para as próximas etapas",
+                     endpoint, f"{mes:02d}", ano, fim, ano)
+            return linhas
+    log.info("%s: o portal recusou o exercício %s com mês final %s e os %d "
+             "recuos — janelas de %s seguem como recusadas nesta execução",
+             endpoint, ano, fim, _RECUOS_MES_FINAL, ano)
+    return None
 
 
-# Endpoints de diárias que existem nos schemas do swagger mas sem path declarado.
-# Sondamos caminhos prováveis; 404 é tolerado.
-DIARIAS_PROBE = [
-    "DiariasDeslocamentos", "Diarias", "DespesasViagens", "DespesasViagem",
-    "Indenizacoes", "PassagensAereas", "PassagensTerrestres",
-]
+# Nomes de endpoint de diárias/passagens a sondar, lidos de
+# `QUEDA_DIARIAS_ENDPOINTS` (separados por vírgula). O padrão é VAZIO: os sete
+# nomes que a versão anterior chutava — DiariasDeslocamentos, Diarias,
+# DespesasViagens, DespesasViagem, Indenizacoes, PassagensAereas,
+# PassagensTerrestres — deram 404 no prefixo documentado
+# `/transparencia/api/v1.0` (cacheado) e 403 no antigo, em todas as rodadas.
+# Sondar nome inexistente custava requisições e ainda fazia o diagnóstico sair
+# "bloqueio 403 → mude de IP" quando o honesto é "nome do endpoint
+# desconhecido". A lista fica aqui só como registro do que NÃO existe.
+def diarias_probe() -> list[str]:
+    """Nomes de endpoint de diárias vindos do ambiente (lidos na chamada, não
+    na importação, para que uma sessão do Colab possa defini-los depois)."""
+    env = getattr(config, "DIARIAS_ENDPOINTS_ENV", "QUEDA_DIARIAS_ENDPOINTS")
+    return [n.strip() for n in os.environ.get(env, "").split(",") if n.strip()]
+
+
+DIARIAS_PROBE = diarias_probe()
+_AVISO_DIARIAS: set[str] = set()
 
 
 def implanta_probe_diarias(ano: int) -> dict[str, list]:
-    """Sonda caminhos de diárias que o swagger define sem publicar endpoint.
+    """Sonda os nomes de endpoint de diárias definidos no ambiente.
 
-    Caminho que não existe é descartado para SEMPRE nesta execução: sem isso,
-    os mesmos caminhos inexistentes eram tentados uma vez por exercício.
+    Sem nome definido devolve {} SEM rede e avisa uma vez. Caminho que não
+    existe é descartado para SEMPRE nesta execução: sem isso, os mesmos
+    caminhos inexistentes eram tentados uma vez por exercício.
     """
     found: dict[str, list] = {}
-    for ep in DIARIAS_PROBE:
+    nomes = diarias_probe()
+    if not nomes:
+        if "sem-nome" not in _AVISO_DIARIAS:
+            _AVISO_DIARIAS.add("sem-nome")
+            log.info("sem nome de endpoint de diárias; defina %s",
+                     getattr(config, "DIARIAS_ENDPOINTS_ENV", "QUEDA_DIARIAS_ENDPOINTS"))
+        return found
+    for ep in nomes:
         if ep in _PROBE_MORTOS:
             continue
         # `rate_limit_retries=0`: aqui um 403 é RESPOSTA, não bloqueio a esperar.
@@ -131,7 +214,7 @@ def implanta_probe_diarias(ano: int) -> dict[str, list]:
         for base in _bases_para(ep):
             data = get_json(
                 f"{base}/{ep}",
-                {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
+                _params_ano(ano, _mes_final(ano), "mensal"),
                 rate_limit_retries=0)
             if data is not None:
                 if data:
@@ -171,11 +254,15 @@ def implanta_primeiro_nome(candidatos: list[str], ano: int | None = None, *,
     outro endpoint. Como o nome exato não está visível na captura, os
     prováveis entram em ordem e o que responder com dado fica aprendido.
 
-    Custo contido de propósito: a primeira passada chama cada nome SEM
-    parâmetro (a documentação de Quadros de Pessoas não declara nenhum), e só
-    os nomes que responderam (mesmo vazio) ganham a segunda passada com os
-    formatos de parâmetro. Nome que não responde em prefixo nenhum não merece
-    cinco variantes.
+    Custo contido de propósito — UMA requisição por nome. A documentação não
+    declara parâmetro para QuadrosPessoas nem para Conselheiros, e o ledger da
+    rodada 10 mostrou que eles respondem 200 [] sem parâmetro E com todas as
+    4 variantes × 2 prefixos (10 requisições cada, 110 s, com um 403 de rajada
+    no meio): os parâmetros são ignorados. Por isso a chamada vai ao prefixo
+    aprendido (ou ao documentado) sem parâmetro e PARA na primeira resposta
+    200, vazia ou não. O outro prefixo e as variantes só rodam quando a
+    resposta foi None (recusa/inexistente) ou quando `QUEDA_VARIANTES=1`
+    pede a sondagem completa de propósito.
 
     Mesma convenção de `implanta`: `[]` = algum nome respondeu vazio;
     `None` = nenhum respondeu.
@@ -186,23 +273,54 @@ def implanta_primeiro_nome(candidatos: list[str], ano: int | None = None, *,
     if aprendido in ordem:
         ordem.remove(aprendido)
         ordem.insert(0, aprendido)
+    forcar_variantes = os.environ.get("QUEDA_VARIANTES") == "1"
 
     responderam: list[str] = []
     for nome in ordem:
-        linhas = implanta(nome, None) if sem_filtro else None
+        linhas = _implanta_tiro_unico(nome) if sem_filtro else None
         if linhas:
             _NOME_APRENDIDO[chave] = nome
             return linhas, nome
         if linhas is not None:
             responderam.append(nome)
-    if not sem_filtro:
-        responderam = ordem
-    for nome in responderam:
+            if not forcar_variantes:
+                continue                    # 200 vazio: respondeu, e é isso
         linhas, _ = implanta_variantes(nome, ano, sem_filtro=False)
         if linhas:
             _NOME_APRENDIDO[chave] = nome
             return linhas, nome
+        if linhas is not None and nome not in responderam:
+            responderam.append(nome)
     return ([] if responderam else None), None
+
+
+def _implanta_tiro_unico(endpoint: str):
+    """`implanta(endpoint)` sem parâmetro que para no primeiro 200.
+
+    `implanta` tenta o outro prefixo quando o primeiro vem vazio — certo para
+    endpoints anuais, caro aqui: os dois prefixos são espelhos (medido em
+    04/09/2026) e "vazio" no primeiro é "vazio" no segundo. Vai ao prefixo
+    aprendido ou ao documentado; o outro só entra se este NÃO responder.
+    """
+    prefixos = list(config.IMPLANTA_PREFIXOS)
+    preferido = _PREFIXO_APRENDIDO.get(endpoint)
+    if preferido not in prefixos:
+        preferido = getattr(config, "IMPLANTA_PREFIXO_DOCUMENTADO", prefixos[-1])
+    prefixos.remove(preferido)
+    for prefixo in [preferido, *prefixos]:
+        try:
+            data = get_json(f"{config.IMPLANTA_HOST}{prefixo}/{endpoint}", None)
+        except RuntimeError as e:
+            log.warning("%s em %s: %s — tentando o próximo prefixo", endpoint, prefixo, e)
+            continue
+        if data is None:
+            continue
+        linhas = data if isinstance(data, list) else (data or [])
+        if linhas and _PREFIXO_APRENDIDO.get(endpoint) != prefixo:
+            log.info("%s: responde com dado em %s — prefixo aprendido", endpoint, prefixo)
+            _PREFIXO_APRENDIDO[endpoint] = prefixo
+        return linhas
+    return None
 
 
 def extrair_api_description_url(html: str, base_url: str) -> str | None:
@@ -229,7 +347,9 @@ def medir_prefixos(ano: int) -> list[dict]:
     """
     from .http import get_text
     import json as _json
-    janela = {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"}
+    # Mês final capado ao corrente: 12/AAAA do exercício em curso é o 400 que
+    # a rodada 10 tomou em todo endpoint anual, e mediria a recusa, não o prefixo.
+    janela = _params_ano(ano, _mes_final(ano), "mensal")
     alvos = [("Empenhos (controle)", "Empenhos", janela),
              ("QuadrosPessoas", "QuadrosPessoas", None),
              *[(f"mandatários: {n}", n, None) for n in config.ENDPOINT_CANDIDATOS["mandatarios"]],
@@ -300,10 +420,14 @@ def _variantes_params(ano: int | None, *, sem_filtro: bool = True) -> list[dict]
     """
     v: list[dict] = [{}] if sem_filtro else []
     if ano:
+        # `referencia*` e `vigencia*` capados ao mês corrente (ver `_mes_final`):
+        # 12/AAAA do exercício em curso é recusado com 400. `data*` fica em
+        # 31/12 porque AtasColegiados aceitou fim futuro (200 [] na rodada 10).
+        fim = _mes_final(ano)
         v += [{"exercicio": ano},
-              {"referenciaInicio": f"01/{ano}", "referenciaTermino": f"12/{ano}"},
+              _params_ano(ano, fim, "mensal"),
               {"dataInicio": f"01/01/{ano}", "dataTermino": f"31/12/{ano}"},
-              {"vigenciaInicio": f"01/{ano}", "vigenciaTermino": f"12/{ano}"}]
+              _params_ano(ano, fim, "vigencia")]
     return v
 
 
@@ -399,44 +523,206 @@ def resumir_openapi(spec: dict) -> list[dict]:
     return out
 
 
-def descobrir_swagger() -> list[dict]:
-    """Tenta os caminhos usuais do contrato da API e devolve os que responderam.
+def _pasta_swagger():
+    pasta = config.RAW_DIR / "swagger"
+    pasta.mkdir(parents=True, exist_ok=True)
+    return pasta
 
-    Cada item: {"fonte": "implanta"|"dados_abertos", "url", "spec"}. Sondagem
-    sem cache e sem espera por rate-limit: um 403 aqui é "este caminho não
-    serve", e insistir custaria minutos por candidato.
+
+def _nome_arquivo(url: str) -> str:
+    """Nome de arquivo seguro e reconhecível para guardar o que veio de `url`."""
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", f"{u.netloc}{u.path}").strip("_")[:120]
+
+
+def _guardar_texto(pasta, nome: str, texto: str) -> None:
+    try:
+        (pasta / nome).write_text(texto, encoding="utf-8")
+    except OSError as e:
+        log.warning("não consegui guardar %s: %s", nome, e)
+
+
+def _e_spec(data) -> bool:
+    return isinstance(data, dict) and isinstance(data.get("paths"), dict)
+
+
+def _get_json_sondagem(url: str):
+    """`get_json` de sondagem: sem cache, sem espera por 403, sem retry de rede.
+    Um caminho que não serve não passa a servir depois de minutos de espera."""
+    try:
+        return get_json(url, use_cache=False, rate_limit_retries=0, retries=0)
+    except RuntimeError:
+        return None
+
+
+def _swagger_locais(pasta) -> list[dict]:
+    """Contratos que o operador salvou à mão em `data/raw/swagger/`.
+
+    O caminho mais curto até o contrato é o usuário copiar da aba Rede do
+    navegador o JSON/YAML que a página Stoplight carrega e soltá-lo nesta
+    pasta: lê-se antes de qualquer rede. YAML só se `yaml` estiver instalado
+    (não é dependência do projeto); sem ele o arquivo é anunciado e pulado.
     """
-    from .http import get_text
+    import json as _json
     achados: list[dict] = []
+    if not pasta.exists():
+        return achados
+    for arq in sorted(pasta.iterdir()):
+        suf = arq.suffix.lower()
+        if suf not in (".json", ".yaml", ".yml"):
+            continue
+        try:
+            texto = arq.read_text(encoding="utf-8", errors="replace")
+            if suf == ".json":
+                data = _json.loads(texto)
+            else:
+                try:
+                    import yaml
+                except ImportError:
+                    log.info("%s: YAML sem o pacote `yaml` instalado — pulado", arq.name)
+                    continue
+                data = yaml.safe_load(texto)
+        except (ValueError, OSError) as e:
+            log.info("%s: não é um contrato legível (%s)", arq.name, e)
+            continue
+        if _e_spec(data):
+            log.info("swagger local: %s (%d caminho(s))", arq.name, len(data["paths"]))
+            achados.append({"fonte": "implanta (local)", "url": str(arq), "spec": data})
+    return achados
+
+
+_RE_SCRIPT_SRC = re.compile(r"<script[^>]+src\s*=\s*[\"']([^\"']+)[\"']", re.I)
+_RE_URL_SPEC = re.compile(r"[\"'(]((?:https?:)?//?[^\"'()\s<>]*?\.(?:json|ya?ml))(?:\?[^\"'()\s<>]*)?[\"')]", re.I)
+_RE_CAMINHO_API = re.compile(r"/api/v1\.0/([A-Za-z][A-Za-z0-9_]*)")
+_MAX_BUNDLES = 4
+
+
+def _extrair_do_bundle(js: str, base_url: str) -> tuple[list[str], set[str]]:
+    """(URLs de contrato, nomes de endpoint) citados num bundle JavaScript.
+
+    A página Stoplight é um app: a lista de endpoints que o usuário vê na tela
+    está no JS, não no HTML. Os caminhos `/api/v1.0/<Nome>` que aparecem ali
+    são a lista do produto — a que separa "nome errado" de "o órgão não
+    publica".
+    """
+    from urllib.parse import urljoin
+    urls: list[str] = []
+    for m in _RE_URL_SPEC.finditer(js or ""):
+        u = urljoin(base_url, m.group(1))
+        if u.startswith("http") and u not in urls:
+            urls.append(u)
+    nomes = {m.group(1) for m in _RE_CAMINHO_API.finditer(js or "")}
+    return urls, nomes
+
+
+def _sondar_bundles(html: str, url_doc: str, pasta) -> list[dict]:
+    """Baixa até 4 bundles .js do mesmo host e lê deles contrato e endpoints."""
+    from urllib.parse import urljoin, urlparse
+    from .http import get_text
+    host = urlparse(url_doc).netloc
+    achados: list[dict] = []
+    vistos: list[str] = []
+    for m in _RE_SCRIPT_SRC.finditer(html or ""):
+        u = urljoin(url_doc, m.group(1))
+        if urlparse(u).netloc != host or not urlparse(u).path.endswith(".js") or u in vistos:
+            continue
+        vistos.append(u)
+        if len(vistos) > _MAX_BUNDLES:
+            break
+        r = get_text(u)
+        if not r or r[0] >= 400:
+            continue
+        _guardar_texto(pasta, _nome_arquivo(u), r[1])
+        urls_spec, nomes = _extrair_do_bundle(r[1], url_doc)
+        for spec_url in urls_spec[:6]:
+            data = _get_json_sondagem(spec_url)
+            if _e_spec(data):
+                log.info("swagger citado no bundle %s: %s (%d caminho(s))",
+                         u, spec_url, len(data["paths"]))
+                achados.append({"fonte": "implanta", "url": spec_url, "spec": data})
+        if len(nomes) >= 5:
+            log.info("bundle %s cita %d endpoint(s) /api/v1.0/<Nome>", u, len(nomes))
+            achados.append({"fonte": "bundle", "url": u, "endpoints": sorted(nomes)})
+    return achados
+
+
+def _sondar_config_json(url_doc: str, pasta) -> list[dict]:
+    """`<base>/config.json` e `<base>/assets/config.json` da página de docs.
+
+    O usuário viu no DevTools uma requisição `config.json` ao abrir a
+    documentação: em apps Angular/Stoplight é ali que costuma estar a URL da
+    API ou do contrato. Só guardamos quando há chave com 'api', 'swagger' ou
+    'url' — o resto é configuração de tela.
+    """
+    import json as _json
+    from urllib.parse import urljoin
+    achados: list[dict] = []
+    for rel in ("config.json", "assets/config.json"):
+        url = urljoin(url_doc, rel)
+        data = _get_json_sondagem(url)
+        if not isinstance(data, dict):
+            continue
+        chaves = [k for k in data if any(t in str(k).lower() for t in ("api", "swagger", "url"))]
+        if not chaves:
+            continue
+        log.info("config.json em %s com chave(s) %s", url, chaves)
+        _guardar_texto(pasta, _nome_arquivo(url), _json.dumps(data, ensure_ascii=False, indent=1))
+        achados.append({"fonte": "config", "url": url, "config": data, "chaves": chaves})
+    return achados
+
+
+def descobrir_swagger() -> list[dict]:
+    """Descobre o contrato da API: arquivos locais, página de docs, bundles,
+    config.json e os caminhos usuais — nessa ordem, e devolve o que achou.
+
+    Itens com "spec": {"fonte": "implanta"|"implanta (local)"|"dados_abertos",
+    "url", "spec"}. Itens sem spec: {"fonte": "bundle", "url", "endpoints"} (a
+    lista de nomes de endpoint citada no JavaScript da documentação, quando
+    tem 5 ou mais) e {"fonte": "config", "url", "config", "chaves"}. Quem
+    consome deve olhar a chave "spec" antes de resumir.
+
+    Sondagem sem cache e sem espera por rate-limit: um 403 aqui é "este caminho
+    não serve", e insistir custaria minutos por candidato. O HTML de cada
+    página de docs que responder fica em `data/raw/swagger/doc-<host>.html`,
+    para que a próxima leitura seja do arquivo e não da memória de quem viu.
+    """
+    from urllib.parse import urlparse
+    from .http import get_text
+    pasta = _pasta_swagger()
+    # 0) o que o operador já salvou: nada de rede se o contrato está no disco.
+    achados = _swagger_locais(pasta)
+    if any("spec" in a for a in achados):
+        return achados
     # 1) a página de documentação declara a URL do contrato — ler é melhor que
     #    adivinhar, e vale para qualquer versão do produto.
     for url_doc in config.DOC_IMPLANTA_CANDIDATOS:
         r = get_text(url_doc)
         if not r or r[0] >= 400:
             continue
+        _guardar_texto(pasta, f"doc-{urlparse(url_doc).netloc}.html", r[1])
         spec_url = extrair_api_description_url(r[1], url_doc)
-        if not spec_url:
-            continue
-        try:
-            data = get_json(spec_url, use_cache=False, rate_limit_retries=0, retries=0)
-        except RuntimeError:
-            continue
-        if isinstance(data, dict) and isinstance(data.get("paths"), dict):
-            log.info("swagger encontrado via documentação: %s (%d caminho(s))",
-                     spec_url, len(data["paths"]))
-            achados.append({"fonte": "implanta", "url": spec_url, "spec": data})
+        if spec_url:
+            data = _get_json_sondagem(spec_url)
+            if _e_spec(data):
+                log.info("swagger encontrado via documentação: %s (%d caminho(s))",
+                         spec_url, len(data["paths"]))
+                achados.append({"fonte": "implanta", "url": spec_url, "spec": data})
+                return achados
+        achados.extend(_sondar_bundles(r[1], url_doc, pasta))
+        achados.extend(_sondar_config_json(url_doc, pasta))
+        if any("spec" in a for a in achados):
             return achados
-    # 2) caminhos usuais
+    # 2) caminhos usuais. Os hosts legados de Dados Abertos só entram se o
+    #    operador informou um (ver `_hosts_dados_abertos`): em 10 rodadas nenhum
+    #    dos seis candidatos respondeu JSON, e cada um custa até 60 s de timeout.
     candidatos = [("implanta", u) for u in config.SWAGGER_CANDIDATOS_IMPLANTA]
-    for base in config.DADOS_ABERTOS_CANDIDATES:
+    for base in _hosts_dados_abertos():
         for suf in config.SWAGGER_CANDIDATOS_DADOS_ABERTOS_SUFIXOS:
             candidatos.append(("dados_abertos", base + suf))
     for fonte, url in candidatos:
-        try:
-            data = get_json(url, use_cache=False, rate_limit_retries=0, retries=0)
-        except RuntimeError:
-            continue
-        if isinstance(data, dict) and isinstance(data.get("paths"), dict):
+        data = _get_json_sondagem(url)
+        if _e_spec(data):
             log.info("swagger encontrado: %s (%d caminho(s))", url, len(data["paths"]))
             achados.append({"fonte": fonte, "url": url, "spec": data})
     return achados
@@ -497,26 +783,40 @@ def achatar_plano_contas(rows: list, nivel: int = 0, pai: str = "") -> list[dict
 
 
 # ================================================================ Dados Abertos
-def _discover_dados_abertos() -> str | None:
-    for base in config.DADOS_ABERTOS_CANDIDATES:
+# O serviço legado `*.creasp.org.br/service-api` NUNCA devolveu JSON em 10
+# rodadas (ledger da rodada 10: transparencia./www. → 403; portaltransparencia./
+# api. → ConnectionError; servicos. → shell Angular em HTML; creasp.org.br →
+# ConnectTimeout de 60 s ×4). A varredura custava ~5 min por rodada e ainda
+# fazia o diagnóstico de mandatarios sair "bloqueio 403". Por isso ela só roda
+# quando o operador informa o host (QUEDA_DADOS_ABERTOS_HOST) ou quando um
+# memo em cache diz que algum já respondeu.
+def _hosts_dados_abertos() -> list[str]:
+    """Bases `https://<host>/service-api` a sondar — só a informada no ambiente."""
+    env = getattr(config, "DADOS_ABERTOS_HOST_ENV", "QUEDA_DADOS_ABERTOS_HOST")
+    host = (os.environ.get(env) or "").strip().rstrip("/")
+    if not host:
+        return []
+    if not host.startswith("http"):
+        host = "https://" + host
+    if not host.endswith("/service-api"):
+        host += "/service-api"
+    return [host]
+
+
+def _discover_dados_abertos(bases: list[str] | None = None) -> str | None:
+    for base in (bases if bases is not None else _hosts_dados_abertos()):
+        # rate_limit_retries=0 e retries=0: sondagem não espera. Um host que
+        # devolve 403 está barrando (WAF), não limitando ritmo; e um host que
+        # não conecta em 60 s não vai conectar na 4ª tentativa — eram 4 × 60 s
+        # de timeout só no creasp.org.br.
         try:
-            # rate_limit_retries=0: sondagem não espera. Um host que devolve
-            # 403 em todas as tentativas não está limitando ritmo — está
-            # barrando (WAF/bot protection). Insistir custava ~8 min por
-            # candidato e não mudava o resultado.
             data = get_json(f"{base}/api/DadosAbertos/mandatarios",
-                            use_cache=False, rate_limit_retries=0)
+                            use_cache=False, rate_limit_retries=0, retries=0)
         except RuntimeError:
             continue
         if isinstance(data, dict) and data.get("result") is not None:
             log.info("Dados Abertos: host descoberto em %s", base)
             return base
-    log.warning(
-        "Dados Abertos: nenhum host candidato respondeu. As frentes que "
-        "dependem de quadro de pessoal, mandatários e indenizações ficam "
-        "desligadas — e o relatório registra isso como achado de "
-        "transparência, porque a indisponibilidade da API é ela própria "
-        "descumprimento da LAI.")
     return None
 
 
@@ -528,8 +828,18 @@ _BASE_SONDADA: dict[str, str | None] = {}
 
 
 def dados_abertos_base() -> str | None:
-    if "base" not in _BASE_SONDADA:
+    """Base do serviço legado de Dados Abertos, ou None SEM rede quando nem o
+    ambiente nem o cache apontam um host (ver `_hosts_dados_abertos`)."""
+    if "base" in _BASE_SONDADA:
+        return _BASE_SONDADA["base"]
+    memo_existe = (config.CACHE_DIR / "dados_abertos_base.json").exists()
+    if _hosts_dados_abertos() or memo_existe:
         _BASE_SONDADA["base"] = memo("dados_abertos_base", _discover_dados_abertos)
+    else:
+        env = getattr(config, "DADOS_ABERTOS_HOST_ENV", "QUEDA_DADOS_ABERTOS_HOST")
+        log.info("Dados Abertos legado desligado: nenhum host respondeu JSON em "
+                 "10 rodadas; defina %s se souber o host", env)
+        _BASE_SONDADA["base"] = None
     return _BASE_SONDADA["base"]
 
 
@@ -734,6 +1044,52 @@ def pncp_contratos_mes(cnpj: str, ini: str, fim: str) -> list:
     }, retries=6, espera_base=4.0)
 
 
+# Nome do parâmetro do órgão em `/v1/atas`, aprendido na primeira janela que
+# responder. A consulta pública de atas NÃO foi verificada desta sessão (rede
+# bloqueada para pncp.gov.br): a documentação sugere `cnpj`, mas o endpoint
+# irmão `/v1/contratos` usa `cnpjOrgao`. Tentamos os dois e guardamos o que
+# não deu 400.
+_PNCP_ATAS_PARAM_ORGAO: dict[str, str] = {}
+
+
+def pncp_atas_mes(cnpj: str, ini: str, fim: str) -> list | None:
+    """Atas de registro de preços do órgão vigentes numa janela (AAAAMMDD).
+
+    Devolve a lista (vazia quando o PNCP respondeu que não há ata) ou **None**
+    quando a janela não pôde ser coletada: 400 com os dois nomes de parâmetro
+    (`cnpj`, depois `cnpjOrgao` — o nome certo não foi verificado, ver
+    `_PNCP_ATAS_PARAM_ORGAO`) ou 5xx/rede esgotados. O chamador trata None
+    como "indisponível", nunca como "sem atas".
+
+    A primeira página é pedida à parte, porque `pncp_paginado` não distingue
+    400 (None) de "sem dados" ([]) — e é esse 400 que diz que o nome do
+    parâmetro está errado. Com o nome aceito, `pncp_paginado` refaz a página 1
+    do cache (`get_json` guarda o que veio com dado) e segue nas demais.
+    """
+    path = getattr(config, "PNCP_ATAS_PATH", "/v1/atas")
+    base = {"dataInicial": ini, "dataFinal": fim, "tamanhoPagina": 500}
+    aprendido = _PNCP_ATAS_PARAM_ORGAO.get("nome")
+    nomes = [aprendido] if aprendido else ["cnpj", "cnpjOrgao"]
+    for nome in nomes:
+        params = {**base, nome: cnpj}
+        try:
+            primeira = get_json(f"{config.PNCP_CONSULTA}{path}", {**params, "pagina": 1},
+                                retries=6, espera_base=4.0)
+        except RuntimeError:
+            return None
+        if primeira is None:
+            log.info("PNCP atas: parâmetro %r recusado (400/404) na janela %s–%s",
+                     nome, ini, fim)
+            continue
+        if aprendido != nome:
+            _PNCP_ATAS_PARAM_ORGAO["nome"] = nome
+        try:
+            return pncp_paginado(path, params, retries=6, espera_base=4.0)
+        except RuntimeError:
+            return None
+    return None
+
+
 def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:
     """Contratos do órgão no PNCP, mês a mês.
 
@@ -825,33 +1181,79 @@ def _norm_coluna(c: str) -> str:
     return re.sub(r"[^A-Z0-9]+", " ", c.upper()).strip()
 
 
-def _resolver_colunas_sancao(colunas: list[str]) -> dict[str, str | None]:
-    """Acha as colunas por trecho do nome, não por nome exato.
+# Nomes canônicos (normalizados) das colunas do CEIS/CNEP/CEPIM. Igualdade
+# exata vem antes de "contém os trechos": no layout real do CEIS a 6ª coluna é
+# "NOME INFORMADO PELO ÓRGÃO SANCIONADOR" e a 18ª é "ÓRGÃO SANCIONADOR" — casar
+# por trecho na ordem do cabeçalho devolvia a 6ª, e a evidência publicada na
+# rodada 10 (05/09/2026) trazia a razão social da EMPRESA na coluna do órgão.
+_COLUNAS_SANCAO_CANONICAS: dict[str, tuple[str, ...]] = {
+    "documento": ("CPF OU CNPJ DO SANCIONADO", "CNPJ ENTIDADE", "CPF OU CNPJ"),
+    "nome": ("NOME DO SANCIONADO", "NOME ENTIDADE", "RAZAO SOCIAL - CADASTRO RECEITA"),
+    "categoria": ("CATEGORIA DA SANCAO", "TIPO DE SANCAO", "MOTIVO DO IMPEDIMENTO"),
+    "inicio": ("DATA INICIO SANCAO",),
+    "fim": ("DATA FINAL SANCAO", "DATA FIM SANCAO"),
+    "orgao": ("ORGAO SANCIONADOR", "ORGAO CONCEDENTE"),
+    "esfera": ("ESFERA ORGAO SANCIONADOR",),
+    "uf_orgao": ("UF ORGAO SANCIONADOR",),
+    "fundamento": ("FUNDAMENTACAO LEGAL",),
+    "abrangencia": ("ABRANGENCIA DEFINIDA EM DECISAO JUDICIAL",),
+}
+# Fallback por trechos (todos precisam aparecer), com exclusões para o caso em
+# que a coluna-mãe e uma derivada compartilham os trechos.
+_COLUNAS_SANCAO_TRECHOS: dict[str, tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]] = {
+    # chave: ((trechos_exigidos, trechos_proibidos), ...)
+    "documento": ((("CPF", "CNPJ"), ()), (("CNPJ",), ("RECEITA",))),
+    "nome": ((("NOME", "SANCIONADO"), ("INFORMADO", "ORGAO")), (("NOME", "ENTIDADE"), ()),
+             (("RAZAO", "SOCIAL"), ())),
+    "categoria": ((("CATEGORIA", "SANCAO"), ()), (("TIPO", "SANCAO"), ()), (("MOTIVO",), ())),
+    "inicio": ((("INICIO", "SANCAO"), ()), (("DATA", "INICIO"), ())),
+    "fim": ((("FINAL", "SANCAO"), ()), (("FIM", "SANCAO"), ()), (("DATA", "FIM"), ())),
+    "orgao": ((("ORGAO", "SANCIONADOR"), ("NOME", "INFORMADO", "UF", "ESFERA")),
+              (("ORGAO", "CONCEDENTE"), ("NOME", "UF"))),
+    "esfera": ((("ESFERA",), ()),),
+    "uf_orgao": ((("UF", "ORGAO"), ()),),
+    "fundamento": ((("FUNDAMENTACAO",), ()), (("FUNDAMENTO",), ())),
+    "abrangencia": ((("ABRANGENCIA",), ()),),
+}
 
-    Os cabeçalhos do CEIS/CNEP têm acento, mudam de caixa entre versões e já
-    ganharam palavras ao longo dos anos. Casar por igualdade quebraria em
-    silêncio na primeira mudança; casar por trecho normalizado declara o que
-    achou e o que não achou.
+
+def _resolver_colunas_sancao(colunas: list[str]) -> dict[str, str | None]:
+    """Acha as colunas do CEIS/CNEP/CEPIM pelo nome, em três passos.
+
+    1. igualdade exata do nome normalizado com um alvo canônico;
+    2. senão, entre as colunas que contêm TODOS os trechos exigidos e NENHUM
+       dos proibidos, a de nome mais curto (a coluna-mãe é sempre mais curta
+       que a derivada: "ÓRGÃO SANCIONADOR" < "NOME INFORMADO PELO ÓRGÃO
+       SANCIONADOR");
+    3. senão, None — e o chamador decide.
+
+    Os cabeçalhos têm acento, mudam de caixa entre versões e ganharam palavras
+    ao longo dos anos; casar por igualdade crua quebraria na primeira mudança,
+    casar só por trecho devolvia a coluna errada (ver rodada 10). O CEPIM não
+    tem data de início/fim: essas chaves ficam None e o consumidor trata a
+    linha como "consta no cadastro na data do download".
     """
     norm = {c: _norm_coluna(c) for c in colunas}
+    inverso: dict[str, str] = {}
+    for c, n in norm.items():
+        inverso.setdefault(n, c)
 
-    def acha(*trechos):
-        for c, n in norm.items():
-            if all(t in n for t in trechos):
-                return c
+    def resolver(chave: str) -> str | None:
+        for alvo in _COLUNAS_SANCAO_CANONICAS.get(chave, ()):
+            if alvo in inverso:
+                return inverso[alvo]
+        for exigidos, proibidos in _COLUNAS_SANCAO_TRECHOS.get(chave, ()):
+            cands = [c for c, n in norm.items()
+                     if all(t in n for t in exigidos) and not any(t in n for t in proibidos)]
+            if cands:
+                return min(cands, key=lambda c: len(norm[c]))
         return None
 
-    return {
-        "documento": acha("CPF", "CNPJ") or acha("CNPJ"),
-        "nome": acha("NOME", "SANCIONADO") or acha("RAZAO", "SOCIAL"),
-        "categoria": acha("CATEGORIA", "SANCAO") or acha("TIPO", "SANCAO"),
-        "inicio": acha("INICIO", "SANCAO") or acha("DATA", "INICIO"),
-        "fim": acha("FINAL", "SANCAO") or acha("FIM", "SANCAO") or acha("DATA", "FIM"),
-        "orgao": acha("ORGAO", "SANCIONADOR"),
-        "esfera": acha("ESFERA"),
-        "uf_orgao": acha("UF", "ORGAO"),
-        "fundamento": acha("FUNDAMENTACAO") or acha("FUNDAMENTO"),
-    }
+    mapa = {chave: resolver(chave) for chave in _COLUNAS_SANCAO_CANONICAS}
+    if mapa["orgao"] and "NOME" in norm[mapa["orgao"]]:
+        log.warning("coluna do órgão sancionador resolvida para %r — parece nome de "
+                    "sancionado, não de órgão; conferir o cabeçalho", mapa["orgao"])
+    return mapa
 
 
 def baixar_sancoes(cadastro: str, hoje=None) -> tuple[list[dict] | None, dict]:
@@ -920,18 +1322,79 @@ def baixar_sancoes(cadastro: str, hoje=None) -> tuple[list[dict] | None, dict]:
     return None, meta
 
 
-def efeito_nacional(categoria: str | None, fundamento: str | None = None) -> bool:
-    """A sanção vale para TODA a administração ou só para quem a aplicou?
+def _norm_lei(texto: str | None) -> str:
+    """Normaliza um fundamento legal para casar números de lei: sem acento,
+    maiúsculo, e sem pontos/espaços DENTRO dos números ("Lei 8.429/92, art. 12"
+    → "LEI 8429/92 ART 12"). `_norm_coluna` troca o ponto por espaço e quebrava
+    "8.429" em "8 429"."""
+    import unicodedata
+    t = unicodedata.normalize("NFD", str(texto or ""))
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn").upper()
+    t = re.sub(r"(?<=\d)[.\s](?=\d{3}\b)", "", t)        # 8.429 / 14 133 → 8429 / 14133
+    return re.sub(r"[^A-Z0-9/]+", " ", t).strip()
 
-    Impedimento e suspensão (8.666 art. 87 III; 14.133 art. 156 III) valem
-    para o órgão/ente sancionador — um impedimento aplicado por um município
-    não proíbe o Crea-SP de contratar. Declaração de inidoneidade (8.666 art.
-    87 IV; 14.133 art. 156 IV) e proibição de contratar (12.846) valem para
-    toda a administração. Cruzar pagamento com sanção sem esta distinção
-    acusaria o conselho de contratar impedido onde não há impedimento.
+
+_RE_NACIONAL_FUNDAMENTO = re.compile(
+    r"\b8429\b|IMPROBIDADE|\b9504\b|ELEITORAL|\b8443\b|\bART 46\b")
+# Lei 12.846/13 (anticorrupção) NÃO entra: as sanções que o CNEP registra por
+# ela — multa e publicação extraordinária (art. 6º); proibição de receber
+# incentivos, subsídios e empréstimos (art. 19, IV) — não restringem contratar.
+_RE_NAO_IMPEDE_CATEGORIA = re.compile(
+    r"\bMULTA\b|ADVERTENCIA|PUBLICACAO EXTRAORDINARIA|INCENTIVO|SUBSIDIO|SUBVENC|EMPRESTIMO")
+_RE_ENTE_FUNDAMENTO = re.compile(
+    r"\b10520\b|\bART 7\b|\b156\b.{0,12}\bIII\b|\b87\b.{0,12}\bIII\b|\b12462\b|\bART 47\b")
+
+
+def alcance_sancao(categoria: str | None, fundamento: str | None = None,
+                   esfera: str | None = None) -> str:
+    """Quem a sanção alcança: 'nacional', 'federal', 'ente', 'nao_impede' ou
+    'indeterminado'.
+
+    * 'nacional' — vale para toda a Administração: declaração de inidoneidade
+      (Lei 8.666/93, art. 87, IV; Lei 14.133/21, art. 156, IV; STJ, MS
+      13.964/DF), proibição de contratar por improbidade (Lei 8.429/92, art.
+      12) ou eleitoral (Lei 9.504/97, art. 81, §3º), inidoneidade do TCU (Lei
+      8.443/92, art. 46).
+    * 'ente' — vale para o ente federativo que aplicou: impedimento (Lei
+      10.520/02, art. 7º; Lei 14.133, art. 156, III e §4º) e suspensão (Lei
+      8.666, art. 87, III). Um impedimento estadual ou municipal não alcança o
+      Crea-SP, autarquia federal (Lei 5.194/66; STF, ADI 1.717).
+    * 'federal' — impedimento/suspensão aplicados por órgão FEDERAL: alcançam
+      em tese a administração federal indireta, e portanto o conselho. É
+      "verificar", não acusação: a data do contrato decide.
+    * 'nao_impede' — sanção que não restringe contratar: multa, advertência,
+      publicação extraordinária, proibição de receber incentivos (CNEP, Lei
+      12.846/13, arts. 6º e 19). Uma multa da Lei Anticorrupção não é
+      inidoneidade — a rodada 11 quase publicou uma como se fosse.
+    * 'indeterminado' — sem categoria nem fundamento que permitam decidir.
+
+    A categoria consolidada do CEIS "Impedimento/proibição de contratar com
+    prazo determinado" mistura os dois mundos (impedimento do pregão e
+    proibição da improbidade). Por isso a decisão passa pelo FUNDAMENTO LEGAL
+    quando ele existe; sem fundamento, a palavra "impedimento" na categoria
+    prevalece sobre "proibição" — o erro que a rodada 10 cometeu foi o
+    inverso, e classificou como nacional um impedimento estadual de R$ 199 mil.
     """
-    t = _norm_coluna(f"{categoria or ''} {fundamento or ''}")
-    return ("INIDON" in t) or ("PROIBICAO DE CONTRATAR" in t) or ("PROIBIDA DE CONTRATAR" in t)
+    cat = _norm_coluna(categoria or "")
+    fund = _norm_lei(fundamento)
+    esf = _norm_coluna(esfera or "")
+    if cat and _RE_NAO_IMPEDE_CATEGORIA.search(cat) and "INIDON" not in cat \
+            and "IMPEDIMENTO" not in cat and "SUSPENS" not in cat:
+        return "nao_impede"
+    if "INIDON" in cat or "INIDON" in fund:
+        return "nacional"
+    if fund and _RE_NACIONAL_FUNDAMENTO.search(fund) and not _RE_ENTE_FUNDAMENTO.search(fund):
+        return "nacional"
+    if "IMPEDIMENTO" in cat or "SUSPENS" in cat or (fund and _RE_ENTE_FUNDAMENTO.search(fund)):
+        return "federal" if "FEDERAL" in esf else ("ente" if esf else "indeterminado")
+    if "PROIBI" in cat or "IMPROBIDADE" in cat or "ELEITORAL" in cat:
+        return "nacional"
+    return "indeterminado"
+
+
+def efeito_nacional(categoria: str | None, fundamento: str | None = None) -> bool:
+    """Compatibilidade: True só quando `alcance_sancao` diz 'nacional'."""
+    return alcance_sancao(categoria, fundamento, None) == "nacional"
 
 
 # ====================================================== outros conselhos

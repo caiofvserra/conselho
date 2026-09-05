@@ -8,7 +8,7 @@ import pandas as pd
 
 from .. import clients, config
 from .. import taxonomia as T
-from ..utils import norm_nome, so_digitos
+from ..utils import coluna, norm_nome, so_digitos
 
 log = logging.getLogger("queda.checks")
 
@@ -52,8 +52,11 @@ def pagamentos_indenizacao(staged, *, apenas_pessoa_fisica: bool = True) -> pd.D
     return out
 
 
+# Ancorado no INÍCIO do nome: "ADPCON - ASSOCIACAO DOS ADVOGADOS PUBLICOS DO
+# CONFEA" contém "confea" e entrava como repasse obrigatório ao sistema (rodada
+# 10). Repasse é para o Confea e para a Mútua — os nomes começam por eles.
 RX_TRANSFERENCIA_LEGAL = re.compile(
-    r"\bconfea\b|\bmutua\b|cota[- ]parte|caixa de assistencia", re.IGNORECASE)
+    r"^\s*(?:confea|mutua)\b|cota[- ]parte|caixa de assistencia", re.IGNORECASE)
 
 
 def fornecedores_mercado(staged) -> pd.DataFrame:
@@ -74,7 +77,7 @@ def fornecedores_mercado(staged) -> pd.DataFrame:
     if "TIPO_PESSOA" in pg:
         pj = pg[pg["TIPO_PESSOA"] == "PJ"]
     else:                                   # compat com staged antigo
-        pj = pg[~pg.get("PF", False).astype(bool)]
+        pj = pg[~coluna(pg, "PF", False).astype(bool)]
     nomes = pj.get("FAVORECIDO_NORM", pd.Series("", index=pj.index)).fillna("")
     return pj[~nomes.str.contains(RX_TRANSFERENCIA_LEGAL, regex=True, na=False)]
 
@@ -136,7 +139,7 @@ def fichas_cnpj(staged) -> dict[str, dict]:
     candidatos: dict[str, float] = {}
     pg = df(staged, "pagamentos")
     if not pg.empty and "CPF_CNPJ" in pg:
-        pj = pg[~pg.get("PF", False).astype(bool)].copy()
+        pj = pg[~coluna(pg, "PF", False).astype(bool)].copy()
         pj["cnpj"] = pj["CPF_CNPJ"].map(so_digitos)
         tot = pj[pj["cnpj"].str.len() == 14].groupby("cnpj")["VALOR"].sum()
         for cnpj, v in tot[tot >= config.PISO_ANALISE_FORNECEDOR].items():

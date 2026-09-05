@@ -36,7 +36,9 @@ def run_all(staged) -> list[Finding]:
             log.exception("check %s falhou — seguindo com os demais", nome)
             achados.append(Finding(
                 id=f"erro-check-{nome}", frente="Diagnóstico da coleta",
-                gravidade="alta",
+                # "erro" e não "alta": é falha da ferramenta, não achado sobre
+                # o conselho — e não entra na contagem de gravidade alta.
+                gravidade="erro",
                 titulo=f"A frente '{nome}' falhou e não produziu achados",
                 descricao=(
                     f"A execução desta frente levantou `{type(exc).__name__}: "
@@ -48,7 +50,7 @@ def run_all(staged) -> list[Finding]:
             ))
     _rebaixar_vazios(achados)
     _declarar_cobertura(achados)
-    ordem = {"alta": 0, "media": 1, "baixa": 2, "info": 3}
+    ordem = {"erro": -1, "alta": 0, "media": 1, "baixa": 2, "info": 3}
     achados.sort(key=lambda f: ordem[f.gravidade])
     return achados
 

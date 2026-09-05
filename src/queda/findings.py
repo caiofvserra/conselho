@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-GRAVIDADES = ("alta", "media", "baixa", "info")
+# "erro" é falha da FERRAMENTA (uma frente que levantou exceção), não achado
+# sobre o conselho: fica fora da contagem de "gravidade alta" e num bloco
+# próprio do relatório. Na rodada 10 o erro do benchmark foi contado como um
+# dos 26 achados altos sobre o Crea-SP.
+GRAVIDADES = ("alta", "media", "baixa", "info", "erro")
 TIPOS_GRAFICO = ("bar", "bar_stacked", "line", "area_stacked", "barh")
 
 
@@ -53,6 +57,10 @@ class Finding:
     # Formato: {"base": float, "universo": float, "o_que": str}
     # `pct` é derivado. `o_que` descreve o que está sendo coberto, em uma linha.
     cobertura: dict | None = None
+    # Datasets staged de onde o número saiu (ex.: ["pagamentos", "sancoes"]).
+    # O relatório monta com isto o rodapé "Fonte: … · exercícios … · coleta …";
+    # vazio, ele deduz da frente.
+    fontes: list = field(default_factory=list)
 
     def __post_init__(self):
         assert self.gravidade in GRAVIDADES, self.gravidade
@@ -90,6 +98,7 @@ class Finding:
         return {
             "id": self.id, "frente": self.frente, "gravidade": self.gravidade,
             "titulo": self.titulo, "descricao": self.descricao,
+            "fontes": list(self.fontes or []),
             "linhas_evidencia": self.n_linhas, "metricas": self.metricas,
             "base_legal": self.base_legal, "como_verificar": self.como_verificar,
             "cobertura": self.cobertura,

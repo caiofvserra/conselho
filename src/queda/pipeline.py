@@ -46,6 +46,15 @@ CHECKPOINT_TTL_HORAS = 12.0
 # pula a janela e gasta o ritmo no que ainda pode vir; passada, tenta de novo,
 # porque a correção pode ter sido nossa ou o exercício pode ter sido publicado.
 CHECKPOINT_RECUSA_TTL_HORAS = 12.0
+# Recusa de exercício ENCERRADO, confirmada em duas rodadas distintas e com a
+# mesma pergunta (mesmos nomes de parâmetro): o portal não vai mudar de ideia
+# em 12 h. Medido na rodada 10 (05/09/2026): 16 janelas de exercícios
+# encerrados (2010 em quatro endpoints, 2010-2011 no balanço, 2010-2020 no
+# centro de custo) voltavam à rede duas vezes por dia, 32 requisições que
+# nunca deram certo e ainda disparavam o 403 por rajada. Passam a valer 30
+# dias — e a validade cai na hora se a nossa pergunta mudar, porque o marcador
+# guarda a assinatura dos parâmetros.
+CHECKPOINT_RECUSA_TTL_HORAS_ENCERRADO = 720.0
 # Escotilha de emergência: QUEDA_CHECKPOINT=0 desliga leitura e gravação, para
 # o caso de um checkpoint ruim precisar ser contornado sem apagar nada à mão.
 _ENV_CHECKPOINT = "QUEDA_CHECKPOINT"
@@ -82,6 +91,10 @@ def _salvar(nome: str, df: pd.DataFrame) -> pd.DataFrame:
         "anos_faltando": (", ".join(str(a) for a in
                                     range(anos[0], anos[-1] + 1)
                                     if a not in set(anos)) if anos else ""),
+        # Quantos conselhos responderam (benchmark): sem isto o diagnóstico
+        # mostrava 15.938 linhas e ninguém sabia de quantas UFs eram.
+        **({"hosts": int(df["_uf"].nunique())}
+           if df is not None and not df.empty and "_uf" in df.columns else {}),
         **_JANELAS.pop(nome, {}),
     })
     if df is None or df.empty:
@@ -205,24 +218,75 @@ def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path, Path, Pat
             base.with_suffix(".vazio"), base.with_suffix(".recusado"))
 
 
-def _recusa_fresca(etapa: str, janela: str) -> bool:
-    """A janela foi recusada há pouco? Então não vale gastar ritmo com ela agora."""
+# Formato de parâmetro que cada etapa anual do Implanta manda — é a
+# "assinatura" gravada no marcador `.recusado`. Se a pergunta mudar (outro
+# nome de parâmetro), a recusa antiga deixa de valer sozinha, sem `limpar`.
+_ETAPAS_VIGENCIA = {"contratos", "aditivos"}
+
+
+def _assinatura_etapa(etapa: str) -> str:
+    if etapa in _ETAPAS_VIGENCIA:
+        return "vigenciaInicio,vigenciaTermino"
+    return "referenciaInicio,referenciaTermino"
+
+
+def _ler_recusa(recusado: Path) -> tuple[int, str]:
+    """(quantas rodadas recusaram, assinatura) gravados no marcador.
+
+    Marcador antigo (só o timestamp) vale como uma recusa sem assinatura."""
+    try:
+        partes = recusado.read_text(encoding="utf-8").strip().split("|")
+    except OSError:
+        return 1, ""
+    n = 1
+    if len(partes) >= 2:
+        try:
+            n = max(1, int(partes[1]))
+        except ValueError:
+            n = 1
+    return n, (partes[2] if len(partes) >= 3 else "")
+
+
+def _recusa_fresca(etapa: str, janela: str, ano: int | None = None,
+                   assinatura: str | None = None) -> bool:
+    """A janela foi recusada há pouco? Então não vale gastar ritmo com ela agora.
+
+    12 h por padrão. Exercício encerrado, recusado em duas rodadas distintas
+    com a MESMA pergunta: `CHECKPOINT_RECUSA_TTL_HORAS_ENCERRADO`. Pergunta
+    diferente da gravada: a recusa não vale (a correção pode ter sido nossa).
+    Sem assinatura (laços do benchmark e do PNCP, onde None também vem de
+    403/5xx) nunca se aplica o prazo longo.
+    """
     if not _checkpoint_ligado():
         return False
     *_, recusado = _checkpoint_arquivos(etapa, janela)
     if not recusado.exists():
         return False
+    n, gravada = _ler_recusa(recusado)
+    if assinatura and gravada and assinatura != gravada:
+        return False
     idade_h = (time.time() - recusado.stat().st_mtime) / 3600.0
-    return idade_h <= CHECKPOINT_RECUSA_TTL_HORAS
+    ttl = CHECKPOINT_RECUSA_TTL_HORAS
+    if assinatura and n >= 2 and _exercicio_encerrado(ano):
+        ttl = CHECKPOINT_RECUSA_TTL_HORAS_ENCERRADO
+    return idade_h <= ttl
 
 
-def _marcar_recusa(etapa: str, janela: str) -> None:
+def _marcar_recusa(etapa: str, janela: str, assinatura: str = "") -> None:
+    """Anota `timestamp|n|assinatura`; `n` conta rodadas que recusaram a mesma
+    pergunta (zera se a assinatura mudou)."""
     if not _checkpoint_ligado():
         return
     *_, recusado = _checkpoint_arquivos(etapa, janela)
     try:
+        n = 1
+        if recusado.exists():
+            n_ant, gravada = _ler_recusa(recusado)
+            if not assinatura or not gravada or gravada == assinatura:
+                n = n_ant + 1
         recusado.parent.mkdir(parents=True, exist_ok=True)
-        recusado.write_text(f"{datetime.now().isoformat(timespec='seconds')}\n")
+        recusado.write_text(
+            f"{datetime.now().isoformat(timespec='seconds')}|{n}|{assinatura}\n")
     except OSError as e:
         log.debug("não foi possível anotar a recusa %s/%s (%s)", etapa, janela, e)
 
@@ -240,13 +304,25 @@ def _exercicio_encerrado(ano: int | None) -> bool:
         return False
 
 
-def _checkpoint_utilizavel(caminho: Path, ano: int | None) -> bool:
-    """Checkpoint de exercício encerrado vale sempre; do exercício em curso,
-    só por algumas horas — senão a rodada de dezembro continuaria mostrando o
-    exercício como ele estava em janeiro."""
+def _janela_encerrada(janela: str | None, ano: int | None) -> bool:
+    """Janela que não muda mais: exercício encerrado, ou mês (rótulo AAAAMM)
+    anterior ao mês corrente. Sem isso, todo mês já fechado de 2026 no PNCP
+    cairia no TTL de 12 h do "exercício em curso" e voltaria à rede duas vezes
+    por dia."""
+    if janela and re.fullmatch(r"\d{6}", str(janela)):
+        agora = datetime.now()
+        return int(janela) < agora.year * 100 + agora.month
+    return _exercicio_encerrado(ano)
+
+
+def _checkpoint_utilizavel(caminho: Path, ano: int | None,
+                           janela: str | None = None) -> bool:
+    """Checkpoint de exercício (ou mês) encerrado vale sempre; do período em
+    curso, só por algumas horas — senão a rodada de dezembro continuaria
+    mostrando o exercício como ele estava em janeiro."""
     if not caminho.exists():
         return False
-    if _exercicio_encerrado(ano):
+    if _janela_encerrada(janela, ano):
         return True
     idade_h = (time.time() - caminho.stat().st_mtime) / 3600.0
     if idade_h <= CHECKPOINT_TTL_HORAS:
@@ -277,7 +353,7 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
     if not _checkpoint_ligado():
         return None
     csv, jsn, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
-    if _checkpoint_utilizavel(csv, ano):
+    if _checkpoint_utilizavel(csv, ano, janela):
         try:
             d = pd.read_csv(csv, dtype=str, keep_default_na=False,
                             low_memory=False)
@@ -287,7 +363,7 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
             return None
         return [{k: _do_texto(v) for k, v in r.items()}
                 for r in d.to_dict("records")]
-    if _checkpoint_utilizavel(jsn, ano):
+    if _checkpoint_utilizavel(jsn, ano, janela):
         try:
             linhas = json.loads(jsn.read_text(encoding="utf-8"))
         except (ValueError, OSError) as e:
@@ -295,12 +371,13 @@ def _checkpoint_ler(etapa: str, janela: str, ano: int | None = None):
                         jsn.name, type(e).__name__)
             return None
         return linhas if isinstance(linhas, list) else None
-    if _checkpoint_utilizavel(vazio, ano):
+    if _checkpoint_utilizavel(vazio, ano, janela):
         return []
     return None
 
 
-def _janela_estado(etapa: str, janela: str, ano: int | None = None) -> str | None:
+def _janela_estado(etapa: str, janela: str, ano: int | None = None,
+                   assinatura: str | None = None) -> str | None:
     """`"linhas"`, `"vazio"`, `"vazio_expirado"`, `"recusado"` ou `None` — sem
     abrir o arquivo.
 
@@ -312,11 +389,12 @@ def _janela_estado(etapa: str, janela: str, ano: int | None = None) -> str | Non
     if not _checkpoint_ligado():
         return None
     csv, jsn, vazio, _recusa = _checkpoint_arquivos(etapa, janela)
-    if _checkpoint_utilizavel(csv, ano) or _checkpoint_utilizavel(jsn, ano):
+    if (_checkpoint_utilizavel(csv, ano, janela)
+            or _checkpoint_utilizavel(jsn, ano, janela)):
         return "linhas"
-    if _checkpoint_utilizavel(vazio, ano):
+    if _checkpoint_utilizavel(vazio, ano, janela):
         return "vazio"
-    if _recusa_fresca(etapa, janela):
+    if _recusa_fresca(etapa, janela, ano, assinatura):
         return "recusado"
     # Marcador de vazio EXPIRADO — só acontece no exercício em curso, cujo
     # checkpoint vale 12h. A janela volta à rede, mas o que ela devolveu da
@@ -354,7 +432,7 @@ def janelas_pendentes(etapa: str, ate: int, desde: int | None) -> list[int]:
     ano = ate
     piso = desde or config.ANO_PISO
     while ano >= piso:
-        estado = _janela_estado(etapa, str(ano), ano)
+        estado = _janela_estado(etapa, str(ano), ano, _assinatura_etapa(etapa))
         if estado is None:
             pendentes.append(ano)
             vazios = 0
@@ -492,13 +570,23 @@ def _registrar_janelas(dataset: str, falhas: list, do_disco: int,
                                                     texto) if x)
 
 
-def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None):
+def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None,
+                      assinatura: str = ""):
     """Percorre janelas arbitrárias com checkpoint, tolerando falhas.
 
     `janelas` é um iterável de `(rótulo, ano, *args)` e `buscar(*args)` devolve
     as linhas da janela (ou None, quando o host não respondeu). Serve aos laços
-    que não são "um exercício por vez" — hoje, os meses do PNCP, que são a
-    outra varredura longa da coleta (66 janelas paginadas para 2021-2026).
+    que não são "um exercício por vez" — os meses do PNCP e os exercícios de
+    cada Crea no benchmark.
+
+    Toda linha sai carimbada com `_ano` (o `ano` da tupla), venha da rede ou do
+    checkpoint — o checkpoint não grava `_ano` (ver `_checkpoint_gravar`), e o
+    benchmark ficou 15.938 linhas sem exercício por isso: a frente quebrava
+    antes de produzir um achado (rodadas 9 e 10). Quem precisa de outro ano
+    (o PNCP usa `anoContrato`) sobrescreve depois.
+
+    `assinatura` vazia: recusa vale 12 h e nunca o prazo longo — nestes laços
+    None também vem de 403/5xx do host, não só de 400 do portal.
     """
     out: list[dict] = []
     falhas: list[str] = []
@@ -508,7 +596,7 @@ def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None
         rows = _checkpoint_ler(etapa, rotulo, ano)
         if rows is not None:
             do_disco += 1
-        elif _recusa_fresca(etapa, rotulo):
+        elif _recusa_fresca(etapa, rotulo, ano, assinatura):
             recusadas.append(rotulo)
             continue
         else:
@@ -523,12 +611,16 @@ def _janelas_nomeadas(etapa: str, janelas, buscar, *, dataset: str | None = None
                 continue
             if not isinstance(rows, list):
                 log.warning("%s/%s: sem resposta utilizável", etapa, rotulo)
-                _marcar_recusa(etapa, rotulo)
+                _marcar_recusa(etapa, rotulo, assinatura)
                 falhas.append(rotulo)
                 recusadas.append(rotulo)
                 continue
             _checkpoint_gravar(etapa, rotulo, rows)
             coletadas += 1
+        if ano is not None:
+            for r in rows:
+                if isinstance(r, dict):
+                    r["_ano"] = ano
         out.extend(rows)
     _registrar_janelas(dataset or etapa, falhas, do_disco, coletadas,
                        recusadas=recusadas)
@@ -628,7 +720,7 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
         rows = _checkpoint_ler(etapa, str(ano), ano)
         if rows is not None:
             do_disco += 1
-        elif _recusa_fresca(etapa, str(ano)):
+        elif _recusa_fresca(etapa, str(ano), ano, _assinatura_etapa(etapa)):
             # O portal já recusou esta janela há pouco. Insistir agora gasta o
             # ritmo — e é o ritmo que decide até onde a rodada chega antes do
             # 403. Recusa NÃO é exercício vazio: o contador de vazios zera,
@@ -658,7 +750,7 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
                 log.warning("%s/%d: sem resposta utilizável (%s) — não conta "
                             "como exercício vazio", etapa, ano,
                             type(rows).__name__)
-                _marcar_recusa(etapa, str(ano))
+                _marcar_recusa(etapa, str(ano), _assinatura_etapa(etapa))
                 falhas.append(ano)
                 recusadas.append(ano)
                 vazios = 0
@@ -1098,29 +1190,93 @@ def stage_indenizacoes(desde, ate):
     return df
 
 
+def _chave_ci(r: dict, nome: str, padrao=None):
+    """`r[nome]` ignorando a caixa das letras.
+
+    O DTO real de `/v1/contratos` grafa `numeroControlePncpCompra` (lido do
+    cache bruto em 05/09/2026), e a projeção esperava `numeroControlePNCPCompra`:
+    145 contratos ficaram seis rodadas com a compra de origem vazia, e os dois
+    achados que dependem dela nunca dispararam. Tolerar a caixa custa nada e
+    fecha essa classe de erro para qualquer outra chave.
+    """
+    if not isinstance(r, dict):
+        return padrao
+    if nome in r:
+        return r[nome]
+    alvo = nome.lower()
+    for k, v in r.items():
+        if str(k).lower() == alvo:
+            return v
+    return padrao
+
+
 def _pncp_contrato_linha(o: dict, r: dict) -> dict:
-    """Projeta um contrato do PNCP nas colunas que a análise usa."""
+    """Projeta um contrato do PNCP nas colunas que a análise usa.
+
+    Nomes das colunas staged são estáveis (os checks os usam); a leitura do
+    DTO é tolerante à caixa (`_chave_ci`)."""
+    tipo = _chave_ci(r, "tipoContrato") or {}
+    unidade = _chave_ci(r, "unidadeOrgao") or {}
     return {
         "orgao_cnpj": o["cnpj"], "orgao_papel": o["papel"],
         "orgao_nome": o.get("razaoSocial"),
-        "numeroControlePNCP": r.get("numeroControlePNCP"),
-        "fornecedor_ni": so_digitos(r.get("niFornecedor")),
-        "fornecedor_nome": r.get("nomeRazaoSocialFornecedor"),
-        "tipoPessoa": r.get("tipoPessoa"),
-        "objeto": r.get("objetoContrato"),
-        "valorGlobal": parse_valor(r.get("valorGlobal")),
-        "valorAcumulado": parse_valor(r.get("valorAcumulado")),
-        "dataAssinatura": r.get("dataAssinatura"),
-        "vigenciaInicio": r.get("dataVigenciaInicio"),
-        "vigenciaFim": r.get("dataVigenciaFim"),
-        "anoContrato": r.get("anoContrato"),
-        "numeroContrato": r.get("numeroContratoEmpenho"),
+        "numeroControlePNCP": _chave_ci(r, "numeroControlePNCP"),
+        "fornecedor_ni": so_digitos(_chave_ci(r, "niFornecedor")),
+        "fornecedor_nome": _chave_ci(r, "nomeRazaoSocialFornecedor"),
+        "tipoPessoa": _chave_ci(r, "tipoPessoa"),
+        "objeto": _chave_ci(r, "objetoContrato"),
+        "valorGlobal": parse_valor(_chave_ci(r, "valorGlobal")),
+        "valorAcumulado": parse_valor(_chave_ci(r, "valorAcumulado")),
+        "valorInicial": parse_valor(_chave_ci(r, "valorInicial")),
+        "dataAssinatura": _chave_ci(r, "dataAssinatura"),
+        "vigenciaInicio": _chave_ci(r, "dataVigenciaInicio"),
+        "vigenciaFim": _chave_ci(r, "dataVigenciaFim"),
+        "dataPublicacaoPncp": _chave_ci(r, "dataPublicacaoPncp"),
+        "anoContrato": _chave_ci(r, "anoContrato"),
+        "numeroContrato": _chave_ci(r, "numeroContratoEmpenho"),
+        # "Empenho" ou "Contrato (termo inicial)": o PNCP publica também o
+        # que o portal próprio publica como nota de empenho, e sem esta coluna
+        # o cruzamento acusava o portal de omitir o que ele publica em outro
+        # dataset.
+        "tipoContrato_nome": tipo.get("nome") if isinstance(tipo, dict) else tipo,
+        "unidade_codigo": (unidade.get("codigoUnidade")
+                           if isinstance(unidade, dict) else None),
         # O contrato não expõe edital nem termo de referência; a COMPRA de
         # origem sim. É por este número que se chega aos documentos do certame
         # — e o portal do próprio Crea não publica nenhum número de licitação
-        # em 965 contratos.
-        "numeroControlePNCPCompra": r.get("numeroControlePNCPCompra"),
-        "processo": r.get("processo"),
+        # nos seus contratos.
+        "numeroControlePNCPCompra": _chave_ci(r, "numeroControlePncpCompra"),
+        "numeroControlePncpAta": _chave_ci(r, "numeroControlePncpAta"),
+        "processo": _chave_ci(r, "processo"),
+    }
+
+
+def _pncp_ata_linha(o: dict, r: dict) -> dict:
+    """Projeta uma ata de registro de preços do PNCP (`/v1/atas`).
+
+    As chaves do DTO NÃO foram verificadas contra a rede (bloqueada na sessão
+    em que isto foi escrito); por isso cada uma é lida com `_chave_ci` e com
+    sinônimos prováveis. Coluna vazia é sinal para conferir o DTO no cache
+    bruto (`data/raw/pncp.gov.br/`), não para inventar valor.
+    """
+    def ci(*nomes):
+        for n in nomes:
+            v = _chave_ci(r, n)
+            if v not in (None, ""):
+                return v
+        return None
+    return {
+        "orgao_cnpj": o["cnpj"], "orgao_papel": o["papel"],
+        "numeroControlePNCPAta": ci("numeroControlePNCPAta", "numeroControlePncpAta"),
+        "numeroAtaRegistroPreco": ci("numeroAtaRegistroPreco", "numeroAta"),
+        "anoAta": ci("anoAta"),
+        "numeroControlePNCPCompra": ci("numeroControlePNCPCompra", "numeroControlePncpCompra"),
+        "dataAssinatura": ci("dataAssinatura"),
+        "vigenciaInicio": ci("vigenciaInicio", "dataVigenciaInicio"),
+        "vigenciaFim": ci("vigenciaFim", "dataVigenciaFim"),
+        "dataPublicacaoPncp": ci("dataPublicacaoPncp"),
+        "objetoContratacao": ci("objetoContratacao", "objeto"),
+        "cancelado": ci("cancelado"),
     }
 
 
@@ -1163,7 +1319,14 @@ def stage_pncp(desde, ate):
             # A projeção vem ANTES do checkpoint porque o DTO do PNCP traz
             # objetos aninhados (órgão, unidade, tipo de contrato) e aninhado
             # não sobrevive a um CSV. Projetado, o registro é plano.
-            return [_pncp_contrato_linha(orgao, r) for r in linhas]
+            proj = [_pncp_contrato_linha(orgao, r) for r in linhas]
+            if proj and not any(l.get("numeroControlePNCPCompra") for l in proj):
+                # Foi exatamente este silêncio que escondeu a grafia errada da
+                # chave por seis rodadas.
+                log.warning("pncp_contratos/%s: %d contrato(s) sem compra de "
+                            "origem no DTO — conferir a grafia da chave no cache "
+                            "bruto", jini[:6], len(proj))
+            return proj
 
         contratos.extend(_janelas_nomeadas(
             f"pncp_contratos/{o['cnpj']}",
@@ -1199,12 +1362,46 @@ def stage_pncp(desde, ate):
 
 
 # ---------------------------------------------------------------- entrada
-def _ja_coletado(nome: str) -> pd.DataFrame | None:
-    """DataFrame já staged com linhas, ou None se falta ou veio vazio.
+# Colunas que um staged precisa ter para ser reaproveitado pelo `--retomar`.
+# Um CSV com linhas mas sem elas é de uma versão anterior do código e vale
+# como NÃO coletado — senão a correção nunca chega ao relatório: a rodada 10
+# pulou benchmark_creas ("já em disco, 15.938 linhas") e o check quebrou no
+# mesmo `_ano` que a coleta velha não gravava.
+COLUNAS_OBRIGATORIAS: dict[str, tuple[str, ...]] = {
+    "benchmark_creas": ("_ano",),
+    "pncp_contratos": ("tipoContrato_nome",),
+    "sancoes": ("alcance",),
+}
+# Etapas cujo checkpoint guarda a PROJEÇÃO (não a resposta bruta): esquema
+# novo exige refazer a projeção, e refazer é barato porque o cache HTTP em
+# data/raw/<host>/ serve as respostas sem rede.
+_CHECKPOINT_E_PROJECAO = {"pncp_contratos"}
+
+
+def _esquema_faltante(nome: str, df: pd.DataFrame) -> list[str]:
+    return [c for c in COLUNAS_OBRIGATORIAS.get(nome, ()) if c not in df.columns]
+
+
+def _invalidar_checkpoints(etapa: str) -> None:
+    """Apaga os checkpoints de uma etapa cujo esquema mudou. Só para etapas
+    em `_CHECKPOINT_E_PROJECAO`; nas demais o checkpoint continua válido e a
+    coluna nova é reposta na leitura ou na etapa."""
+    import shutil
+    raiz = _checkpoint_dir(etapa)
+    if raiz.is_dir():
+        shutil.rmtree(raiz, ignore_errors=True)
+        log.info("%s: checkpoints apagados — guardavam a projeção antiga; a "
+                 "recoleta sai do cache HTTP em data/raw/", etapa)
+
+
+def _ja_coletado(nome: str, exigir_esquema: bool = True) -> pd.DataFrame | None:
+    """DataFrame já staged com linhas, ou None se falta, veio vazio ou é de um
+    esquema anterior (ver `COLUNAS_OBRIGATORIAS`).
 
     Vazio conta como NÃO coletado de propósito: dataset zerado é quase sempre
     resultado de 403 por rajada, e 403 nunca é cacheado — repetir a etapa é
-    exatamente o que se quer.
+    exatamente o que se quer. `exigir_esquema=False` serve a quem só quer
+    preservar o que já está em disco (o caminho de falha de `build_staged`).
     """
     caminho = config.STAGED_DIR / f"{nome}.csv"
     if not caminho.exists():
@@ -1215,6 +1412,14 @@ def _ja_coletado(nome: str) -> pd.DataFrame | None:
         return None
     if df.empty or list(df.columns) == ["_vazio"]:
         return None
+    if exigir_esquema:
+        faltam = _esquema_faltante(nome, df)
+        if faltam:
+            log.info("%s: staged sem a(s) coluna(s) %s — esquema anterior; a "
+                     "etapa será refeita", nome, ", ".join(faltam))
+            if nome in _CHECKPOINT_E_PROJECAO:
+                _invalidar_checkpoints(nome)
+            return None
     for col in ("DATA", "INI", "FIM"):
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -1294,6 +1499,51 @@ def stage_licitacoes_pncp(desde, ate):
     return _salvar("licitacoes_pncp", df)
 
 
+def stage_pncp_atas(desde, ate):
+    """Atas de registro de preços do órgão-alvo no PNCP (`/v1/atas`), mês a mês.
+
+    Por que existe: 6 dos 11 "contratos ausentes do PNCP" da rodada 10 eram
+    ATAs do portal próprio (ATA 004/2024 etc.), e o cruzamento só consultava
+    `/v1/contratos` — ata nunca ia casar, por construção. O parâmetro do órgão
+    neste endpoint não foi verificado desta sessão; `clients.pncp_atas_mes`
+    tenta `cnpj` e `cnpjOrgao`, e uma janela sem resposta vira recusa (12 h),
+    não "sem atas". Falha total grava vazio e anota `indisponivel` no
+    diagnóstico, sem derrubar a coleta.
+    """
+    buscar_atas = getattr(clients, "pncp_atas_mes", None)
+    alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO,
+                                       cnpj_fixo=config.ORGAO_ALVO_CNPJ_CANDIDATOS,
+                                       uf=config.ORGAO_ALVO_UF)
+    if buscar_atas is None or not alvo or not alvo.get("cnpj"):
+        out = _salvar("pncp_atas", pd.DataFrame())
+        _DIAGNOSTICO[-1]["indisponivel"] = ("cliente de atas ausente" if buscar_atas is None
+                                            else "órgão-alvo não resolvido")
+        return out
+    orgao = {**alvo, "papel": "alvo"}
+    ini = max(desde or 2021, 2021)
+
+    def buscar(jini, jfim):
+        rows = buscar_atas(orgao["cnpj"], jini, jfim)
+        if rows is None:
+            return None
+        return [_pncp_ata_linha(orgao, r) for r in rows]
+
+    linhas = _janelas_nomeadas(
+        f"pncp_atas/{orgao['cnpj']}",
+        ((jini[:6], int(jini[:4]), jini, jfim)
+         for jini, jfim in clients.pncp_meses(ini, ate)),
+        buscar, dataset="pncp_atas")
+    df = pd.DataFrame(linhas)
+    if not df.empty:
+        df["_ano"] = pd.to_numeric(coluna(df, "anoAta", None), errors="coerce")
+    out = _salvar("pncp_atas", df)
+    janelas = _DIAGNOSTICO[-1]
+    if df.empty and janelas.get("janelas_recusadas") and not janelas.get("janelas_com_dado"):
+        janelas["indisponivel"] = ("PNCP /v1/atas não respondeu a janela nenhuma — "
+                                   "nome do parâmetro do órgão a confirmar")
+    return out
+
+
 def stage_sancoes(ate=None):
     """CEIS + CNEP (CGU), a foto de hoje. Tiro único; a retomada é o cache."""
     manual = manual_rows("sancoes")
@@ -1315,6 +1565,13 @@ def stage_sancoes(ate=None):
         df["fim"] = parse_data(df["fim"])
         df["efeito_nacional"] = [clients.efeito_nacional(c, f)
                                  for c, f in zip(df["categoria"], df["fundamento"])]
+        # Alcance por fundamento legal e esfera (nacional / federal / ente /
+        # indeterminado): é o que separa "vale contra o Crea-SP" de contexto.
+        # A rodada 10 publicou como efeito nacional um impedimento ESTADUAL de
+        # R$ 199 mil porque só olhava a palavra "proibição" na categoria.
+        df["alcance"] = [clients.alcance_sancao(c, f, e) for c, f, e in zip(
+            df["categoria"], coluna(df, "fundamento", None),
+            coluna(df, "esfera", None))]
     out = _salvar("sancoes", df)
     _DIAGNOSTICO[-1]["fontes"] = "; ".join(
         f"{m['cadastro']}: {m.get('data') or 'sem resposta'}" for m in metas)
@@ -1348,7 +1605,8 @@ def stage_benchmark_creas(ate):
     df = pd.DataFrame(linhas)
     if not df.empty:
         for c in ("VALOR", "VALOR_EMPENHADO", "VALOR_PAGO", "VALOR_LIQUIDADO",
-                  "VALOR_ORCADO", "REALIZADO_EXERCICIO"):
+                  "VALOR_ORCADO", "REALIZADO_EXERCICIO", "TOTAL_EXERCICIO",
+                  "REALIZADO_PERIODO", "TOTAL_PERIODO"):
             if c in df:
                 df[c] = df[c].map(parse_valor)
     return _salvar("benchmark_creas", df)
@@ -1384,6 +1642,7 @@ def _etapas(desde: int | None, ate: int) -> dict:
         "indenizacoes_endpoint": lambda: stage_indenizacoes(desde, ate),
         "pncp_contratos": lambda: stage_pncp(desde, ate),
         "licitacoes_pncp": lambda: stage_licitacoes_pncp(desde, ate),
+        "pncp_atas": lambda: stage_pncp_atas(desde, ate),
         "sancoes": lambda: stage_sancoes(ate),
         "benchmark_creas": lambda: stage_benchmark_creas(ate),
     }
@@ -1394,8 +1653,48 @@ def _etapas(desde: int | None, ate: int) -> dict:
 DATASETS_ESPERADOS: tuple[str, ...] = tuple(_etapas(None, 0))
 
 
+# Etapas com checkpoint MENSAL numa subpasta por CNPJ/modalidade
+# (`pncp_contratos/<cnpj>/AAAAMM`). Fora de ETAPAS_JANELA_ANUAL, elas eram
+# "prontas" para sempre assim que o staged tinha linhas — o mês corrente nunca
+# era atualizado em `--retomar`, que é o modo que o caderno usa sempre.
+ETAPAS_JANELA_MENSAL: dict[str, str] = {
+    "pncp_contratos": "pncp_contratos",
+    "licitacoes_pncp": "licitacoes_pncp",
+    "pncp_atas": "pncp_atas",
+}
+
+
+def janelas_pendentes_mensais(chave: str, ate: int, desde: int | None) -> list[str]:
+    """Meses (AAAAMM) sem checkpoint utilizável em alguma subpasta da etapa.
+
+    Mês anterior ao corrente vale para sempre (`_janela_encerrada`); o mês
+    corrente expira em 12 h como o exercício em curso. Sem subpasta nenhuma a
+    etapa nunca rodou — e aí é `_ja_coletado` quem decide, não esta função.
+    """
+    raiz = _checkpoint_dir(chave)
+    if not raiz.is_dir():
+        return []
+    subpastas = [p for p in raiz.iterdir() if p.is_dir()]
+    if not subpastas:
+        return []
+    piso = config.LICITACOES_PNCP_DESDE if chave == "licitacoes_pncp" else 2021
+    ini = max(desde or piso, piso)
+    agora = datetime.now()
+    limite = agora.year * 100 + agora.month
+    pendentes: set[str] = set()
+    for jini, _jfim in clients.pncp_meses(ini, min(ate, agora.year)):
+        rotulo = jini[:6]
+        if int(rotulo) > limite:
+            break
+        for sub in subpastas:
+            if _janela_estado(f"{chave}/{sub.name}", rotulo, int(rotulo[:4])) in (
+                    None, "vazio_expirado"):
+                pendentes.add(rotulo)
+    return sorted(pendentes, reverse=True)
+
+
 def etapa_pronta(nome: str, desde: int | None,
-                 ate: int) -> tuple[pd.DataFrame | None, list[int]]:
+                 ate: int) -> tuple[pd.DataFrame | None, list]:
     """(DataFrame pronto ou None, exercícios pendentes).
 
     A regra do `--retomar`, num lugar só: a etapa está pronta quando tem linhas
@@ -1405,10 +1704,12 @@ def etapa_pronta(nome: str, desde: int | None,
     decide ir ou não à rede.
     """
     pronto = _ja_coletado(nome)
-    pendentes: list[int] = []
+    pendentes: list = []
     for chave in ETAPAS_JANELA_ANUAL.get(nome, ()):
         pendentes += janelas_pendentes(chave, ate, desde)
     pendentes = sorted(set(pendentes), reverse=True)
+    if nome in ETAPAS_JANELA_MENSAL:
+        pendentes += janelas_pendentes_mensais(ETAPAS_JANELA_MENSAL[nome], ate, desde)
     return (pronto if pronto is not None and not pendentes else None), pendentes
 
 
@@ -1508,11 +1809,15 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
         })
     for nome in ("processos_itens", "indenizacoes_endpoint", "plano_contas",
                  "quadro_pessoal", "mandatarios", "pncp_contratos",
-                 "licitacoes_pncp", "sancoes", "benchmark_creas"):
+                 "licitacoes_pncp", "pncp_atas", "sancoes", "benchmark_creas"):
         staged = _ja_coletado(nome)
         manual = manual_rows(nome) is not None
+        pronto, pend_m = etapa_pronta(nome, desde, ate)
         if nome == "pncp_contratos":
-            linhas.append(_inventario_pncp(staged, manual, ate))
+            inv = _inventario_pncp(staged, manual, ate)
+            inv["janelas_faltando"] = len(pend_m)
+            inv["vai_a_rede"] = pronto is None and not manual
+            linhas.append(inv)
             continue
         linhas.append({
             "etapa": nome,
@@ -1525,8 +1830,11 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
             # entender que conferiu exercício por exercício aqui.
             "exercicios_faltando": (f"arquivo manual em data/{MANUAL_SUBDIR}/"
                                     if manual else
-                                    "sem janela anual (ver ETAPAS_JANELA_ANUAL)"),
-            "vai_a_rede": staged is None and not manual,
+                                    (", ".join(map(str, pend_m)) if pend_m else
+                                     "sem janela anual (ver ETAPAS_JANELA_ANUAL)")),
+            # `etapa_pronta` também reprova staged de esquema anterior
+            # (COLUNAS_OBRIGATORIAS) e mês corrente vencido no PNCP.
+            "vai_a_rede": pronto is None and not manual,
         })
     return pd.DataFrame(linhas)
 
@@ -1597,7 +1905,7 @@ def build_staged(desde: int | None, ate: int, *,
                 # 40 mil linhas boas da rodada anterior. O dado que já está em
                 # disco é preservado, e a falha vai para o diagnóstico — que é
                 # onde ela tem de aparecer, não no lugar do dado.
-                anterior = _ja_coletado(nome)
+                anterior = _ja_coletado(nome, exigir_esquema=False)
                 if anterior is not None:
                     log.warning("etapa %s: mantendo as %d linhas da rodada "
                                 "anterior em disco", nome, len(anterior))

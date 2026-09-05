@@ -97,19 +97,27 @@ ENDPOINTS: dict[str, tuple[str, ...]] = {
     "quadro_pessoal": _implanta("QuadrosPessoas") + (
         "/api/dadosabertos/quadro-colaboradores",),
     "mandatarios": _implanta("Conselheiros") + ("/api/dadosabertos/mandatarios",),
-    "indenizacoes_endpoint": (("/api/dadosabertos/indenizacoes",)
-                              + _implanta(*clients.DIARIAS_PROBE)),
+    # os nomes Implanta de diárias entram em `_endpoints()`, lidos do
+    # ambiente na chamada (a sessão do Colab define-os depois do import)
+    "indenizacoes_endpoint": ("/api/dadosabertos/indenizacoes",),
     "pncp_contratos": ("/api/consulta/v1/contratos",),
+    "pncp_atas": ("/api/consulta/v1/atas",),
     "pncp_cobrancas": ("/api/consulta/v1/instrumentoscobranca/inclusao",),
     "licitacoes_pncp": ("/api/consulta/v1/contratacoes/publicacao",),
-    "sancoes": ("/download-de-dados/ceis", "/download-de-dados/cnep"),
+    "sancoes": ("/download-de-dados/ceis", "/download-de-dados/cnep",
+                "/download-de-dados/cepim"),
     # opt-in: vazio por padrão não é falha de coleta, é escolha (ver `desligado`
     # no inventário)
     "benchmark_creas": ("/ComparativoDespesa",),
 }
 
 # Os dois vereditos que a tarefa inteira existe para separar.
-NAO_PUBLICA = "o órgão não publica"
+# "Respondeu vazio" e não "não publica": o 200 [] prova ausência NO ENDPOINT
+# CONSULTADO, COM OS PARÂMETROS TESTADOS. Sem o contrato da API (a
+# especificação nunca foi lida) não dá para afirmar que não há parâmetro
+# obrigatório que estamos deixando de mandar — e "o órgão não publica" é
+# exatamente a frase que este relatório não pode dizer sem prova.
+NAO_PUBLICA = "endpoint respondeu 200 com lista vazia nos parâmetros testados"
 NAO_COLETAMOS = "não conseguimos coletar"
 INDETERMINADO = "indeterminado"
 
@@ -142,8 +150,20 @@ CAUSAS: dict[str, tuple[str, str]] = {
         "indisponibilidade com data e hora."),
     "servidor respondeu 200 com lista vazia": (
         NAO_PUBLICA,
-        "Confirmar o vazio por LAI (e-SIC): pedir a base do período em formato "
-        "aberto. A resposta ao pedido converte o vazio em prova documental."),
+        "Ler o contrato da API (`python main.py sondar`, ou a página de "
+        "documentação Stoplight) para confirmar que o endpoint não exige "
+        "parâmetro que não mandamos; depois confirmar o vazio por LAI (e-SIC), "
+        "pedindo a base do período em formato aberto."),
+    "servidor respondeu 200 com lista vazia; outros formatos deram 404": (
+        NAO_PUBLICA,
+        "O formato aceito devolveu vazio e os demais nem existem como rota. "
+        "Conferir na documentação se falta parâmetro; depois pedir por LAI."),
+    "endpoint não identificado (caminho não consta da documentação lida)": (
+        INDETERMINADO,
+        "Nenhum nome de endpoint válido é conhecido para esta fonte — os nomes "
+        "tentados antes deram 404 no prefixo documentado. Copiar da página de "
+        "documentação (F12 → Network, filtro `api/v1.0`) o caminho real e "
+        "defini-lo em QUEDA_DIARIAS_ENDPOINTS; até lá a fonte fica sem veredito."),
     "endpoint inexistente (404)": (
         INDETERMINADO,
         "404 não distingue 'o órgão não oferece este dado' de 'estamos pedindo "
@@ -183,12 +203,22 @@ def _status_txt(s: pd.Series) -> pd.Series:
     return s.map(um)
 
 
+def _endpoints() -> dict[str, tuple[str, ...]]:
+    """ENDPOINTS com os nomes de diárias lidos do ambiente NA CHAMADA: o
+    diagnóstico tem de enxergar os mesmos caminhos que a coleta tentou."""
+    out = dict(ENDPOINTS)
+    extra = _implanta(*clients.diarias_probe())
+    if extra:
+        out["indenizacoes_endpoint"] = out["indenizacoes_endpoint"] + extra
+    return out
+
+
 def _tentativas_por_dataset(led: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Atribui cada tentativa registrada ao dataset que ela alimentava."""
     caminho = (led["caminho"].fillna("").astype(str).str.lower()
                .str.split("?").str[0].str.rstrip("/"))
     out: dict[str, pd.DataFrame] = {}
-    for dataset, marcadores in ENDPOINTS.items():
+    for dataset, marcadores in _endpoints().items():
         mask = pd.Series(False, index=led.index)
         for m in marcadores:
             mask |= caminho.str.endswith(m)
@@ -197,7 +227,32 @@ def _tentativas_por_dataset(led: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return out
 
 
-def _causa(sub: pd.DataFrame, retomado: bool) -> str:
+def _sem_superados(sub: pd.DataFrame) -> pd.DataFrame:
+    """Descarta 403/429 que foram SUPERADOS por um 2xx posterior ao mesmo
+    (caminho, params): rate-limit retentado com sucesso não é bloqueio do
+    dado. Na rodada 10, dois 403 de rajada seguidos de 200 [] fizeram
+    `mandatarios` sair como "bloqueio" em vez de "respondeu vazio"."""
+    if sub is None or sub.empty or "resultado" not in sub.columns:
+        return sub
+    d = sub.copy()
+    d["_ok"] = _status_txt(d["status"]).str.startswith("2")
+    d["_chave"] = (d["caminho"].fillna("").astype(str) + "?" +
+                   (d["params"].fillna("").astype(str) if "params" in d.columns else ""))
+    if "ts" in d.columns:
+        d = d.sort_values("ts", kind="stable")
+    superados: list = []
+    for _, grupo in d.groupby("_chave", sort=False):
+        oks = [i for i, ok in zip(grupo.index, grupo["_ok"]) if ok]
+        if not oks:
+            continue
+        pos = list(grupo.index).index(oks[-1])
+        for i in list(grupo.index)[:pos]:
+            if str(grupo.at[i, "resultado"]) == H.R_BLOQUEIO:
+                superados.append(i)
+    return sub.drop(index=superados) if superados else sub
+
+
+def _causa(sub: pd.DataFrame, retomado: bool, tem_caminho: bool = True) -> str:
     """Causa provável do vazio, a partir dos status observados.
 
     A ordem dos testes é a regra de prova: primeiro o que denuncia erro NOSSO,
@@ -207,8 +262,11 @@ def _causa(sub: pd.DataFrame, retomado: bool) -> str:
     publicação onde houve bloqueio, não.
     """
     if sub is None or sub.empty:
+        if not tem_caminho:
+            return "endpoint não identificado (caminho não consta da documentação lida)"
         return ("etapa retomada do disco (nenhuma requisição nesta rodada)"
                 if retomado else "sem registro de tentativa")
+    sub = _sem_superados(sub)
     res = set(sub["resultado"].fillna("").astype(str))
     if pd.to_numeric(sub["itens"], errors="coerce").fillna(0).max() > 0:
         return "resposta recebida e descartada no staging"
@@ -221,6 +279,8 @@ def _causa(sub: pd.DataFrame, retomado: bool) -> str:
     if H.R_VAZIO in res or H.R_OK in res:
         # R_OK aqui só acontece com payload escalar (sem lista para contar);
         # em ambos os casos o host respondeu e não entregou registro nenhum.
+        if H.R_INEXISTENTE in res:
+            return "servidor respondeu 200 com lista vazia; outros formatos deram 404"
         return "servidor respondeu 200 com lista vazia"
     if H.R_INEXISTENTE in res:
         return "endpoint inexistente (404)"
@@ -288,7 +348,11 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
     linhas = []
     for dataset in alvos:
         sub = por_dataset.get(dataset)
-        causa = _causa(sub, dataset in retomados)
+        # Fonte cuja lista de caminhos ficou só com o serviço legado (nenhum
+        # nome de endpoint Implanta conhecido): sem caminho, não há o que
+        # tentar — e o veredito tem de dizer isso, não "bloqueio".
+        tem_caminho = not (dataset == "indenizacoes_endpoint" and not clients.diarias_probe())
+        causa = _causa(sub, dataset in retomados, tem_caminho)
         veredito, o_que_fazer = CAUSAS[causa]
         analise, _grav = CRITICOS.get(dataset, ("—", "baixa"))
         itens = pd.to_numeric(sub["itens"], errors="coerce") if sub is not None else None
@@ -319,11 +383,11 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
     # quanto do vazio é responsabilidade da própria ferramenta.
     partes = []
     if n_orgao:
-        partes.append(f"{n_orgao} por falta de publicação do órgão")
+        partes.append(f"{n_orgao} responderam 200 com lista vazia nos parâmetros testados")
     if n_nosso:
         partes.append(f"{n_nosso} por falha da nossa coleta")
     if n_ind:
-        partes.append(f"{n_ind} sem causa determinável")
+        partes.append(f"{n_ind} sem caminho identificado ou sem causa determinável")
     titulo = f"Por que {len(ev)} fonte(s) vieram vazias: " + "; ".join(partes)
 
     ordem = {NAO_PUBLICA: 0, NAO_COLETAMOS: 1, INDETERMINADO: 2}
@@ -337,10 +401,12 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
             "de todas as tentativas da coleta (arquivo `_coleta_http.csv`). A "
             "distinção que a coluna `veredito` faz é a única coisa que importa "
             "nesta tabela:\n\n"
-            "* **o órgão não publica** — o servidor respondeu **200 com lista "
-            "vazia**. O endpoint existe, aceitou os parâmetros e devolveu nada. "
-            "Isso é achado de transparência: o dado deveria estar publicado em "
-            "formato aberto e não está.\n"
+            "* **endpoint respondeu 200 com lista vazia nos parâmetros testados** — "
+            "o endpoint existe, aceitou os parâmetros e devolveu nada. É o "
+            "sinal mais forte de que o dado não está publicado ali, mas não "
+            "prova falta de publicação pelo órgão: sem o contrato da API não se "
+            "sabe se há parâmetro obrigatório que não mandamos. Confirmar pela "
+            "documentação e por LAI antes de afirmar.\n"
             "* **não conseguimos coletar** — houve 403 (bloqueio de WAF ou "
             "rate-limit), 400 (formato de parâmetro recusado), 5xx/timeout, ou "
             "a resposta veio com registros e o nosso staging os descartou. "
@@ -368,11 +434,12 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
             "`data/staged/_coleta_http.csv` traz host, caminho e os parâmetros "
             "usados — `curl -s -o /dev/null -w '%{http_code}\\n' "
             "'<host><caminho>?<params>'` devolve o mesmo status fora da "
-            "ferramenta. Para as fontes com veredito 'o órgão não publica', "
+            "ferramenta. Para as fontes que responderam vazio, "
             "protocolar pedido pelo e-SIC citando o endpoint e a data da "
             "consulta."),
         metricas={"fontes_vazias": int(len(ev)),
-                  "sem_publicacao": n_orgao,
+                  "sem_publicacao": n_orgao,       # nome antigo, mantido
+                  "responderam_vazio": n_orgao,
                   "falha_da_coleta": n_nosso,
                   "indeterminadas": n_ind,
                   "tentativas_registradas": int(len(led)),

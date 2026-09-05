@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,13 @@ class RateLimited(RuntimeError):
 
 _session: requests.Session | None = None
 _last_hit: dict[str, float] = {}
+# Intervalo mínimo por host DEPOIS de um 403/429 nesta execução. Medido na
+# rodada de 05/09/2026: com ritmo fixo de 2,5 s o portal bloqueou 6 vezes
+# (sempre após ~10-14 requisições seguidas), cada bloqueio custou duas esperas
+# (~61 s) e o ritmo voltava a 2,5 s assim que abria — o padrão se repetia. Quem
+# já foi bloqueado uma vez passa a ser tratado no ritmo lento até o fim do
+# processo; hosts que nunca bloquearam continuam em THROTTLE_SECONDS.
+_ritmo_host: dict[str, float] = {}
 
 
 def _verify():
@@ -71,11 +79,38 @@ def _cache_path(url: str, params: dict | None) -> Path:
     return config.RAW_DIR / host / f"{h}.json"
 
 
+def _host(url: str) -> str:
+    partes = url.split("/")
+    return partes[2] if len(partes) > 2 else url
+
+
+def _intervalo_minimo(host: str) -> float:
+    """Ritmo vigente para o host: o padrão, ou o lento se ele já bloqueou."""
+    return _ritmo_host.get(host, config.THROTTLE_SECONDS)
+
+
+def _reduzir_ritmo(url: str) -> None:
+    """Primeiro 403/429 do host nesta execução: daqui em diante ele é
+    consultado em `config.THROTTLE_APOS_403` (sem volta até o processo acabar).
+
+    Idempotente e barato; só loga na primeira vez para não repetir o aviso a
+    cada tentativa de backoff.
+    """
+    host = _host(url)
+    lento = float(config.THROTTLE_APOS_403)
+    if _ritmo_host.get(host, 0.0) >= lento:
+        return
+    _ritmo_host[host] = lento
+    log.info("%s bloqueou por rate-limit: ritmo deste host passa de %.1fs para "
+             "%.1fs até o fim da execução", host, config.THROTTLE_SECONDS, lento)
+
+
 def _throttle(url: str) -> None:
-    host = url.split("/")[2]
+    host = _host(url)
+    minimo = _intervalo_minimo(host)
     elapsed = time.monotonic() - _last_hit.get(host, 0.0)
-    if elapsed < config.THROTTLE_SECONDS:
-        time.sleep(config.THROTTLE_SECONDS - elapsed)
+    if elapsed < minimo:
+        time.sleep(minimo - elapsed)
     _last_hit[host] = time.monotonic()
 
 
@@ -308,6 +343,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
         if r.status_code in config.RATE_LIMIT_STATUS:
             registrar(url, params, resultado=R_BLOQUEIO, status=r.status_code,
                       tentativa=tentativa, duracao=duracao)
+            _reduzir_ritmo(url)
             if limite <= 0:
                 log.info("HTTP %s em %s — sondagem: host/caminho tratado como "
                          "indisponível, sem espera", r.status_code, url)
@@ -326,7 +362,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
                            config.RATE_LIMIT_BACKOFF_MAX)
             wait += random.uniform(0, 3)             # jitter
             log.warning("HTTP %s (rate-limit) em %s — aguardando %.0fs (tentativa %d/%d)",
-                        r.status_code, url, wait, rate_attempt, config.RATE_LIMIT_RETRIES)
+                        r.status_code, url, wait, rate_attempt, limite)
             time.sleep(wait)
             continue                                 # NÃO cacheia bloqueio
         if r.status_code >= 500:
@@ -339,7 +375,7 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
         if r.status_code >= 400:                     # 400/401/... determinístico
             registrar(url, params, resultado=R_RECUSADO, status=r.status_code,
                       tentativa=tentativa, duracao=duracao)
-            log.warning("HTTP %s em %s params=%s", r.status_code, url, params)
+            _guardar_corpo_4xx(url, params, r)       # loga o WARNING com o corpo
             return None                              # não cacheia (permite correção)
         try:
             data = r.json()
@@ -377,6 +413,15 @@ def get_text(url: str, params: dict | None = None):
         return None
     registrar(url, params, resultado=R_OK if r.ok else R_RECUSADO,
               status=r.status_code, tentativa=1, duracao=time.monotonic() - t0)
+    if r.status_code in config.RATE_LIMIT_STATUS:
+        _reduzir_ritmo(url)
+    if r.status_code >= 400:
+        # `medir_prefixos` passa por aqui: é o corpo do 400 que diz se o portal
+        # recusou o PERÍODO ou o FORMATO do parâmetro. Um 404 de sondagem é
+        # esperado (nome candidato que não existe) e vai em INFO para não
+        # afogar o log; os demais 4xx em WARNING, como em `get_json`.
+        _guardar_corpo_4xx(url, params, r,
+                           nivel=logging.INFO if r.status_code == 404 else logging.WARNING)
     return r.status_code, r.text or ""
 
 
@@ -414,11 +459,97 @@ def get_bytes(url: str, params: dict | None = None, *,
             registrar(url, params, resultado=R_RECUSADO if r.status_code != 404
                       else R_INEXISTENTE, status=r.status_code, tentativa=tentativa,
                       duracao=dur)
+            if r.status_code in config.RATE_LIMIT_STATUS:
+                _reduzir_ritmo(url)
             return None
         registrar(url, params, resultado=R_OK, status=r.status_code,
                   tentativa=tentativa, itens=len(r.content), duracao=dur)
         return r.content
     return None
+
+
+# Campos em que as APIs ASP.NET/Web API costumam pôr a mensagem de validação
+# de um 400. A ordem é a de preferência: `Message` (Web API 2) e `ModelState`
+# (erros por parâmetro) são os do Implanta; `title`/`detail`/`errors` são o
+# ProblemDetails do ASP.NET Core e do PNCP.
+_CAMPOS_MENSAGEM_4XX = ("Message", "message", "errors", "ModelState", "title", "detail")
+
+
+def _mensagem_json(payload) -> str:
+    """Extrai a mensagem humana de um corpo JSON de erro; "" se não achar."""
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, list):
+        return "; ".join(m for m in (_mensagem_json(x) for x in payload) if m)
+    if not isinstance(payload, dict):
+        return ""
+    partes = []
+    for campo in _CAMPOS_MENSAGEM_4XX:
+        if campo in payload and payload[campo] not in (None, "", [], {}):
+            valor = payload[campo]
+            texto = valor if isinstance(valor, str) else json.dumps(valor, ensure_ascii=False)
+            partes.append(f"{campo}: {texto}")
+    return "; ".join(partes)
+
+
+def _trecho_legivel(r, limite: int = 300) -> str:
+    """Os primeiros `limite` caracteres do corpo, legíveis num log de uma linha.
+
+    Se o servidor disse que é JSON, a mensagem estruturada vale mais que o
+    texto cru (`{"Message":"..."}` vira só o texto). Senão — página de erro do
+    IIS, desafio do WAF — tira as tags HTML e colapsa espaços: 300 caracteres
+    de `<div class=...>` não dizem nada; 300 de texto dizem qual foi o erro.
+    """
+    corpo = r.text or ""
+    ctype = str(r.headers.get("Content-Type") or "").lower()
+    if "json" in ctype:
+        try:
+            texto = _mensagem_json(r.json())
+            if texto:
+                return re.sub(r"\s+", " ", texto).strip()[:limite]
+        except ValueError:
+            pass
+    trecho = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", corpo[:8000],
+                    flags=re.S | re.I)
+    trecho = re.sub(r"<[^>]+>", " ", trecho)
+    return re.sub(r"\s+", " ", trecho).strip()[:limite]
+
+
+def _guardar_corpo_4xx(url: str, params: dict | None, r,
+                       nivel: int = logging.WARNING) -> str:
+    """Guarda o corpo de um 4xx e loga UMA linha com URL, params e o trecho.
+
+    Em dez rodadas o portal respondeu 400 a todo exercício de 2026 e a
+    exercícios anteriores ao início de cada série, e o código descartava o
+    corpo: nunca deu para saber se a recusa era do PERÍODO (mês final não
+    fechado), do FORMATO do parâmetro ou de outra coisa. O corpo do 400 é a
+    única evidência que separa essas hipóteses — e ele é barato: um arquivo
+    de até 4 KB em `data/raw/http-4xx/` por par (url, params).
+
+    Devolve o trecho legível (útil para quem chamar querer repassar). Nunca
+    levanta: diagnóstico não pode derrubar a coleta. Se algo falhar aqui, o
+    aviso antigo (só URL e params) ainda sai, para o 4xx não sumir do log.
+    """
+    try:
+        trecho = _trecho_legivel(r)
+        pasta = config.RAW_DIR / "http-4xx"
+        pasta.mkdir(parents=True, exist_ok=True)
+        chave = url + ("?" + urlencode(sorted(params.items())) if params else "")
+        nome = hashlib.sha1(chave.encode()).hexdigest()[:16]
+        destino = pasta / f"{nome}.txt"
+        destino.write_text(
+            f"url: {url}\nparams: {json.dumps(params, ensure_ascii=False, default=str)}\n"
+            f"status: {r.status_code}\n"
+            f"content-type: {r.headers.get('Content-Type')}\n"
+            f"data: {datetime.now().isoformat(timespec='seconds')}\n---\n"
+            f"{(r.text or '')[:4000]}", encoding="utf-8")
+        log.log(nivel, "HTTP %s em %s params=%s — corpo: \"%s\" (guardado em %s)",
+                r.status_code, url, params, trecho, destino)
+        return trecho
+    except Exception as e:                     # diagnóstico nunca derruba coleta
+        log.log(nivel, "HTTP %s em %s params=%s", r.status_code, url, params)
+        log.debug("não foi possível guardar corpo 4xx de %s (%s)", url, e)
+        return ""
 
 
 def _guardar_corpo_nao_json(url: str, r) -> None:

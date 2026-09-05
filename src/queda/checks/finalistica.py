@@ -141,7 +141,7 @@ def run(staged) -> list[Finding]:
                 gravidade=("info" if frágil else
                            "media" if float(razao.mean()) > 4 else "info"),
                 titulo=(f"Para cada R$ 1 na atividade-fim, o conselho gasta "
-                        f"R$ {razao.iloc[-1]:.1f} com a máquina "
+                        f"R$ {razao.iloc[-1]:.1f} nas demais funções "
                         f"({int(razao.index[-1])}) — atividade-fim identificada: "
                         f"{pct_fim:.1f}% da despesa"),
                 cobertura={"base": fim_ult, "universo": tot_ult,
@@ -196,29 +196,52 @@ def run(staged) -> list[Finding]:
     # ------------------------------------------------ 4. verbas pessoais x fim
     if {"VERBAS_PESSOAIS"} <= set(serie_cat.columns):
         verbas = serie_cat["VERBAS_PESSOAIS"]
-        fiscal = serie_cat.get("FISCALIZACAO", pd.Series(0, index=serie_cat.index))
+        fiscal_cat = serie_cat.get("FISCALIZACAO", pd.Series(0, index=serie_cat.index))
+        # A MESMA medida de fiscalização dos demais achados (função do centro
+        # de custo) quando ela existe: pela conta contábil, "fiscalização"
+        # dava R$ 0 em três exercícios (rodada 10) enquanto o centro de custo
+        # media R$ 43 mi no mesmo período — 163× de diferença dentro do mesmo
+        # relatório, e "R$ 0" induz a leitura vetada de que não se fiscaliza.
+        fiscal_func = (base[base["funcao"] == "FISCALIZACAO"].groupby("_ano")["valor"].sum()
+                       if "funcao" in base.columns else pd.Series(dtype=float))
+        usa_funcao = not fiscal_func.empty and float(fiscal_func.sum()) > float(fiscal_cat.sum())
+        fiscal = fiscal_func.reindex(verbas.index).fillna(0) if usa_funcao else fiscal_cat
+        medida = ("despesa alocada a centros de custo de fiscalização" if usa_funcao
+                  else "contas contábeis rotuladas como fiscalização")
         comp = pd.DataFrame({"Verbas pessoais (diárias, km, jetons)": verbas,
                              "Fiscalização": fiscal})
+        if usa_funcao:
+            comp = comp[comp["Fiscalização"] > 0]      # só exercícios com centro de custo
         maior = comp[comp["Verbas pessoais (diárias, km, jetons)"] >
                      comp["Fiscalização"]]
+        anos_c = [int(a) for a in comp.index]
+        periodo = (f"{min(anos_c)}–{max(anos_c)}" if len(anos_c) > 1
+                   else (str(anos_c[0]) if anos_c else "—"))
+        zerados = [int(a) for a, v in comp["Fiscalização"].items() if v <= 0]
         achados.append(Finding(
             id="finalistica-verbas-vs-fiscalizacao", frente=FRENTE,
-            gravidade="alta" if len(maior) >= max(len(comp) // 2, 1) else "media",
-            titulo=(f"Em {len(maior)} de {len(comp)} exercícios, o gasto com "
-                    "diárias/km/jetons superou o gasto com fiscalização"),
+            gravidade="alta" if len(maior) >= max(len(comp) // 2, 1) and not zerados else "media",
+            titulo=(f"Em {len(maior)} de {len(comp)} exercícios ({periodo}), o gasto com "
+                    f"diárias/km/jetons superou o gasto com fiscalização — medido por {medida}"),
             descricao=(
                 "Comparação direta entre a verba paga a pessoas para se deslocar e "
                 "o custo da atividade que justifica a existência do conselho. "
                 "Fiscalizar o exercício profissional é a competência legal "
                 "primária (Lei 5.194/1966, art. 34); verba indenizatória é meio, "
-                "não fim."),
+                f"não fim. Medida de fiscalização: {medida}."
+                + (f" Nos exercícios {zerados} a medida devolveu zero — isso é "
+                   "limite de classificação da ferramenta (nenhuma conta ou centro "
+                   "de custo reconhecido como fiscalização naquele ano), não gasto "
+                   "zero do órgão." if zerados else "")),
             evidencia=comp.reset_index(),
             serie=comp, grafico="bar",
             base_legal="Lei 5.194/1966, arts. 24 e 34 (finalidade dos Creas); "
                        "Lei 4.320/1964, art. 63 (liquidação da despesa).",
             metricas={"anos_verba_supera_fiscalizacao": int(len(maior)),
-                      "total_verbas": round(float(verbas.sum()), 2),
-                      "total_fiscalizacao": round(float(fiscal.sum()), 2)},
+                      "total_verbas": round(float(comp["Verbas pessoais (diárias, km, jetons)"].sum()), 2),
+                      "total_fiscalizacao": round(float(comp["Fiscalização"].sum()), 2),
+                      "medida": medida, "periodo": periodo,
+                      "exercicios_sem_medida": zerados},
         ))
 
     # ------------------------------------------------ 4b. matriz natureza × função
@@ -273,9 +296,9 @@ def run(staged) -> list[Finding]:
                 descricao=(
                     "Verba indenizatória paga dentro das unidades de decisão — "
                     "plenário, câmaras, inspetorias, presidência e diretoria. É a "
-                    "interseção mais sensível dos dois eixos: quem autoriza a "
-                    "despesa é do mesmo colegiado que a recebe, e a verba não "
-                    "aparece no contracheque publicado."),
+                    "interseção mais sensível dos dois eixos: os valores são "
+                    "fixados por resolução do Confea, pagos pelo próprio conselho "
+                    "e não aparecem no contracheque publicado."),
                 evidencia=(verbas_pol.groupby(["_ano", "unidade"])["valor"]
                            .sum().reset_index()
                            .sort_values("valor", ascending=False).head(100)),

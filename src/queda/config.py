@@ -97,9 +97,44 @@ DADOS_ABERTOS_CANDIDATES = [
     "https://www.creasp.org.br/service-api",
     "https://creasp.org.br/service-api",
 ]
+# Em dez rodadas (até 05/09/2026) nenhum dos seis candidatos devolveu JSON:
+# 403, timeout de 60 s x4 ou o shell HTML da "Plataforma de Serviços" — ~297 s
+# por rodada sem dado. A sondagem só roda quando o operador fixar o host por
+# esta variável de ambiente (base do serviço, ex.
+# `https://transparencia.creasp.org.br/service-api`); sem ela, a fonte é
+# declarada "endpoint não identificado" sem gastar rede.
+DADOS_ABERTOS_HOST_ENV = "QUEDA_DADOS_ABERTOS_HOST"
+
+
+def dados_abertos_host() -> str | None:
+    """Base do serviço de Dados Abertos fixada pelo operador, ou None."""
+    valor = (os.environ.get(DADOS_ABERTOS_HOST_ENV) or "").strip().rstrip("/")
+    return valor or None
+
+
+# Diárias/indenizações no Implanta: os 7 nomes de endpoint tentados até a
+# rodada 10 (DiariasDeslocamentos etc.) responderam 404 no prefixo documentado
+# e 403 no antigo — os nomes não existem. Sem nome confirmado pela documentação
+# do portal, nenhum é tentado; quem souber o nome real informa aqui, separado
+# por vírgula (ex. `QUEDA_DIARIAS_ENDPOINTS=Diarias,Deslocamentos`).
+DIARIAS_ENDPOINTS_ENV = "QUEDA_DIARIAS_ENDPOINTS"
+
+
+def diarias_endpoints() -> list[str]:
+    """Nomes de endpoint de diárias informados pelo operador (padrão: nenhum)."""
+    bruto = os.environ.get(DIARIAS_ENDPOINTS_ENV) or ""
+    return [n.strip().strip("/") for n in bruto.split(",") if n.strip()]
+
 
 PNCP_CONSULTA = "https://pncp.gov.br/api/consulta"
 PNCP_API = "https://pncp.gov.br/api/pncp"
+# Atas de registro de preços (consulta pública por vigência). NÃO verificado
+# contra a rede: o parâmetro do órgão provavelmente é `cnpj` (nos contratos é
+# `cnpjOrgao`) — o cliente tenta os dois e, se nada responder, declara o
+# dataset indisponível sem derrubar a coleta. Importa porque 6 dos 11
+# "contratos ausentes do PNCP" da rodada 10 eram ATAs, que `/v1/contratos`
+# não devolve.
+PNCP_ATAS_PATH = "/v1/atas"
 
 # ---------------------------------------------------------------- fontes novas
 # Nada abaixo pôde ser testado contra a rede na sessão em que foi escrito (o
@@ -121,9 +156,16 @@ LICITACOES_PNCP_DESDE = 2023
 # publicação em dia não útil: o cliente recua dia a dia até achar. CEIS =
 # inidôneas e suspensas (8.666 art. 87 e 14.133 art. 156); CNEP = punidas pela
 # Lei Anticorrupção (12.846).
+# CEPIM = entidades privadas sem fins lucrativos impedidas de receber
+# transferências (convênios), o cadastro que fala diretamente aos repasses a
+# entidades de classe. Diferente de CEIS/CNEP, NÃO tem data de início/fim de
+# sanção: colunas típicas CNPJ ENTIDADE; NOME ENTIDADE; NÚMERO CONVÊNIO; ÓRGÃO
+# CONCEDENTE; MOTIVO DO IMPEDIMENTO — quem lê o arquivo trata inicio/fim como
+# ausentes e usa o motivo como categoria.
 SANCOES_CADASTROS = {
     "ceis": "https://portaldatransparencia.gov.br/download-de-dados/ceis/{data}",
     "cnep": "https://portaldatransparencia.gov.br/download-de-dados/cnep/{data}",
+    "cepim": "https://portaldatransparencia.gov.br/download-de-dados/cepim/{data}",
 }
 SANCOES_RECUO_DIAS = 10
 
@@ -211,15 +253,31 @@ ORGAOS_RELACIONADOS_RAZAO = [o["razao"] for o in ORGAOS_RELACIONADOS]
 # 04/09/2026, QuadrosPessoas e Conselheiros aceitaram os cinco formatos de
 # parâmetro que conhecemos e devolveram lista vazia para todos — o que sugere
 # um parâmetro que não estamos mandando, e só o contrato diz qual.
+# Na rodada de 05/09/2026 o host confea-br respondeu 404 a openapi.json e aos
+# dois swagger/v1.0 — e a página de documentação (Stoplight Elements) carrega
+# um `config.json` ao abrir (visto no DevTools pelo operador): é ali que a URL
+# real do contrato deve estar. Daí os candidatos `config.json`,
+# `assets/config.json` e as variantes v1/api-docs/openapi.yaml nos dois hosts.
+_SWAGGER_SUFIXOS_NOVOS = [
+    "/transparencia/config.json",
+    "/transparencia/assets/config.json",
+    "/transparencia/swagger.json",
+    "/transparencia/swagger/v1/swagger.json",
+    "/transparencia/api/v1.0/swagger/v1/swagger.json",
+    "/transparencia/api-docs.json",
+    "/transparencia/openapi.yaml",
+]
 SWAGGER_CANDIDATOS_IMPLANTA = [
     # prefixo documentado primeiro — é onde a doc Stoplight vive
     "https://crea-sp.implanta.net.br/transparencia/swagger/v1.0/swagger.json",
     "https://crea-sp.implanta.net.br/transparencia/api/swagger/v1.0/swagger.json",
     "https://crea-sp.implanta.net.br/transparencia/api/v1.0/swagger.json",
     "https://crea-sp.implanta.net.br/transparencia/openapi.json",
+    *[IMPLANTA_HOST + s for s in _SWAGGER_SUFIXOS_NOVOS],
     "https://confea-br.implanta.net.br/transparencia/swagger/v1.0/swagger.json",
     "https://confea-br.implanta.net.br/transparencia/api/swagger/v1.0/swagger.json",
     "https://confea-br.implanta.net.br/transparencia/openapi.json",
+    *["https://confea-br.implanta.net.br" + s for s in _SWAGGER_SUFIXOS_NOVOS],
     "https://crea-sp.implanta.net.br/portalTransparencia/swagger/v1.0/swagger.json",
     "https://crea-sp.implanta.net.br/portalTransparencia/swagger/v1/swagger.json",
     "https://crea-sp.implanta.net.br/portalTransparencia/api/swagger/v1.0/swagger.json",
@@ -245,13 +303,22 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 THROTTLE_SECONDS = 2.5   # intervalo mínimo entre requisições por host (evita WAF)
+# Ritmo depois do PRIMEIRO 403/429 de um host na execução (http._throttle).
+# Medido em 05/09/2026: a 2,5 s o portal bloqueou 6 vezes na rodada, sempre
+# após ~10-14 requisições seguidas, e cada bloqueio custou ~61 s de espera
+# (374 s no total). A 6 s (10 req/min) o padrão não se repete; o custo por
+# requisição sobe só para o host que já provou bloquear.
+THROTTLE_APOS_403 = 6.0
 TIMEOUT = 60
 RETRIES = 3              # tentativas para erro de rede / 5xx
 # 403/429 = rate-limit por rajada (o servidor serve, mas bloqueia após muitas
 # chamadas seguidas). Espera crescente, respeitando Retry-After; nunca cacheado.
 RATE_LIMIT_STATUS = (403, 429)
 RATE_LIMIT_RETRIES = 5
-RATE_LIMIT_BACKOFF_BASE = 20   # segundos: 20, 40, 80, 160, 180 (teto abaixo)
+# Nas 6 ocorrências da rodada de 05/09/2026 a 1ª espera de 20 s NUNCA bastou
+# e a 2ª (40 s, total ~61 s) sempre bastou: o bloqueio abre em ~1 min. Começar
+# em 45 s poupa uma requisição bloqueada por ocorrência.
+RATE_LIMIT_BACKOFF_BASE = 45.0   # segundos: 45, 90, 180, 180, 180 (teto abaixo)
 RATE_LIMIT_BACKOFF_MAX = 180
 
 # ---------------------------------------------------------------- thresholds

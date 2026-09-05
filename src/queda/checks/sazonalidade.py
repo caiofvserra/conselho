@@ -64,6 +64,8 @@ SHARE_UNIFORME = 1 / 12
 # Deveriam migrar para config.py junto com os demais thresholds do projeto;
 # ficam aqui porque config.py é editado por outra frente em paralelo.
 PISO_UNIDADE = 100_000.0        # abaixo disso o % mensal é ruído de arredondamento
+# Piso para entrar no TÍTULO de dezembro-concentrada (ver lá): R$ 1 mi no período.
+PISO_MATERIALIDADE_DEZEMBRO = 1_000_000.0
 PISO_CONTA = 100_000.0
 TOL_FECHAMENTO_PCT = 0.5        # divergência meses × VALOR_TOTAL tolerada, em %
 SHARE_DEZEMBRO_ALTO = 0.25      # 3x o mês uniforme
@@ -502,8 +504,15 @@ def run(staged) -> list[Finding]:
         ))
 
         # ---- quem puxa dezembro: unidades E contas, na mesma tabela
+        # 13º salário concentra em dezembro por natureza — não é achado. E só
+        # unidade/conta com pelo menos R$ 1 mi no período entra no título:
+        # R$ 190 mil em cinco exercícios (rodada 10) é ruído de calendário.
+        _rx_13 = r"13|DECIMO TERCEIRO|D[ÉE]CIMO|GRATIFICA[ÇC][ÃA]O (?:DE )?NATAL|NATALINA"
         conta_altas = perfil_conta[
-            perfil_conta["share_dezembro_pct"] > 100 * SHARE_DEZEMBRO_ALTO]
+            (perfil_conta["share_dezembro_pct"] > 100 * SHARE_DEZEMBRO_ALTO)
+            & ~perfil_conta["conta"].astype(str).str.upper().str.contains(_rx_13, regex=True, na=False)
+            & (perfil_conta["total"] >= PISO_MATERIALIDADE_DEZEMBRO)]
+        unid_altas = unid_altas[unid_altas["total"] >= PISO_MATERIALIDADE_DEZEMBRO]
         if not unid_altas.empty or not conta_altas.empty:
             def _rotular(base, eixo, chave):
                 out = base.rename(columns={chave: "nome"}).copy()
@@ -524,16 +533,19 @@ def run(staged) -> list[Finding]:
                             if not unid_altas.empty else "",
                             f"{len(conta_altas)} conta(s) contábil(eis)"
                             if not conta_altas.empty else "") if t)
+            maior_total = float(concentrados["total"].max()) if "total" in concentrados else 0.0
             achados.append(Finding(
                 id="sazonalidade-dezembro-concentrada", frente=FRENTE,
-                gravidade="alta" if pior > 40 else "media",
+                gravidade=("alta" if pior > 40 and maior_total >= 10 * PISO_MATERIALIDADE_DEZEMBRO
+                           else "media" if pior > 40 else "baixa"),
                 # O limiar vem da constante, não escrito à mão: com "25%" fixo
                 # no texto, recalibrar SHARE_DEZEMBRO_ALTO (o parâmetro mais
                 # provável de mudar depois da primeira rodada real) deixaria o
                 # título afirmando um corte diferente do que o código aplicou.
-                titulo=(f"{quantos} lançam mais de "
+                titulo=(f"{quantos} (acima de {fmt_brl(PISO_MATERIALIDADE_DEZEMBRO)} no "
+                        f"período, {min(completos)}–{max(completos)}) lançam mais de "
                         f"{100 * SHARE_DEZEMBRO_ALTO:.0f}% do ano em dezembro — "
-                        f"o pico chega a {pior:.0f}%"),
+                        f"o pico chega a {pior:.0f}%; 13º salário excluído"),
                 descricao=(
                     "A média do órgão dilui: o interesse está em quem a puxa. "
                     "A tabela junta os dois eixos que a fonte oferece — a "
@@ -654,8 +666,8 @@ def run(staged) -> list[Finding]:
                     "de **lote** — acerto retroativo, pagamento em bloco, "
                     "regularização de exercício — e não de viagem. Isso não prova "
                     "irregularidade: pode ser calendário real de campanha ou de "
-                    "plenárias. Prova que a verba não foi paga quando a atividade "
-                    "aconteceu, e essa é a pergunta a fazer.\n\n"
+                    "plenárias. Indica descasamento entre a data da atividade e a "
+                    "do pagamento, e essa é a pergunta a fazer.\n\n"
                     "A tabela abre por conta: mostra qual rubrica de verba é a "
                     "concentrada e em que mês ela pica." + nota_incompletos),
                 evidencia=perfil_verba_conta.head(60),

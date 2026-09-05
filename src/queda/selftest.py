@@ -6,6 +6,7 @@ cada check os detecta e que o report é gerado.
 """
 from __future__ import annotations
 
+import os
 import random
 
 import pandas as pd
@@ -800,6 +801,28 @@ def _staged() -> dict[str, pd.DataFrame]:
             ]
     benchmark_creas = pd.DataFrame(_bench)
 
+    # atas de registro de preços do PNCP (`/v1/atas`), projeção de
+    # pipeline._pncp_ata_linha. Duas atas do exercício 2024, nenhuma
+    # correspondente às atas do portal — o cruzamento tem de apontá-las.
+    pncp_atas = pd.DataFrame([
+        {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
+         "numeroControlePNCPAta": "00000000000191-1-000001/2024-000001",
+         "numeroAtaRegistroPreco": "001", "anoAta": 2024,
+         "numeroControlePNCPCompra": "00000000000191-1-000001/2024",
+         "dataAssinatura": "2024-02-01", "vigenciaInicio": "2024-02-01",
+         "vigenciaFim": "2025-01-31", "dataPublicacaoPncp": "2024-02-02",
+         "objetoContratacao": "registro de preços de material de expediente",
+         "cancelado": False, "_ano": 2024},
+        {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
+         "numeroControlePNCPAta": "00000000000191-1-000002/2024-000001",
+         "numeroAtaRegistroPreco": "002", "anoAta": 2024,
+         "numeroControlePNCPCompra": "00000000000191-1-000002/2024",
+         "dataAssinatura": "2024-05-10", "vigenciaInicio": "2024-05-10",
+         "vigenciaFim": "2025-05-09", "dataPublicacaoPncp": "2024-05-11",
+         "objetoContratacao": "registro de preços de passagens aéreas",
+         "cancelado": False, "_ano": 2024},
+    ])
+
     return {
         "pagamentos": _pagamentos(), "empenhos": empenhos, "contratos": contratos,
         "aditivos": aditivos, "licitacoes": pd.DataFrame(), "convenios": convenios,
@@ -810,6 +833,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
         "licitacoes_pncp": licitacoes_pncp, "sancoes": sancoes,
+        "pncp_atas": pncp_atas,
         "benchmark_creas": benchmark_creas,
         "plano_contas": _plano_contas(), "_coleta_http": _coleta_http(),
     }
@@ -1085,7 +1109,7 @@ def _confere_metricas(achados) -> list[str]:
     # R$ 70,8 mi de uma ATA de 2022 encabeçavam a lista de acusações.
     f = por_id.get("contratos-ausentes-pncp")
     if f is not None:
-        if f.metricas.get("criterio_de_casamento") != "CNPJ do fornecedor":
+        if not str(f.metricas.get("criterio_de_casamento", "")).startswith("CNPJ do fornecedor"):
             erros.append("contratos-ausentes-pncp: casou por "
                          f"{f.metricas.get('criterio_de_casamento')!r} — com CNPJ "
                          "nos dois lados, casar por nome cria ausência falsa")
@@ -1126,7 +1150,7 @@ def _confere_metricas(achados) -> list[str]:
                      f"na fixture, saiu {f.metricas.get('posicao')}º")
     exige("benchmark-despesa-por-profissional", "conselhos", 6)
 
-    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 20)
+    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 21)
     exige("diagnostico-etapas-nao-alcancadas", "etapas_nao_alcancadas", 1)
     f = por_id.get("diagnostico-etapas-nao-alcancadas")
     if f is not None and f.metricas.get("quais") != "processos_itens":
@@ -1139,6 +1163,9 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_sondagem_e_orgaos())
     erros.extend(_regressao_prefixo_e_nome())
     erros.extend(_regressao_novas_fontes())
+    from .regressoes import http_config as _reg_http, rodada11 as _reg_r11
+    erros.extend(_reg_http.run())
+    erros.extend(_reg_r11.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1560,10 +1587,15 @@ def _regressao_novas_fontes() -> list[str]:
              ("Impedimento de licitar e contratar", None, False),
              ("Suspensão temporária", "Lei 8.666 art. 87 III", False),
              ("Proibição de contratar com o Poder Público", None, True),
-             ("Multa", "Lei 12.846", False)]
+             ("Multa", "Lei 12.846", False),
+             ("Publicação Extraordinária", "Lei 12.846 art. 6º II", False)]
     for cat, fund, esperado_ in casos:
         if clients.efeito_nacional(cat, fund) != esperado_:
             erros.append(f"sanções: efeito_nacional({cat!r}) deveria ser {esperado_}")
+    if clients.alcance_sancao("Multa", "Lei 12.846", "FEDERAL") != "nao_impede":
+        erros.append("sanções: multa do CNEP (Lei 12.846) saiu como "
+                     f"{clients.alcance_sancao('Multa', 'Lei 12.846', 'FEDERAL')!r} — "
+                     "multa não restringe contratar, o alcance é 'nao_impede'")
     return erros
 
 
@@ -1647,8 +1679,10 @@ def _regressao_prefixo_e_nome() -> list[str]:
         if clients._PREFIXO_APRENDIDO.get("Conselheiros") != "/transparencia/api/v1.0":
             erros.append("nome: o prefixo documentado não ficou aprendido para "
                          "Conselheiros")
-        # Nome que responde vazio em todo prefixo: só ele ganha a segunda
-        # passada com variantes, e o resultado é [] (respondeu), não None.
+        # Nome que responde 200 [] : o resultado é [] (respondeu), não None, e
+        # NENHUMA variante roda — o ledger da rodada 10 mostrou que Conselheiros
+        # e QuadrosPessoas ignoram parâmetro (10 requisições e 110 s por nada).
+        # As variantes só rodam sob QUEDA_VARIANTES=1, e aí só no que respondeu.
         clients.get_json = lambda url, params=None, **kw: (
             [] if url.endswith("/Conselheiros") else None)
         clients._NOME_APRENDIDO.clear()
@@ -1661,8 +1695,26 @@ def _regressao_prefixo_e_nome() -> list[str]:
                 config.ENDPOINT_CANDIDATOS["mandatarios"], 2025)
         finally:
             clients.implanta_variantes = orig_var
+        if (linhas, nome) != ([], None) or tentados:
+            erros.append(f"nome: com 200 [] saiu {(linhas, nome)} e as variantes "
+                         f"rodaram em {tentados} — 200 vazio é resposta, não pede variante")
+        variantes_antes = os.environ.get("QUEDA_VARIANTES")
+        os.environ["QUEDA_VARIANTES"] = "1"
+        clients._NOME_APRENDIDO.clear()
+        clients._PREFIXO_APRENDIDO.clear()
+        tentados.clear()
+        clients.implanta_variantes = lambda ep, ano=None, **kw: (tentados.append(ep) or ([], {}))
+        try:
+            linhas, nome = clients.implanta_primeiro_nome(
+                config.ENDPOINT_CANDIDATOS["mandatarios"], 2025)
+        finally:
+            clients.implanta_variantes = orig_var
+            if variantes_antes is None:
+                os.environ.pop("QUEDA_VARIANTES", None)
+            else:
+                os.environ["QUEDA_VARIANTES"] = variantes_antes
         if (linhas, nome) != ([], None) or tentados != ["Conselheiros"]:
-            erros.append(f"nome: com todos vazios saiu {(linhas, nome)} e as variantes "
+            erros.append(f"nome: sob QUEDA_VARIANTES=1 saiu {(linhas, nome)} e as variantes "
                          f"rodaram em {tentados} — deviam rodar só no que respondeu")
 
         # 3. A URL do contrato sai do HTML da documentação, relativa ou absoluta.
@@ -2074,15 +2126,17 @@ def _regressao_dado_nao_some() -> list[str]:
             try:
                 pipeline.stage_empenhos = lambda d, a: (_ for _ in ()).throw(
                     KeyError("coluna sumiu"))
-                for etapa in ("pagamentos", "contratos", "aditivos",
-                              "licitacoes", "convenios", "comparativo_despesa",
-                              "despesas_centro_custo", "demonstrativo",
-                              "plano_contas", "processos_compras", "atas",
-                              "orcamento", "quadro_pessoal", "mandatarios",
-                              "indenizacoes", "pncp"):
-                    outras[etapa] = getattr(pipeline, f"stage_{etapa}")
-                    setattr(pipeline, f"stage_{etapa}",
-                            lambda *a, **k: pd.DataFrame())
+                # TODO stage_* menos o quebrado. A lista era fixa, e cada etapa
+                # criada depois dela (licitacoes_pncp, pncp_atas, sancoes,
+                # benchmark_creas) saía pela internet de verdade a cada
+                # selftest — minutos de espera e requisições ao PNCP e à CGU
+                # num teste que se diz offline.
+                for nome in [n for n in dir(pipeline)
+                             if n.startswith("stage_") and n != "stage_empenhos"
+                             and callable(getattr(pipeline, n))]:
+                    etapa = nome[len("stage_"):]
+                    outras[etapa] = getattr(pipeline, nome)
+                    setattr(pipeline, nome, lambda *a, **k: pd.DataFrame())
                 staged = pipeline.build_staged(2020, 2021, retomar=False)
                 empenhos_preservados = len(staged.get("empenhos", []))
 
@@ -2206,7 +2260,21 @@ def run() -> int:
     config.OUTPUT_DIR = saida_real / "_selftest"
     try:
         staged = _staged()
-        achados = run_all(staged)
+        # O ledger da fixture tem 403 nos endpoints Implanta de diárias. Para
+        # o diagnóstico atribuí-los a `indenizacoes_endpoint` (veredito "não
+        # conseguimos coletar"), os nomes têm de estar no ambiente — como numa
+        # rodada real que os definiu. Sem eles a fonte sai como "endpoint não
+        # identificado", que é outro veredito.
+        env_diarias = config.DIARIAS_ENDPOINTS_ENV
+        diarias_antes = os.environ.get(env_diarias)
+        os.environ[env_diarias] = "Diarias,DiariasDeslocamentos,Indenizacoes"
+        try:
+            achados = run_all(staged)
+        finally:
+            if diarias_antes is None:
+                os.environ.pop(env_diarias, None)
+            else:
+                os.environ[env_diarias] = diarias_antes
         ids = {f.id for f in achados}
         faltando = [e for e in ESPERADOS if e not in ids]
         metricas_erradas = _confere_metricas(achados)

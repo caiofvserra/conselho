@@ -364,12 +364,32 @@ def run(staged) -> list[Finding]:
                                      comp["anuidade"]).round(2)
             cagr_m = A.cagr(comp["multa de fiscalização"])
             cagr_a = A.cagr(comp["anuidade"])
+            # Um salto de mais de 5× entre dois anos consecutivos (R$ 3,8 mi em
+            # 2024 → R$ 53,4 mi em 2025, rodada 10) é mais provavelmente
+            # reclassificação de conta do que crescimento — e um CAGR sobre
+            # ele ("65% ao ano") descreve o salto como tendência. O título
+            # passa a nomear o salto e pedir a conferência.
+            m_serie = comp["multa de fiscalização"]
+            razoes = (m_serie / m_serie.shift(1).replace(0, pd.NA)).dropna()
+            saltos = razoes[razoes > 5]
+            anos_c = [int(a) for a in comp.index]
+            periodo = f"{min(anos_c)}–{max(anos_c)}" if len(anos_c) > 1 else str(anos_c[0])
+            if not saltos.empty:
+                ano_s = int(saltos.index[-1])
+                titulo_m = (f"Multa de fiscalização saltou de {fmt_brl(float(m_serie.get(ano_s - 1, 0)))} "
+                            f"({ano_s - 1}) para {fmt_brl(float(m_serie[ano_s]))} ({ano_s}) — "
+                            f"{float(saltos.iloc[-1]):.0f}× em um ano; conferir reclassificação "
+                            f"de conta antes de ler como tendência ({periodo})")
+                grav_m = "info"
+            else:
+                titulo_m = (f"Multa de fiscalização cresce {cagr_m:.1%} ao ano; "
+                            f"anuidade, {cagr_a:.1%} ({periodo})")
+                grav_m = "media" if (cagr_m == cagr_m and cagr_a == cagr_a
+                                     and cagr_m > cagr_a) else "info"
             achados.append(Finding(
                 id="receita-multa-vs-anuidade", frente=FRENTE,
-                gravidade="media" if (cagr_m == cagr_m and cagr_a == cagr_a
-                                      and cagr_m > cagr_a) else "info",
-                titulo=(f"Multa de fiscalização cresce {cagr_m:.1%} ao ano; "
-                        f"anuidade, {cagr_a:.1%}"),
+                gravidade=grav_m,
+                titulo=titulo_m,
                 descricao=(
                     "A multa tem natureza dupla e por isso precisa de leitura "
                     "cuidadosa: é **produto** da fiscalização (autuar gera "

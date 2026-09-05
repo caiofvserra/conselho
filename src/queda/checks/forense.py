@@ -244,11 +244,12 @@ def run(staged) -> list[Finding]:
             titulo=(f"Dezembro concentra {media:.0%} do pagamento anual em média"
                     + (f" — acima de 20% em {len(altos)} exercício(s)"
                        if not altos.empty else "")),
-            descricao=("Um mês vale 8,3% do ano. Concentração muito acima disso em "
-                       "dezembro é o padrão clássico de corrida orçamentária: "
-                       "empenhar e pagar às pressas para não devolver dotação, com "
-                       "menos tempo de análise e mais risco de contratação "
-                       "apressada."),
+            descricao=("Um mês vale 8,3% do ano. Concentração em dezembro é "
+                       "compatível com o fechamento do exercício (restos a pagar, "
+                       "13º, encerramento de contratos); o que se mede aqui é a "
+                       "distância em relação ao perfil do próprio órgão nos demais "
+                       "meses e anos, e onde ela é grande a conferência é da "
+                       "natureza do que foi pago no mês."),
             evidencia=dez,
             serie=dez.set_index("_ano")[["share_dezembro"]].mul(100).round(1)
                   .rename(columns={"share_dezembro": "% pago em dezembro"}),

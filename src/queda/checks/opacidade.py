@@ -108,12 +108,12 @@ def run(staged) -> list[Finding]:
             serie_conta = serie_conta[principais + ["(demais contas)"]]
         achados.append(Finding(
             id="opacidade-decomposicao-conta", frente=FRENTE, gravidade="alta",
-            titulo="O que está escondido dentro dos rótulos agregados "
+            titulo="O que compõe os rótulos agregados "
                    "(decomposição pela conta contábil)",
             descricao=(
                 "O portal suprime o nome do beneficiário, mas mantém a conta "
                 "contábil do empenho. Agrupando por essa conta é possível revelar "
-                "a NATUREZA do gasto oculto — quanto é folha, quanto é diária, "
+                "a NATUREZA do gasto agregado — quanto é folha, quanto é diária, "
                 "quanto é benefício, quanto é verba indenizatória. Esta é a melhor "
                 "aproximação possível sem o dado individualizado."),
             evidencia=decomp,

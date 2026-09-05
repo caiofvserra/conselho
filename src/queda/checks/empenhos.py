@@ -813,7 +813,10 @@ def run(staged) -> list[Finding]:
                 gravidade="media" if not criticos.empty else "info",
                 titulo="Concentração de pagamentos por fornecedor (HHI e top-10 por ano)",
                 descricao="HHI > 0,15 indica mercado de fornecedores muito concentrado "
-                          "para um órgão dessa dimensão — favorece direcionamento.",
+                          "para um órgão dessa dimensão. Concentração pode vir de "
+                          "poucos fornecedores capazes, de contratos grandes e "
+                          "legítimos ou de pouca competição — a lista diz onde olhar, "
+                          "não qual das três é.",
                 evidencia=conc,
                 metricas={"anos_criticos": criticos["ano"].tolist() if not criticos.empty else []},
             ))
@@ -1004,10 +1007,10 @@ def run(staged) -> list[Finding]:
             titulo=(f"{len(criticos)} exercício(s) com mais de 20% do valor "
                     "empenhado anulado" if not criticos.empty else
                     "Percentual anual de empenho anulado"),
-            descricao="Anulação em massa sugere planejamento orçamentário ruim ou "
-                      "manobra de reserva/liberação de dotação: empenha-se no "
-                      "início do exercício para travar dotação e anula-se depois, "
-                      "sem que a despesa jamais existisse.",
+            descricao="Anulação em massa pode indicar planejamento orçamentário "
+                      "impreciso ou reserva de dotação (empenho no início do "
+                      "exercício, anulado depois). A nota de anulação de cada "
+                      "empenho diz qual dos dois; o percentual só mostra a escala.",
             evidencia=por_ano,
             serie=serie_anul, grafico="line", unidade="%",
             tabela_anual=por_ano,
@@ -1033,8 +1036,8 @@ def run(staged) -> list[Finding]:
                     "de liberação de saldo para acomodar outra despesa. "
                     "**Reempenho**: o mesmo credor volta a ser empenhado na mesma "
                     "conta no exercício seguinte — indica que a despesa era real e "
-                    "a anulação apenas empurrou o compromisso para o ano seguinte, "
-                    "fugindo do controle do exercício."),
+                    "a anulação deslocou o compromisso para o exercício seguinte "
+                    "(o que a contabilidade chama de reempenho)."),
                 evidencia=resumo.reset_index(),
                 serie=resumo[["fantasma", "anulado_dezembro"]].rename(
                     columns={"fantasma": "anulação integral (fantasma)",

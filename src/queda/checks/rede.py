@@ -177,9 +177,10 @@ def run(staged) -> list[Finding]:
             id="rede-socios-compartilhados", frente=FRENTE, gravidade="media",
             titulo=f"{len(ev)} sócio(s) presentes em grupos econômicos distintos "
                    "que fornecem ao órgão",
-            descricao=("Empresas formalmente 'concorrentes' com sócio em comum minam "
-                       "a competição na licitação (indício de conluio ou de empresa "
-                       "de fachada). Já descontados dois falsos positivos: filiais "
+            descricao=("Empresas formalmente 'concorrentes' com sócio em comum "
+                       "reduzem a competição efetiva quando disputam o mesmo "
+                       "certame — conferir por CPF e por certame antes de qualquer "
+                       "leitura. Já descontados dois falsos positivos: filiais "
                        "do mesmo CNPJ-raiz e quadros societários com mais de "
                        f"{MAX_SOCIOS_QSA} sócios (bancos e S/A de capital aberto)."),
             evidencia=ev,
@@ -195,10 +196,15 @@ def run(staged) -> list[Finding]:
         comp = _componentes(arestas_soc)
         d = pd.DataFrame([{"no": n, "grupo": g} for n, g in comp.items()])
         d["tipo"] = d["no"].str.split(":").str[0]
+        # Matriz e filial (mesma raiz de CNPJ) não são "empresas formalmente
+        # distintas": 2 dos 6 grupos da rodada 10 eram só isso.
+        d["raiz"] = d["no"].str.split(":").str[1].str[:8].where(d["tipo"] == "forn")
         tam = d.groupby("grupo").agg(
             empresas=("tipo", lambda s: int((s == "forn").sum())),
+            raizes=("raiz", lambda s: int(s.dropna().nunique())),
             pessoas=("tipo", lambda s: int((s == "pessoa").sum())))
-        multi = tam[tam["empresas"] > 1].sort_values("empresas", ascending=False)
+        multi = tam[(tam["empresas"] > 1) & (tam["raizes"] > 1)].sort_values(
+            "empresas", ascending=False)
         if not multi.empty:
             membros = (d[d["grupo"].isin(multi.index)]
                        .assign(nome=lambda x: x["no"].str.split(":").str[1])
@@ -206,9 +212,9 @@ def run(staged) -> list[Finding]:
                        .apply(lambda s: ", ".join(sorted(s)[:12])).unstack(fill_value=""))
             ev = multi.join(membros).reset_index()
             achados.append(Finding(
-                id="rede-grupos-economicos", frente=FRENTE, gravidade="alta",
-                titulo=f"{len(multi)} grupo(s) econômico(s) de fato: empresas "
-                       "formalmente distintas ligadas por sócios em comum",
+                id="rede-grupos-economicos", frente=FRENTE, gravidade="media",
+                titulo=(f"{len(multi)} grupo(s) de empresas de CNPJ-raiz distinto "
+                        "ligadas por sócio homônimo (matriz e filial já excluídas)"),
                 descricao=(
                     "Componente conexa da rede fornecedor–sócio. Duas empresas "
                     "ligadas por uma pessoa não são concorrentes: se disputam a "
@@ -240,10 +246,10 @@ def run(staged) -> list[Finding]:
                 titulo="Quem está no meio da rede: nós de maior intermediação",
                 descricao=(
                     "Centralidade de intermediação: mede quantos caminhos entre "
-                    "os demais nós passam por cada um. Um nó de alta "
-                    "intermediação e baixo valor contratado é exatamente o perfil "
-                    "de operador — não é quem mais recebe, é quem conecta quem "
-                    "recebe. Comece a apuração por estes nomes."),
+                    "os demais nós passam por cada um. É uma medida de posição na "
+                    "rede de pagamentos e sócios, não de conduta: um sócio que "
+                    "aparece em duas empresas fornecedoras tem intermediação alta "
+                    "por construção. Serve para ordenar a leitura do grafo."),
                 evidencia=ev[["nome", "tipo", "intermediacao"]].round(4),
             ))
 

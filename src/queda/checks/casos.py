@@ -32,9 +32,14 @@ RX_ASSOCIATIVA = re.compile(
 
 # Quem é da "casa" pela função, mesmo sem o nome do conselho no rótulo: são os
 # cargos que só existem DENTRO do órgão.
+# Grupos não capturantes: `str.contains` com grupo de captura dispara aviso do
+# pandas em toda rodada.
 RX_QUADRO_PROPRIO = re.compile(
-    r"PROCURADOR|ADVOGADO(S)? PUBLICO|CONSELHEIR|INSPETOR|SERVIDOR|"
-    r"EMPREGADO(S)? PUBLICO|FUNCIONARIO", re.IGNORECASE)
+    r"PROCURADOR|ADVOGADO(?:S)? PUBLICO|CONSELHEIR|INSPETOR|SERVIDOR|"
+    r"EMPREGADO(?:S)? PUBLICO|FUNCIONARIO", re.IGNORECASE)
+# Piso de materialidade para uma entidade contar no TÍTULO: R$ 475,24 pagos
+# uma vez em 2019 (rodada 10) não são "entidade da casa", são ruído.
+PISO_ENTIDADE_CASA = 10_000.0
 
 
 def _nomes_resolvidos(pg, staged) -> "pd.Series":
@@ -76,21 +81,32 @@ def run(staged) -> list[Finding]:
                    nomes.str.contains(RX_QUADRO_PROPRIO, regex=True, na=False))
         casa = pg[associativa & da_casa]
         if not casa.empty:
-            total = float(casa["VALOR"].sum())
             por_ent = (casa.groupby("FAVORECIDO_NORM")["VALOR"]
                        .agg(total="sum", pagamentos="size").reset_index()
                        .sort_values("total", ascending=False))
+            relevantes = por_ent[por_ent["total"] >= PISO_ENTIDADE_CASA]
+            total = float(relevantes["total"].sum())
+            anos = pd.to_datetime(coluna(casa, "DATA", None), errors="coerce").dt.year.dropna()
+            periodo = (f"{int(anos.min())}–{int(anos.max())}" if not anos.empty
+                       and anos.min() != anos.max() else
+                       (str(int(anos.min())) if not anos.empty else "período não datado"))
+        if not casa.empty and not relevantes.empty:
             achados.append(Finding(
-                id="casos-entidade-da-casa", frente=FRENTE, gravidade="alta",
-                titulo=f"{fmt_brl(total)} pagos a entidades associativas que levam "
-                       "o nome do próprio conselho",
+                id="casos-entidade-da-casa", frente=FRENTE, gravidade="media",
+                titulo=(f"{fmt_brl(total)} pagos ({periodo}) a {len(relevantes)} "
+                        "entidade(s) associativa(s) formada(s) pelo próprio quadro ou "
+                        "com o nome do conselho"),
                 descricao=(
                     "Associações, institutos e sindicatos cujo nome contém o do "
                     "próprio órgão — tipicamente constituídos por seus servidores, "
                     "procuradores ou conselheiros. Contratar a entidade formada "
-                    "pelo próprio quadro concentra o conflito de interesse: quem "
-                    "contrata e quem recebe pertencem ao mesmo grupo, e a "
-                    "contratação costuma correr por inexigibilidade."),
+                    "pelo próprio quadro é a situação em que a conferência do "
+                    "objeto e da forma de contratação mais importa. Hipótese "
+                    "alternativa a testar antes de qualquer leitura: repasse de "
+                    "honorários de sucumbência à associação de procuradores — a "
+                    "receita 'Honorários da cobrança judicial' do mesmo relatório "
+                    "tem ordem de grandeza compatível. O instrumento (contrato, "
+                    "convênio ou repasse) e a hipótese legal decidem."),
                 evidencia=por_ent,
                 serie=A.serie_anual(casa, "VALOR", by="FAVORECIDO_NORM"),
                 grafico="bar_stacked",
@@ -157,6 +173,14 @@ def run(staged) -> list[Finding]:
     # ------------------------------------------------ 3. contratos excepcionais
     if not ctr.empty and "VALOR" in ctr:
         v = pd.to_numeric(ctr["VALOR"], errors="coerce").fillna(0)
+        # O contrato de valor implausível (ordem de grandeza fora da carteira)
+        # já tem achado próprio em contratos.py; repeti-lo aqui publicava DOIS
+        # achados altos sobre o mesmo C-010/2025 e uma carteira com ele.
+        try:
+            from .contratos import contratos_implausiveis
+            implausiveis = contratos_implausiveis(ctr)
+        except ImportError:                # módulo ausente: não exclui nada
+            implausiveis = pd.Index([])
         if (v > 0).sum() >= 10:
             # Carteira de contratos é log-normal: o z-robusto sobre o valor
             # BRUTO sinalizava os 18% maiores (170 de 965), o que não
@@ -165,7 +189,7 @@ def run(staged) -> list[Finding]:
             import numpy as np
             z = A.zscore_robusto(pd.Series(np.log10(v[v > 0].values),
                                            index=v[v > 0].index))
-            outliers = ctr.loc[z[z > 3.5].index]
+            outliers = ctr.loc[z[z > 3.5].index].drop(index=implausiveis, errors="ignore")
             if not outliers.empty:
                 cols = [c for c in ("NUMERO_CONTRATO", "CONTRATADA", "VALOR",
                                     "OBJETO", "DATA_INICIO_VIGENCIA",
@@ -189,7 +213,10 @@ def run(staged) -> list[Finding]:
                 ))
 
         # ---- concentração da carteira: o que outlier estatístico não mostra
-        vv = v[v > 0].sort_values(ascending=False)
+        # Mesma carteira do achado de implausíveis: sem o C-010/2025 (23,6% da
+        # carteira com ele), senão "metade da carteira" mede um erro de cadastro.
+        vv = v.drop(index=implausiveis, errors="ignore")
+        vv = vv[vv > 0].sort_values(ascending=False)
         if len(vv) >= 20:
             total_c = float(vv.sum())
             acum = vv.cumsum() / total_c

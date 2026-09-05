@@ -24,8 +24,11 @@ MINIMO_PARES = 5          # abaixo disso um ranking é anedota
 
 
 def _valor(d: pd.DataFrame) -> pd.Series:
-    for c in ("VALOR_PAGO", "VALOR_LIQUIDADO", "VALOR_EMPENHADO", "REALIZADO_EXERCICIO",
-              "VALOR"):
+    """Valor realizado da conta. `REALIZADO_EXERCICIO` primeiro: é a coluna real
+    do ComparativoDespesa (lida do checkpoint de 05/09/2026); as demais são
+    nomes de outros endpoints, mantidos por tolerância."""
+    for c in ("REALIZADO_EXERCICIO", "TOTAL_EXERCICIO", "VALOR_PAGO", "VALOR_LIQUIDADO",
+              "VALOR_EMPENHADO", "VALOR"):
         if c in d.columns:
             v = pd.to_numeric(d[c], errors="coerce")
             if v.notna().any():
@@ -34,10 +37,41 @@ def _valor(d: pd.DataFrame) -> pd.Series:
 
 
 def _rotulo(d: pd.DataFrame) -> pd.Series:
-    for c in ("NOME_CONTA", "DESCRICAO", "CONTA", "NOME", "RUBRICA", "NATUREZA"):
+    """Nome da conta. `NOME` é a coluna real do ComparativoDespesa; `CODIGO`
+    também existe e NÃO serve de rótulo (classificaria códigos → OUTROS)."""
+    for c in ("NOME", "NOME_CONTA", "DESCRICAO", "RUBRICA", "NATUREZA", "CONTA"):
         if c in d.columns:
             return d[c].fillna("").astype(str)
     return pd.Series("", index=d.index)
+
+
+def _so_analiticas(d: pd.DataFrame) -> pd.DataFrame:
+    """Só contas analíticas somam: as sintéticas totalizam as filhas, e somar
+    as duas dobra (ou triplica) a despesa de cada conselho. É o mesmo filtro
+    que finalistica/orcamento/pessoal aplicam ao comparativo do alvo."""
+    if "ANALITICA" not in d.columns:
+        return d
+    a = d["ANALITICA"]
+    if a.dtype == bool:
+        return d[a]
+    return d[a.astype(str).str.strip().str.lower().isin(("true", "1", "sim", "s"))]
+
+
+def _indisponivel(motivo: str, bench: pd.DataFrame) -> Finding:
+    ufs = sorted(bench["_uf"].dropna().unique()) if "_uf" in bench.columns else []
+    return Finding(
+        id="benchmark-indisponivel", frente=FRENTE, gravidade="info",
+        titulo=f"Comparação entre Creas indisponível nesta rodada: {motivo}",
+        descricao=(
+            f"{len(bench)} linha(s) de {len(ufs)} conselho(s) ({', '.join(ufs) or '—'}) "
+            "coletadas do ComparativoDespesa, mas sem o que a régua exige. Sem o "
+            "exercício de cada linha não há despesa MÉDIA ANUAL, que é o numerador "
+            "do ranking — publicar a soma de três exercícios como média inflaria "
+            "cada conselho em até 3×. Trata-se de limite da nossa coleta, não de "
+            "ausência de publicação pelos conselhos."),
+        metricas={"linhas": int(len(bench)), "ufs": ufs, "motivo": motivo},
+        fontes=["benchmark_creas"],
+    )
 
 
 def run(staged) -> list[Finding]:
@@ -54,27 +88,40 @@ def run(staged) -> list[Finding]:
                 "candidatos pelo padrão de nome; `python main.py sondar` mostra "
                 "quais existem. O denominador (profissionais ativos por Crea) "
                 f"vem do {config.PROFISSIONAIS_ATIVOS_FONTE['fonte']}."),
+            fontes=["benchmark_creas"],
         )]
 
-    ufs = sorted(bench["_uf"].dropna().unique())
-    d = bench.copy()
+    # `coluna` e não `d.get`: `DataFrame.get` de coluna inexistente devolve None,
+    # `pd.to_numeric(None)` devolve um escalar e `.dropna()` estoura — foi o
+    # AttributeError que derrubou a frente nas rodadas 9 e 10.
+    ano_serie = pd.to_numeric(coluna(bench, "_ano", None), errors="coerce")
+    if "_ano" not in bench.columns or ano_serie.dropna().empty:
+        return [_indisponivel("linhas sem rótulo de exercício", bench)]
+    d = _so_analiticas(bench.assign(_ano_num=ano_serie))
+    d = d[d["_ano_num"].notna()].copy()
+    if d.empty:
+        return [_indisponivel("nenhuma conta analítica com exercício", bench)]
+    ufs = sorted(d["_uf"].dropna().unique())
     d["_v"] = _valor(d)
     d["_cat"] = _rotulo(d).map(T.classificar_texto)
     d["_macro"] = T.macro(d["_cat"])
-    anos = sorted(pd.to_numeric(d.get("_ano"), errors="coerce").dropna().unique())
+    anos = sorted(int(a) for a in d["_ano_num"].unique())
     achados: list[Finding] = [Finding(
         id="benchmark-cobertura", frente=FRENTE, gravidade="info",
         titulo=(f"{len(ufs)} de {len(config.CREAS_IMPLANTA)} conselhos responderam "
-                f"({', '.join(ufs)}) — exercícios {int(min(anos)) if anos else '?'}–"
-                f"{int(max(anos)) if anos else '?'}"),
+                f"({', '.join(ufs)}) — exercícios {anos[0]}–{anos[-1]}"),
         descricao=(
             "Quem não respondeu não está no ranking, e o ranking é sobre quem "
             "respondeu — não sobre o sistema inteiro. Mesma API, mesmo endpoint "
-            "(ComparativoDespesa), mesma taxonomia aplicada ao nome da conta. "
-            "Diferenças de plano de contas entre conselhos aparecem como "
-            "diferença de classificação; a coluna `nao_classificado_pct` mede "
-            "quanto de cada um a taxonomia não reconheceu."),
-        metricas={"ufs": ufs, "exercicios": [int(a) for a in anos]},
+            "(ComparativoDespesa, só contas analíticas), mesma taxonomia aplicada "
+            "ao nome da conta. Diferenças de plano de contas entre conselhos "
+            "aparecem como diferença de classificação; a coluna "
+            "`nao_classificado_pct` mede quanto de cada um a taxonomia não "
+            "reconheceu. Fonte: crea-XX.implanta.net.br, coleta desta rodada."),
+        metricas={"ufs": ufs, "exercicios": anos,
+                  "exercicios_por_uf": {u: int(n) for u, n in
+                                        d.groupby("_uf")["_ano_num"].nunique().items()}},
+        fontes=["benchmark_creas"],
     )]
     if len(ufs) < MINIMO_PARES:
         achados[0].descricao += (f"\n\n**Menos de {MINIMO_PARES} conselhos "
@@ -82,15 +129,18 @@ def run(staged) -> list[Finding]:
         return achados
 
     tot = d.groupby("_uf")["_v"].sum()
+    # Exercícios POR HOST: um conselho que respondeu 1 dos 3 exercícios teria a
+    # média dividida por 3 (subestimado 3×) com o denominador global.
+    n_anos = d.groupby("_uf")["_ano_num"].nunique().reindex(tot.index).clip(lower=1)
     # Pela CATEGORIA, não pelo macro: o macro "Pessoal e verbas" abriga também
     # a folha (REMUNERACAO), e medir "verbas" com ele somaria salário a diária.
     # `VERBAS_PESSOAIS` é a categoria da taxonomia para diárias, jetons,
     # indenizações e auxílios; `OUTROS` é o que ela não reconheceu.
     verbas = d[d["_cat"].eq("VERBAS_PESSOAIS")].groupby("_uf")["_v"].sum()
     nao_class = d[d["_cat"].eq("OUTROS")].groupby("_uf")["_v"].sum()
-    n_anos = max(len(anos), 1)
     tabela = pd.DataFrame({
         "uf": tot.index,
+        "exercicios": n_anos.values,
         "despesa_media_anual": (tot / n_anos).round(2).values,
         "profissionais_ativos": [config.PROFISSIONAIS_ATIVOS_POR_CREA.get(u) for u in tot.index],
     })
@@ -101,6 +151,7 @@ def run(staged) -> list[Finding]:
     tabela = tabela.dropna(subset=["profissionais_ativos"]).sort_values(
         "despesa_por_profissional_ano", ascending=False).reset_index(drop=True)
     tabela["posicao"] = tabela.index + 1
+    periodo = f"{anos[0]}–{anos[-1]}" if len(anos) > 1 else str(anos[0])
     sp = tabela[tabela["uf"] == "SP"]
     if not sp.empty:
         pos = int(sp["posicao"].iloc[0]); n = len(tabela)
@@ -110,20 +161,24 @@ def run(staged) -> list[Finding]:
             id="benchmark-despesa-por-profissional", frente=FRENTE,
             gravidade="media" if pos <= max(1, n // 4) else "info",
             titulo=(f"Crea-SP: {fmt_brl(valor_sp)} de despesa por profissional ativo "
-                    f"ao ano — {pos}º de {n} conselhos (mediana {fmt_brl(mediana)})"),
+                    f"ao ano ({periodo}) — {pos}º de {n} conselhos (mediana {fmt_brl(mediana)})"),
             descricao=(
-                "Despesa total média anual (ComparativoDespesa) dividida pelos "
-                "profissionais ativos do Crea, para cada conselho que respondeu. "
-                "É uma régua de escala, não de eficiência: conselhos pequenos têm "
-                "custo fixo por profissional maior por natureza, e São Paulo é o "
-                "maior de todos — a expectativa é que fique ABAIXO da mediana. "
-                "Ficar acima é o que pede explicação.\n\n"
+                "Despesa realizada média anual (ComparativoDespesa, contas "
+                "analíticas) dividida pelos profissionais ativos do Crea, para cada "
+                "conselho que respondeu. É uma régua de escala, não de eficiência: "
+                "conselhos pequenos têm custo fixo por profissional maior por "
+                "natureza, e São Paulo é o maior de todos — a expectativa é que "
+                "fique ABAIXO da mediana. Ficar acima é o que pede explicação.\n\n"
                 f"Denominador: {config.PROFISSIONAIS_ATIVOS_FONTE['fonte']} "
-                f"({config.PROFISSIONAIS_ATIVOS_FONTE['url']})."),
-            evidencia=tabela[["posicao", "uf", "despesa_media_anual", "profissionais_ativos",
-                              "despesa_por_profissional_ano", "nao_classificado_pct"]],
+                f"({config.PROFISSIONAIS_ATIVOS_FONTE['url']}). Numerador: "
+                "crea-XX.implanta.net.br, ComparativoDespesa, exercícios "
+                f"{periodo} (coluna `exercicios` diz quantos cada conselho respondeu)."),
+            evidencia=tabela[["posicao", "uf", "exercicios", "despesa_media_anual",
+                              "profissionais_ativos", "despesa_por_profissional_ano",
+                              "nao_classificado_pct"]],
             metricas={"posicao": pos, "conselhos": n, "valor_sp": round(valor_sp, 2),
-                      "mediana": round(mediana, 2)},
+                      "mediana": round(mediana, 2), "periodo": periodo},
+            fontes=["benchmark_creas"],
         ))
         verb = tabela.sort_values("verbas_pct", ascending=False).reset_index(drop=True)
         verb["posicao"] = verb.index + 1
@@ -134,7 +189,7 @@ def run(staged) -> list[Finding]:
                 id="benchmark-verbas-share", frente=FRENTE,
                 gravidade="media" if posv <= max(1, n // 4) else "info",
                 titulo=(f"Diárias, jetons e indenizações: {float(vsp['verbas_pct'].iloc[0]):.1f}% "
-                        f"da despesa do Crea-SP — {posv}º de {n} (mediana "
+                        f"da despesa do Crea-SP ({periodo}) — {posv}º de {n} (mediana "
                         f"{float(verb['verbas_pct'].median()):.1f}%)"),
                 descricao=(
                     "Parcela da despesa classificada pela taxonomia do projeto como "
@@ -143,10 +198,12 @@ def run(staged) -> list[Finding]:
                     "contas variam, `nao_classificado_pct` diz quanto de cada "
                     "conselho a régua não alcançou — um conselho com 40% não "
                     "classificado não é comparável e deve ser lido com essa "
-                    "ressalva."),
+                    f"ressalva. Fonte: crea-XX.implanta.net.br, ComparativoDespesa {periodo}."),
                 evidencia=verb[["posicao", "uf", "verbas_pct", "despesa_media_anual",
                                 "nao_classificado_pct"]],
                 metricas={"posicao": posv, "conselhos": n,
-                          "verbas_pct_sp": round(float(vsp["verbas_pct"].iloc[0]), 1)},
+                          "verbas_pct_sp": round(float(vsp["verbas_pct"].iloc[0]), 1),
+                          "periodo": periodo},
+                fontes=["benchmark_creas"],
             ))
     return achados

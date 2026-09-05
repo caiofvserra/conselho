@@ -262,9 +262,9 @@ def run(staged) -> list[Finding]:
                 descricao=(
                     "Fiscalizar exige quadro permanente. Quando o pagamento "
                     "eventual — diária, quilometragem, ajuda de custo — supera "
-                    "a folha da própria atividade, a fiscalização deixou de ser "
-                    "função de servidor e virou tarefa remunerada por evento, "
-                    "fora do contracheque, do teto e da transparência da folha."),
+                    "a folha da própria atividade, a fiscalização passou a ser "
+                    "remunerada em grande parte por evento, fora da folha — e o "
+                    "que é pago por evento não aparece no contracheque publicado."),
                 evidencia=(fiscal.groupby(["_ano", "natureza"])["valor"].sum()
                            .reset_index()),
                 serie=comp, grafico="bar_stacked",

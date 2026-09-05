@@ -243,11 +243,11 @@ def run(staged) -> list[Finding]:
                     titulo=(f"Diárias, km e jetons excederam a dotação aprovada em "
                             f"{len(acima)} de {len(por_ano)} exercícios"),
                     descricao=(
-                        "Verba indenizatória é a rubrica em que o orçamento mais "
-                        "costuma ser figurativo: aprova-se um valor modesto e "
-                        "executa-se muito acima, porque a concessão é discricionária "
-                        "e não passa por licitação. Comparar dotação e execução ano "
-                        "a ano mostra se o excesso é exceção ou regra."),
+                        "Verba indenizatória é concedida caso a caso e não passa "
+                        "por licitação, então a execução pode se afastar da dotação "
+                        "aprovada. Comparar dotação e execução ano a ano mostra se "
+                        "o excesso é exceção ou regra — e em quantos exercícios "
+                        "houve reformulação orçamentária para acomodá-lo."),
                     evidencia=por_ano.reset_index(),
                     serie=por_ano[["orcado", "realizado"]].rename(
                         columns={"orcado": "dotação aprovada",
@@ -362,7 +362,17 @@ def run(staged) -> list[Finding]:
                     100 * comp2["finalistica"] / comp2["receita"]).round(1)
                 comp2["% da receita em fiscalização"] = (
                     100 * comp2["fiscalizacao"] / comp2["receita"]).round(1)
-                medio = float(comp2["% da receita em fiscalização"].mean())
+                # Média só dos exercícios em que a fiscalização foi MEDIDA:
+                # com centro de custo só a partir de 2021, os anos anteriores
+                # entram com zero e a média de 13 anos (0,7%) era média de 8
+                # zeros de ausência de dado com 5 anos reais (1,8%).
+                medidos = comp2[comp2["fiscalizacao"] > 0]
+                if medidos.empty:
+                    medidos = comp2
+                medio = float(medidos["% da receita em fiscalização"].mean())
+                anos_med = [int(a) for a in medidos.index]
+                periodo = (f"{min(anos_med)}–{max(anos_med)}" if len(anos_med) > 1
+                           else str(anos_med[0]))
                 achados.append(Finding(
                     id="orcamento-retorno-da-anuidade", frente=FRENTE,
                     gravidade="alta" if medio < 10 else "media",
@@ -373,7 +383,8 @@ def run(staged) -> list[Finding]:
                     # receita total — e o título passa a dizer isso, em vez de
                     # sugerir uma base mais estreita e mais favorável ao número.
                     titulo=(f"Da receita total do conselho, {medio:.1f}% em "
-                            "média voltou como fiscalização"),
+                            f"média ({periodo}) foi alocado a fiscalização — "
+                            f"medido por {medida}"),
                     cobertura={"base": float(comp2["fiscalizacao"].sum()),
                                "universo": float(comp2["receita"].sum()),
                                "o_que": "o gasto que a ferramenta identificou "

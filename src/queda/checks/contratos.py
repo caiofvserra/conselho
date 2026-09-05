@@ -31,6 +31,8 @@ bases o módulo troca a lista de acusações por UM achado sobre a junção.
 """
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from .. import analytics as A
@@ -87,6 +89,48 @@ def _valor_implausivel(ctr: pd.DataFrame) -> pd.DataFrame:
     # R$ 685 mi, sendo 12 deles atas de registro de preço perfeitamente
     # plausíveis. Fica como coluna de contexto, para quem for conferir.
     return d[d["_valor"] > 4 * segundo]
+
+
+def contratos_implausiveis(ctr: pd.DataFrame) -> pd.Index:
+    """Índices dos contratos com valor fora de ordem de grandeza (mesma regra
+    de `contratos-valor-implausivel`). Exposto para `casos.py`: o mesmo
+    contrato C-010/2025 entrava em dois achados ALTA e numa carteira com ele e
+    noutra sem ele."""
+    imp = _valor_implausivel(ctr)
+    return imp.index if imp is not None else pd.Index([])
+
+
+def _periodo_ctr(ctr: pd.DataFrame) -> str:
+    anos = pd.to_datetime(ctr["INI"], errors="coerce").dt.year.dropna() if "INI" in ctr else pd.Series(dtype=float)
+    if anos.empty:
+        return "período não datado"
+    a, b = int(anos.min()), int(anos.max())
+    return str(a) if a == b else f"{a}–{b}"
+
+
+def _cnpj14(serie: pd.Series) -> pd.Series:
+    """Só dígitos + zfill(14): CNPJ que passou por int perde o zero à
+    esquerda (25 dos 39 "ausentes do PNCP" da rodada de 04/09/2026)."""
+    d = serie.fillna("").astype(str).str.replace(r"\D", "", regex=True)
+    return d.where(d.eq(""), d.str.zfill(14))
+
+
+_RE_NUM_ANO = re.compile(r"^[A-Z\-\s\.]*?(\d+)\s*/\s*(\d{4})")
+
+
+def _partes_numero(s) -> tuple[int | None, int | None, bool]:
+    """('C-019/2024') → (19, 2024, False); ('ATA 004/2024') → (4, 2024, True);
+    ('C-22') → (22, None, False); ('3554') → (3554, None, False).
+
+    O portal grafa 'C-019/2024' e o PNCP 'C-22' + anoContrato: casar contrato
+    a contrato exige normalizar os dois."""
+    t = str(s or "").strip().upper()
+    eh_ata = t.startswith("ATA")
+    m = _RE_NUM_ANO.match(t)
+    if m:
+        return int(m.group(1)), int(m.group(2)), eh_ata
+    nums = re.findall(r"\d+", t)
+    return (int(nums[0]) if nums else None), None, eh_ata
 
 
 def _janela_pagamentos(pg: pd.DataFrame) -> tuple[pd.Timestamp | None,
@@ -504,6 +548,7 @@ def run(staged) -> list[Finding]:
             tot = float(sem_lic["VALOR"].sum())
             taxa = 100 * len(sem_lic) / len(ctr)
             lic = df(staged, "licitacoes")
+            lic_pncp = df(staged, "licitacoes_pncp")
             # Um check que aciona quase todo o universo mudou de natureza: não
             # está apontando contratações diretas, está apontando que o campo
             # nunca é preenchido. Na rodada real foram 965 de 965 — e o
@@ -512,22 +557,35 @@ def run(staged) -> list[Finding]:
                 achados.append(Finding(
                     id="contratos-vinculo-certame-ausente", frente=FRENTE,
                     gravidade="alta",
-                    titulo=(f"{taxa:.1f}% dos contratos ({len(sem_lic)} de "
-                            f"{len(ctr)}) não informam a licitação de origem"
-                            + (" e o rol de licitações não é publicado"
-                               if lic.empty else "")),
+                    titulo=(f"{taxa:.1f}% dos contratos do portal próprio ({len(sem_lic)} de "
+                            f"{len(ctr)}, {_periodo_ctr(ctr)}) não informam a licitação de origem"
+                            + ("; o rol de licitações não veio do portal (endpoint "
+                               "respondeu vazio ou recusou os parâmetros)"
+                               if lic.empty else "")
+                            + (f"; o PNCP traz {len(lic_pncp)} contratações desde jan/"
+                               f"{config.LICITACOES_PNCP_DESDE}"
+                               if not lic_pncp.empty else "")),
                     descricao=(
                         "Quando o campo falta em praticamente todos os "
                         "registros, ele não distingue contratação direta de "
                         "licitada — simplesmente não é preenchido. Isso não é "
-                        "uma lista de 965 irregularidades: é **um** achado de "
-                        "transparência, e mais grave que a lista, porque torna "
-                        "impossível saber, a partir dos dados abertos, qual "
-                        "contratação foi licitada e qual foi direta. "
-                        + ("O dataset de licitações também voltou vazio, o que "
-                           "fecha as duas portas de verificação."
+                        f"uma lista de {len(sem_lic)} irregularidades: é **um** achado de "
+                        "transparência sobre o portal próprio, porque torna "
+                        "impossível saber, a partir dele, qual contratação foi "
+                        "licitada e qual foi direta. "
+                        + ("O conjunto de licitações do portal também veio vazio: o "
+                           "endpoint respondeu 200 com lista vazia nos exercícios "
+                           "anteriores e recusou (400) o exercício em curso — o que "
+                           "não permite afirmar que o rol não exista, só que não veio "
+                           "por este caminho. "
                            if lic.empty else "")
-                        + f" A carteira afetada soma {fmt_brl(tot)} — que "
+                        + (f"Para o que foi publicado a partir de "
+                           f"{config.LICITACOES_PNCP_DESDE}, o PNCP traz o rol "
+                           f"({len(lic_pncp)} contratações) e {len(pncp[pncp.get('orgao_papel') == 'alvo']) if not pncp.empty else 0} "
+                           "contratos do conselho, com a compra de origem de cada um — "
+                           "é por lá que a verificação segue. "
+                           if not lic_pncp.empty else "")
+                        + f"A carteira afetada soma {fmt_brl(tot)} — que "
                         "**não** deve ser lida como 'contratos sem licitação', "
                         "e sim como 'contratos cuja forma de contratação o "
                         "portal não informa'."),
@@ -539,11 +597,14 @@ def run(staged) -> list[Finding]:
                               "universo": int(len(ctr)),
                               "valor_total": round(tot, 2),
                               "licitacoes_coletadas": int(len(lic))},
-                    base_legal="Lei 14.133/2021, arts. 94 e 174 (divulgação no "
-                               "PNCP como condição de eficácia do contrato); "
-                               "Lei 12.527/2011, art. 8º, §1º, IV.",
+                    base_legal="Lei 12.527/2011, art. 8º, §1º, IV (divulgação de "
+                               "licitações e contratos); Lei 14.133/2021, art. 174 "
+                               "(PNCP como fonte nacional).",
                     como_verificar="Pedir a relação de licitações do período e "
-                                   "o vínculo contrato ↔ certame.",
+                                   "o vínculo contrato ↔ certame; para 2023 em diante, "
+                                   "seguir pelo `numeroControlePNCPCompra` de cada "
+                                   "contrato no PNCP.",
+                    fontes=["contratos", "licitacoes", "licitacoes_pncp"],
                 ))
                 # O contrato publicado no PNCP carrega o número de controle da
                 # COMPRA de origem — e por ele se chega ao edital e ao termo de
@@ -608,119 +669,7 @@ def run(staged) -> list[Finding]:
     if not pncp.empty:
         alvo = pncp[pncp.get("orgao_papel") == "alvo"]
         if not ctr.empty and not alvo.empty:
-            # Casamento por CNPJ, não por nome. O mesmo fornecedor aparece no
-            # portal sob razões sociais diferentes — 09.477.765/0001-91 é
-            # "PERILLO ENGENHARIA LTDA." num contrato e "PERILLO ENGENHARIA E
-            # GEOLOGIA - EIRELI" noutro; 38.352.733/0001-68 é "FB UNI ONLINE" e
-            # "ENGINEME CURSOS E CONSULTORIA ONLINE". Comparando nome, cada
-            # variação vira um fornecedor "ausente do PNCP" que está lá.
-            # Defesa em profundidade contra o zero à esquerda: um CNPJ que
-            # passou por int em algum ponto volta com 9 a 13 dígitos. Só
-            # dígitos + zfill(14) recompõe o número sem ambiguidade — CNPJ tem
-            # 14 posições, e o que faltou só pode ter sido zero à esquerda. Foi
-            # exatamente isso que fez 25 contratos com CNPJ iniciado em 0 saírem
-            # como "ausentes do PNCP" estando lá.
-            def _cnpj14(serie):
-                d = serie.fillna("").astype(str).str.replace(r"\D", "", regex=True)
-                return d.where(d.eq(""), d.str.zfill(14))
-            doc_portal = _cnpj14(coluna(ctr, "CONTRATADA_CNPJ", ""))
-            doc_pncp = _cnpj14(coluna(alvo, "fornecedor_ni", ""))
-            por_cnpj = doc_portal.str.len().eq(14).any() and doc_pncp.str.len().eq(14).any()
-            if por_cnpj:
-                chave_portal, chave_pncp = doc_portal, doc_pncp
-                criterio = "CNPJ do fornecedor"
-            else:
-                chave_portal = ctr["CONTRATADA_NORM"].fillna("")
-                chave_pncp = alvo["fornecedor_norm"].fillna("")
-                criterio = ("nome normalizado do fornecedor — aproximado, "
-                            "porque um dos lados não publicou CNPJ")
-            no_pncp = set(chave_pncp[chave_pncp.ne("")])
-            ausente = chave_portal.ne("") & ~chave_portal.isin(no_pncp)
-
-            # Lei 14.133, art. 193, II: a Lei 8.666 conviveu com ela até
-            # 30/12/2023, e contrato firmado sob a lei antiga NÃO tinha de ir ao
-            # PNCP. Cortar em 2021 (quando o PNCP entrou no ar) transformava em
-            # "falha de transparência" contrato que a lei da época não mandava
-            # publicar lá — e é justamente onde está o dinheiro grande desta
-            # carteira. O corte é a data da OBRIGAÇÃO; o período de convivência
-            # vira contexto declarado, nunca acusação.
-            obrigatorio = pd.Timestamp("2023-12-30")
-            ini = ctr["INI"] if "INI" in ctr else pd.Series(pd.NaT, index=ctr.index)
-            faltando = ctr[ausente & ini.ge(obrigatorio)]
-            convivencia = ctr[ausente & ini.lt(obrigatorio) & ini.ge(pd.Timestamp("2021-08-01"))]
-            cols_ev = ["NUMERO_CONTRATO", "CONTRATADA", "VALOR",
-                       "DATA_INICIO_VIGENCIA"]
-            if not faltando.empty:
-                valor = float(pd.to_numeric(faltando["VALOR"], errors="coerce")
-                              .fillna(0).sum())
-                achados.append(Finding(
-                    id="contratos-ausentes-pncp", frente=FRENTE, gravidade="media",
-                    titulo=(f"{len(faltando)} contrato(s) firmados sob a Lei 14.133 "
-                            f"({fmt_brl(valor)}) não têm correspondente no PNCP"),
-                    descricao=(
-                        "A Lei 14.133/2021 obriga a divulgação no Portal Nacional "
-                        "de Contratações Públicas, e a obrigação vale para o que "
-                        "foi firmado a partir de **30/12/2023**, quando terminou a "
-                        "convivência com a Lei 8.666 (art. 193, II).\n\n"
-                        f"O cruzamento é por **{criterio}**, entre o que o portal "
-                        "próprio do conselho publica e o que o PNCP devolve para o "
-                        "CNPJ do órgão. Ausência aqui é falha de publicação — não "
-                        "diz nada sobre a legalidade da contratação em si.\n\n"
-                        "**O que este número não prova:** que o contrato não "
-                        "exista no PNCP sob outro órgão ou outra unidade "
-                        "compradora. A consulta cobre o CNPJ do conselho."),
-                    evidencia=faltando[cols_ev].sort_values(
-                        "VALOR", ascending=False).head(100),
-                    base_legal="Lei 14.133/2021, arts. 54 e 94; art. 193, II "
-                               "(fim da convivência com a Lei 8.666 em 30/12/2023).",
-                    como_verificar=("Consultar cada contrato em pncp.gov.br pelo "
-                                    "CNPJ do conselho e pelo número do contrato; "
-                                    "se não constar, pedir o comprovante de "
-                                    "divulgação."),
-                    metricas={"contratos": int(len(faltando)),
-                              "valor": round(valor, 2),
-                              "criterio_de_casamento": criterio,
-                              "corte_da_obrigacao": "2023-12-30"},
-                ))
-            if not convivencia.empty:
-                valor = float(pd.to_numeric(convivencia["VALOR"], errors="coerce")
-                              .fillna(0).sum())
-                achados.append(Finding(
-                    id="contratos-fora-do-pncp-convivencia", frente=FRENTE,
-                    gravidade="info",
-                    titulo=(f"{len(convivencia)} contrato(s) de 2021 a 2023 "
-                            f"({fmt_brl(valor)}) não estão no PNCP — e não "
-                            "precisavam estar"),
-                    descricao=(
-                        "Contexto, **não achado**. Estes contratos começaram entre "
-                        "a entrada do PNCP no ar (ago/2021) e o fim da convivência "
-                        "com a Lei 8.666 (30/12/2023). Quem contratou sob a lei "
-                        "antiga não tinha obrigação de publicá-los no PNCP, e a "
-                        "ausência deles ali não é irregularidade.\n\n"
-                        "A lista existe por um motivo só: é aqui que está a maior "
-                        "parte do dinheiro da carteira, e quem cruzar as duas "
-                        "bases sem olhar a data vai concluir 'falha de "
-                        "transparência' sobre contrato que a lei da época mandava "
-                        "publicar exatamente onde ele está — no portal próprio."),
-                    evidencia=convivencia[cols_ev].sort_values(
-                        "VALOR", ascending=False).head(100),
-                    base_legal="Lei 14.133/2021, art. 193, II.",
-                    metricas={"contratos": int(len(convivencia)),
-                              "valor": round(valor, 2)},
-                ))
-            no_portal = set(chave_portal[chave_portal.ne("")])
-            so_pncp = sorted(set(chave_pncp[chave_pncp.ne("")]) - no_portal)
-            if so_pncp:
-                achados.append(Finding(
-                    id="contratos-so-no-pncp", frente=FRENTE, gravidade="baixa",
-                    titulo=f"{len(so_pncp)} fornecedor(es) com contrato no PNCP e não "
-                           "no portal da transparência",
-                    descricao="Situação inversa: contrato publicado nacionalmente mas "
-                              "invisível no portal próprio do conselho.",
-                    evidencia=alvo[chave_pncp.isin(so_pncp)][
-                        ["numeroContrato", "fornecedor_nome", "objeto", "valorGlobal",
-                         "vigenciaInicio", "vigenciaFim"]].head(100),
-                ))
+            achados.extend(_cruzamento_pncp(ctr, alvo, staged))
         # valor acumulado muito acima do global
         infl = alvo[(alvo["valorAcumulado"] > 0) &
                     (alvo["valorAcumulado"] > alvo["valorGlobal"] * (1 + config.ADITIVO_LIMITE_PCT / 100))]
@@ -739,6 +688,278 @@ def run(staged) -> list[Finding]:
 
     # ------------------------------------ razão pago/contratado por fornecedor
     achados.extend(_achados_razao(ctr, adt, pg, sem_carteira_confiavel))
+    return achados
+
+
+def _cruzamento_pncp(ctr: pd.DataFrame, alvo: pd.DataFrame, staged) -> list[Finding]:
+    """Portal próprio × PNCP, contrato a contrato — e cada dúvida rotulada.
+
+    Quatro lições da rodada 10 (05/09/2026), quando o achado dizia "11
+    contratos ausentes, R$ 37 mi":
+
+    * 6 dos 11 eram ATAS de registro de preços, que o PNCP publica em cadastro
+      próprio (`/v1/atas`), não em `/v1/contratos` — nunca casariam;
+    * o casamento era por FORNECEDOR (conjunto de CNPJs), não por contrato;
+    * os dois maiores (R$ 35,2 mi) têm ata de maio/2023 do mesmo CNPJ no
+      portal: podem ser contratos decorrentes de certame anterior a 30/12/2023,
+      regidos pela Lei 8.666 durante toda a vigência (Lei 14.133, art. 191,
+      parágrafo único) e sem obrigação de PNCP — o edital diz;
+    * CPF nunca casa porque o portal só expõe CNPJ.
+
+    Cada uma vira rótulo na coluna `situacao`, e o título conta só o que ficou
+    sem rótulo de dúvida.
+    """
+    achados: list[Finding] = []
+    doc_portal = _cnpj14(coluna(ctr, "CONTRATADA_CNPJ", ""))
+    doc_pncp = _cnpj14(coluna(alvo, "fornecedor_ni", ""))
+    por_cnpj = doc_portal.str.len().eq(14).any() and doc_pncp.str.len().eq(14).any()
+    if por_cnpj:
+        chave_portal, chave_pncp = doc_portal, doc_pncp
+        criterio = "CNPJ do fornecedor e, dentro dele, ano e número (ou valor) do contrato"
+    else:
+        chave_portal = ctr["CONTRATADA_NORM"].fillna("")
+        chave_pncp = alvo["fornecedor_norm"].fillna("")
+        criterio = ("nome normalizado do fornecedor — aproximado, porque um dos "
+                    "lados não publicou CNPJ")
+    pf_fora = int((chave_portal.eq("")).sum())
+    no_pncp = set(chave_pncp[chave_pncp.ne("")])
+    raizes_pncp = {c[:8] for c in no_pncp if len(c) == 14}
+
+    partes = ctr["NUMERO_CONTRATO"].map(_partes_numero) if "NUMERO_CONTRATO" in ctr else \
+        pd.Series([(None, None, False)] * len(ctr), index=ctr.index)
+    num = partes.map(lambda t: t[0])
+    ano_num = partes.map(lambda t: t[1])
+    eh_ata = partes.map(lambda t: t[2]).astype(bool)
+    ini = ctr["INI"] if "INI" in ctr else pd.Series(pd.NaT, index=ctr.index)
+    ano_ini = pd.to_datetime(ini, errors="coerce").dt.year
+    ano_ctr = ano_num.where(ano_num.notna(), ano_ini)
+    valor = pd.to_numeric(coluna(ctr, "VALOR", 0), errors="coerce").fillna(0)
+
+    # chaves individuais do PNCP: (cnpj, ano, número) e valores por cnpj
+    pn = alvo.assign(_k=chave_pncp)
+    pn_num = coluna(pn, "numeroContrato", "").map(lambda x: _partes_numero(x)[0])
+    pn_ano = pd.to_numeric(coluna(pn, "anoContrato", None), errors="coerce")
+    pn_val = pd.to_numeric(coluna(pn, "valorGlobal", 0), errors="coerce").fillna(0)
+    chaves_pncp = {(k, int(a), n) for k, a, n in zip(pn["_k"], pn_ano, pn_num)
+                   if k and pd.notna(a) and n is not None}
+    valores_pncp: dict[str, list[float]] = {}
+    for k, v in zip(pn["_k"], pn_val):
+        if k:
+            valores_pncp.setdefault(k, []).append(float(v))
+
+    def casou_contrato(k, a, n, v) -> bool:
+        if k and pd.notna(a) and n is not None and (k, int(a), n) in chaves_pncp:
+            return True
+        return any(v > 0 and abs(v - x) <= 0.01 * max(v, x) for x in valores_pncp.get(k, []))
+
+    obrigatorio = pd.Timestamp("2023-12-30")
+    convivencia_ini = pd.Timestamp("2021-08-01")
+    em_conv = ini.lt(obrigatorio) & ini.ge(convivencia_ini)
+    cnpjs_conv = set(chave_portal[em_conv & chave_portal.ne("")])
+
+    situacao = []
+    for k, a, n, v, ata in zip(chave_portal, ano_ctr, num, valor, eh_ata):
+        if not k:
+            situacao.append("sem CNPJ no portal (pessoa física ou campo vazio)")
+        elif ata:
+            situacao.append("ata")
+        elif k not in no_pncp:
+            if len(k) == 14 and k[:8] in raizes_pncp:
+                situacao.append("provável correspondente (filial/matriz) no PNCP")
+            elif k in cnpjs_conv:
+                situacao.append("possível contrato decorrente de certame anterior a "
+                                "30/12/2023 (art. 191, p.u.) — conferir regime no edital")
+            else:
+                situacao.append("ausente")
+        elif casou_contrato(k, a, n, v):
+            situacao.append("casado")
+        else:
+            situacao.append("fornecedor presente no PNCP com outro contrato")
+    ctr = ctr.assign(situacao=situacao, CONTRATADA_CNPJ14=chave_portal)
+    pos = ctr[ini.ge(obrigatorio)]
+    cols_ev = [c for c in ("NUMERO_CONTRATO", "CONTRATADA", "CONTRATADA_CNPJ14", "VALOR",
+                           "DATA_INICIO_VIGENCIA", "situacao") if c in ctr.columns]
+
+    def soma(sub):
+        return float(pd.to_numeric(sub["VALOR"], errors="coerce").fillna(0).sum())
+
+    # ---- atas: cadastro próprio no PNCP
+    atas_portal = pos[pos["situacao"].eq("ata")]
+    atas_pncp = df(staged, "pncp_atas")
+    if not atas_portal.empty:
+        casadas = pd.Series(False, index=atas_portal.index)
+        if not atas_pncp.empty and "numeroAtaRegistroPreco" in atas_pncp.columns:
+            chaves_atas = {(int(a), _partes_numero(n)[0]) for a, n in zip(
+                pd.to_numeric(coluna(atas_pncp, "anoAta", None), errors="coerce"),
+                coluna(atas_pncp, "numeroAtaRegistroPreco", ""))
+                if pd.notna(a) and _partes_numero(n)[0] is not None}
+            casadas = pd.Series([(int(a), n) in chaves_atas if pd.notna(a) and n is not None else False
+                                 for a, n in zip(ano_ctr.loc[atas_portal.index], num.loc[atas_portal.index])],
+                                index=atas_portal.index)
+        pendentes = atas_portal[~casadas]
+        if not pendentes.empty:
+            motivo = ("o cadastro de atas do PNCP (`/v1/atas`) não foi coletado nesta rodada"
+                      if atas_pncp.empty else
+                      "não têm ata com o mesmo ano e número no cadastro de atas do PNCP")
+            achados.append(Finding(
+                id="contratos-atas-nao-cruzadas", frente=FRENTE, gravidade="info",
+                titulo=(f"{len(pendentes)} ata(s) de registro de preços do portal a partir de "
+                        f"30/12/2023 ({fmt_brl(soma(pendentes))}) — {motivo}"),
+                descricao=(
+                    "Atas de registro de preços ficam FORA do achado de contratos "
+                    "ausentes do PNCP: o PNCP as publica em cadastro próprio, não em "
+                    "`/v1/contratos`, e cruzá-las com contratos acusaria uma ausência "
+                    "que é só uma prateleira diferente. Quando o cadastro de atas foi "
+                    "coletado, o casamento é por ano e número da ata. O que fica aqui "
+                    f"é o que não casou. Fonte: portal do Crea-SP (contratos) × PNCP; "
+                    f"exercícios {int(ano_ini.loc[pendentes.index].min())}–"
+                    f"{int(ano_ini.loc[pendentes.index].max())}."),
+                evidencia=pendentes[cols_ev].sort_values("VALOR", ascending=False).head(100),
+                metricas={"atas": int(len(pendentes)), "valor": round(soma(pendentes), 2),
+                          "cadastro_de_atas_coletado": not atas_pncp.empty},
+                fontes=["contratos", "pncp_atas"],
+            ))
+
+    # ---- contratos (não atas) firmados a partir de 30/12/2023
+    ausentes = pos[pos["situacao"].eq("ausente")]
+    filial = pos[pos["situacao"].str.startswith("provável correspondente")]
+    art191 = pos[pos["situacao"].str.startswith("possível contrato decorrente")]
+    outro = pos[pos["situacao"].eq("fornecedor presente no PNCP com outro contrato")]
+    if not (ausentes.empty and filial.empty and art191.empty):
+        anos_pos = ano_ini.loc[pos.index].dropna()
+        periodo = (f"{int(anos_pos.min())}–{int(anos_pos.max())}"
+                   if not anos_pos.empty and anos_pos.min() != anos_pos.max()
+                   else (str(int(anos_pos.min())) if not anos_pos.empty else "—"))
+        listados = pd.concat([ausentes, art191, filial])
+        achados.append(Finding(
+            id="contratos-ausentes-pncp", frente=FRENTE,
+            gravidade="media" if not ausentes.empty else "info",
+            titulo=(f"{len(ausentes)} contrato(s) firmados a partir de 30/12/2023 "
+                    f"({fmt_brl(soma(ausentes))}, {periodo}) sem correspondente no PNCP"
+                    + (f" — mais {len(art191) + len(filial)} com dúvida rotulada "
+                       f"({fmt_brl(soma(art191) + soma(filial))})"
+                       if not (art191.empty and filial.empty) else "")),
+            descricao=(
+                "A Lei 14.133/2021 obriga a divulgação no Portal Nacional de "
+                "Contratações Públicas; a obrigação alcança o que foi contratado sob "
+                "a nova lei e tornou-se a única via em 30/12/2023, fim da "
+                "convivência com a Lei 8.666 (art. 193, II).\n\n"
+                f"O cruzamento é por **{criterio}**, entre o portal próprio do "
+                "conselho e o que o PNCP devolve para o CNPJ do órgão. Ausência é "
+                "falha de publicação — não diz nada sobre a legalidade da "
+                "contratação.\n\n"
+                "**O que este número não prova, e como cada dúvida está rotulada "
+                "na coluna `situacao`:**\n"
+                f"* {len(art191)} contrato(s) ({fmt_brl(soma(art191))}) têm ata ou "
+                "contrato do MESMO CNPJ no portal entre ago/2021 e 30/12/2023. "
+                "Contrato decorrente de licitação ou ata publicada sob a Lei 8.666 "
+                "continua regido por ela durante toda a vigência (Lei 14.133, art. "
+                "191, parágrafo único) e não tinha de ir ao PNCP — o edital diz o "
+                "regime, e é lá que se confere.\n"
+                f"* {len(filial)} contrato(s) ({fmt_brl(soma(filial))}) têm outro "
+                "estabelecimento (filial/matriz) do mesmo CNPJ-raiz no PNCP: "
+                "provável correspondente.\n"
+                f"* {len(outro)} contrato(s) ({fmt_brl(soma(outro))}) são de fornecedor "
+                "PRESENTE no PNCP com outro contrato, sem casamento individual por "
+                "ano/número ou valor — não contam como ausentes.\n"
+                f"* {pf_fora} registro(s) do portal sem CNPJ (pessoa física ou campo "
+                "vazio) ficaram fora do cruzamento.\n"
+                "* Atas de registro de preços estão em achado próprio.\n"
+                "* Contrato publicado sob outro CNPJ ou unidade compradora do "
+                "conselho não é alcançado: a consulta cobre o CNPJ do órgão."),
+            evidencia=listados[cols_ev].sort_values("VALOR", ascending=False).head(100),
+            base_legal="Lei 14.133/2021, arts. 54 e 94; art. 191, parágrafo único; "
+                       "art. 193, II.",
+            como_verificar=("Para cada contrato: (1) localizar no portal a ata ou "
+                            "licitação de origem e ler no edital o regime declarado "
+                            "(8.666 ou 14.133); (2) se 14.133, consultar pncp.gov.br pelo "
+                            "CNPJ do conselho, ano e número; (3) se não constar, pedir o "
+                            "comprovante de divulgação (art. 94)."),
+            metricas={"contratos": int(len(ausentes)), "valor": round(soma(ausentes), 2),
+                      "possivel_art_191": {"contratos": int(len(art191)),
+                                           "valor": round(soma(art191), 2)},
+                      "provavel_filial_matriz": {"contratos": int(len(filial)),
+                                                 "valor": round(soma(filial), 2)},
+                      "fornecedor_presente_outro_contrato": {"contratos": int(len(outro)),
+                                                             "valor": round(soma(outro), 2)},
+                      "pf_fora_do_cruzamento": pf_fora,
+                      "criterio_de_casamento": criterio, "corte_da_obrigacao": "2023-12-30",
+                      "periodo": periodo},
+            fontes=["contratos", "pncp_contratos"],
+        ))
+
+    # ---- convivência (contexto, como antes)
+    ausente_forn = chave_portal.ne("") & ~chave_portal.isin(no_pncp)
+    convivencia = ctr[ausente_forn & em_conv]
+    if not convivencia.empty:
+        achados.append(Finding(
+            id="contratos-fora-do-pncp-convivencia", frente=FRENTE, gravidade="info",
+            titulo=(f"{len(convivencia)} contrato(s) de 2021 a 2023 "
+                    f"({fmt_brl(soma(convivencia))}) não estão no PNCP — e não "
+                    "precisavam estar"),
+            descricao=(
+                "Contexto, **não achado**. Estes contratos começaram entre a entrada "
+                "do PNCP no ar (ago/2021) e o fim da convivência com a Lei 8.666 "
+                "(30/12/2023). Quem contratou sob a lei antiga não tinha obrigação de "
+                "publicá-los no PNCP, e a ausência deles ali não é irregularidade.\n\n"
+                "A lista existe por um motivo só: é aqui que está a maior parte do "
+                "dinheiro da carteira, e quem cruzar as duas bases sem olhar a data "
+                "vai concluir 'falha de transparência' sobre contrato que a lei da "
+                "época mandava publicar exatamente onde ele está — no portal próprio."),
+            evidencia=convivencia[cols_ev].sort_values("VALOR", ascending=False).head(100),
+            base_legal="Lei 14.133/2021, art. 193, II.",
+            metricas={"contratos": int(len(convivencia)), "valor": round(soma(convivencia), 2)},
+            fontes=["contratos", "pncp_contratos"],
+        ))
+
+    # ---- só no PNCP
+    no_portal = set(chave_portal[chave_portal.ne("")])
+    so = pn[pn["_k"].ne("") & ~pn["_k"].isin(no_portal)].copy()
+    if not so.empty:
+        tipo_pessoa = coluna(so, "tipoPessoa", "").fillna("").astype(str).str.upper()
+        so = so[~tipo_pessoa.eq("PF") & so["_k"].str.len().eq(14)]
+    if not so.empty:
+        anos_portal = set(int(a) for a in ano_ini.dropna().unique())
+        vig = pd.to_datetime(coluna(so, "vigenciaInicio", None), errors="coerce")
+        so["_ano_vig"] = vig.dt.year
+        nao_verificavel = so["_ano_vig"].notna() & ~so["_ano_vig"].isin(anos_portal)
+        tipo = coluna(so, "tipoContrato_nome", "").fillna("").astype(str)
+        empenho = tipo.str.upper().str.contains("EMPENHO", na=False)
+        so["situacao"] = "sem contrato do mesmo CNPJ no portal"
+        so.loc[empenho, "situacao"] = "publicado no PNCP como empenho (o portal publica empenhos em outro conjunto)"
+        so.loc[nao_verificavel, "situacao"] = "exercício não coletado do portal — não verificável"
+        firmes = so[~empenho & ~nao_verificavel]
+        vg = pd.to_numeric(coluna(so, "valorGlobal", 0), errors="coerce").fillna(0)
+        anos_so = so["_ano_vig"].dropna()
+        periodo = (f"{int(anos_so.min())}–{int(anos_so.max())}" if not anos_so.empty else "—")
+        achados.append(Finding(
+            id="contratos-so-no-pncp", frente=FRENTE, gravidade="baixa",
+            titulo=(f"{len(so)} contrato(s) de {so['_k'].nunique()} fornecedor(es) no PNCP "
+                    f"({fmt_brl(float(vg.sum()))}, {periodo}) sem contrato do mesmo CNPJ no "
+                    f"portal próprio — {int(empenho.sum())} publicados no PNCP como empenho, "
+                    f"{int(nao_verificavel.sum())} em exercício que o portal não devolveu, "
+                    f"{len(firmes)} sem rastro"),
+            descricao=(
+                "Situação inversa: publicado no PNCP e sem contrato do mesmo CNPJ no "
+                "portal próprio. Três leituras, separadas na coluna `situacao`: o que "
+                "o PNCP registra como **empenho** o portal publica no conjunto de "
+                "empenhos, não em contratos — não é omissão; o que tem vigência em "
+                "exercício que o portal **não devolveu** nesta rodada não pode ser "
+                "verificado; e o resto é o que de fato não tem rastro em contratos. "
+                "Casamento por CNPJ; pessoas físicas ficam fora porque o portal só "
+                "expõe CNPJ. Fonte: PNCP (contratos do órgão) × portal do Crea-SP "
+                f"(contratos {min(anos_portal) if anos_portal else '—'}–"
+                f"{max(anos_portal) if anos_portal else '—'})."),
+            evidencia=so[[c for c in ("numeroContrato", "fornecedor_nome", "_k", "tipoContrato_nome",
+                                      "objeto", "valorGlobal", "vigenciaInicio", "vigenciaFim",
+                                      "situacao") if c in so.columns]]
+            .rename(columns={"_k": "fornecedor_ni"}).head(100),
+            metricas={"contratos": int(len(so)), "fornecedores": int(so["_k"].nunique()),
+                      "valor": round(float(vg.sum()), 2), "como_empenho": int(empenho.sum()),
+                      "exercicio_nao_coletado": int(nao_verificavel.sum()),
+                      "sem_rastro": int(len(firmes)), "periodo": periodo},
+            fontes=["pncp_contratos", "contratos"],
+        ))
     return achados
 
 
@@ -763,17 +984,24 @@ def _achados_modalidade_origem(pncp: pd.DataFrame, lic: pd.DataFrame) -> list[Fi
     diretas = por_mod[por_mod["modalidadeNome"].str.upper().str.contains(
         "DISPENSA|INEXIGIB", regex=True, na=False)]
     pct_direta = 100 * float(diretas["valor_estimado"].sum()) / total_v if total_v else 0.0
+    pct_cont = 100 * float(diretas["contratacoes"].sum()) / len(mods) if len(mods) else 0.0
+    anos_c = pd.to_numeric(coluna(mods, "_ano", None), errors="coerce").dropna()
+    faixa = (f"ano da compra {int(anos_c.min())}–{int(anos_c.max())}" if not anos_c.empty else "")
     achados.append(Finding(
         id="licitacoes-pncp-rol", frente=FRENTE,
         gravidade="media" if pct_direta >= 50 else "info",
-        titulo=(f"O rol de contratações está no PNCP: {len(mods)} desde "
-                f"{int(pd.to_numeric(mods.get('_ano'), errors='coerce').min()) if '_ano' in mods else config.LICITACOES_PNCP_DESDE}"
-                f" — {pct_direta:.0f}% do valor estimado por dispensa ou inexigibilidade"),
+        titulo=(f"O rol de contratações está no PNCP: {len(mods)} publicadas desde jan/"
+                f"{config.LICITACOES_PNCP_DESDE}" + (f" ({faixa})" if faixa else "")
+                + f" — {pct_direta:.0f}% do valor estimado e {pct_cont:.0f}% das "
+                "contratações por dispensa ou inexigibilidade"),
         descricao=(
-            "O portal próprio do conselho não publica o rol de licitações, e "
-            "seus contratos não informam certame de origem. O PNCP publica as "
-            "contratações que a Lei 14.133 obriga a divulgar (a partir de "
-            "30/12/2023), com modalidade e valor estimado.\n\n"
+            "O rol de licitações não veio do portal próprio do conselho, e seus "
+            "contratos não informam certame de origem. O PNCP publica as "
+            "contratações sob a Lei 14.133 — obrigatórias desde 30/12/2023; as de "
+            "2023 já estão lá porque o conselho passou a usar a nova lei antes do "
+            "fim da convivência (art. 191). A varredura é pela data de publicação "
+            f"no PNCP, de jan/{config.LICITACOES_PNCP_DESDE} até a coleta; o ano da "
+            "compra pode ser anterior à publicação.\n\n"
             "A tabela é o rol por modalidade. **Contratação direta não é "
             "irregularidade**: dispensa e inexigibilidade têm hipóteses legais "
             "(arts. 74 e 75 da Lei 14.133). O que este número mostra é a "
@@ -789,7 +1017,11 @@ def _achados_modalidade_origem(pncp: pd.DataFrame, lic: pd.DataFrame) -> list[Fi
         metricas={"contratacoes": int(len(mods)),
                   "valor_estimado_total": round(total_v, 2),
                   "pct_valor_contratacao_direta": round(pct_direta, 1),
+                  "pct_contagem_contratacao_direta": round(pct_cont, 1),
+                  "por_ano": {int(a): int(n) for a, n in
+                              anos_c.astype(int).value_counts().sort_index().items()},
                   "modalidades_consultadas": list(config.PNCP_MODALIDADES_CONSELHO.values())},
+        fontes=["licitacoes_pncp"],
     ))
 
     if pncp.empty or "numeroControlePNCPCompra" not in pncp.columns:
@@ -819,7 +1051,7 @@ def _achados_modalidade_origem(pncp: pd.DataFrame, lic: pd.DataFrame) -> list[Fi
         descricao=(
             "Ligação contrato → compra pelo `numeroControlePNCPCompra` do próprio "
             "PNCP, e da compra à modalidade. É a informação que o portal do "
-            "conselho não dá em nenhum dos seus 965 contratos.\n\n"
+            "conselho não dá em nenhum dos seus contratos.\n\n"
             "Contratação direta é legal quando cabe numa hipótese dos arts. 74 "
             "e 75 da Lei 14.133; a coluna `amparo_legal` traz a hipótese "
             "declarada. O que merece conferência é o par objeto × amparo — um "

@@ -1047,14 +1047,84 @@ def _ultimo_pagamento(staged) -> dict[str, pd.Timestamp]:
     return {} if g is None else g.max().to_dict()
 
 
+def _cnpj14(serie: pd.Series) -> pd.Series:
+    d = serie.fillna("").astype(str).str.replace(r"\D", "", regex=True)
+    return d.where(d.eq(""), d.str.zfill(14))
+
+
+def _instrumentos_por_cnpj(staged) -> dict[str, list[tuple[pd.Timestamp, str]]]:
+    """Datas de início de contrato/ata por CNPJ, no portal próprio e no PNCP.
+
+    É o que separa "pagou empresa sancionada" de "contratou empresa
+    sancionada": pagamento de contrato anterior à sanção é execução de
+    obrigação já assumida. Sem esta tabela o achado só podia apontar onde
+    olhar; com ela, ele diz o que encontrou.
+    """
+    out: dict[str, list[tuple[pd.Timestamp, str]]] = {}
+
+    def add(cnpjs, datas, rotulos):
+        for c, d, r in zip(cnpjs, datas, rotulos):
+            if len(c) == 14 and pd.notna(d):
+                out.setdefault(c, []).append((pd.Timestamp(d), str(r)))
+
+    ctr = df(staged, "contratos")
+    if not ctr.empty and "CONTRATADA_CNPJ" in ctr.columns:
+        datas = ctr["INI"] if "INI" in ctr.columns else pd.to_datetime(
+            coluna(ctr, "DATA_INICIO_VIGENCIA", None), errors="coerce")
+        add(_cnpj14(ctr["CONTRATADA_CNPJ"]), pd.to_datetime(datas, errors="coerce"),
+            coluna(ctr, "NUMERO_CONTRATO", "").fillna("").map(lambda x: f"portal {x}"))
+    pn = df(staged, "pncp_contratos")
+    if not pn.empty and "fornecedor_ni" in pn.columns:
+        alvo = pn[coluna(pn, "orgao_papel", "alvo").eq("alvo")]
+        datas = pd.to_datetime(coluna(alvo, "dataAssinatura", None), errors="coerce")
+        datas = datas.fillna(pd.to_datetime(coluna(alvo, "vigenciaInicio", None), errors="coerce"))
+        add(_cnpj14(alvo["fornecedor_ni"]), datas,
+            coluna(alvo, "numeroContrato", "").fillna("").map(lambda x: f"PNCP {x}"))
+    return out
+
+
+def _situacao_contrato(instr: dict, cnpj: str, inicio_sancao, data_pg) -> tuple[str, str]:
+    """('contrato firmado durante a sanção' | 'contrato anterior à sanção' |
+    'sem instrumento localizado', instrumentos citados)."""
+    datas = instr.get(cnpj, [])
+    if not datas or pd.isna(inicio_sancao):
+        return "sem instrumento localizado", ""
+    durante = [r for d, r in datas if inicio_sancao <= d and (pd.isna(data_pg) or d <= data_pg)]
+    if durante:
+        return "contrato firmado durante a sanção", "; ".join(sorted(set(durante))[:5])
+    anteriores = [r for d, r in datas if d < inicio_sancao]
+    if anteriores:
+        return "contrato anterior à sanção", "; ".join(sorted(set(anteriores))[:5])
+    return "sem instrumento localizado", ""
+
+
+def _anos_de(serie) -> str:
+    anos = sorted({int(a) for a in pd.to_datetime(serie, errors="coerce").dt.year.dropna()})
+    if not anos:
+        return "sem data"
+    return str(anos[0]) if len(anos) == 1 else f"{anos[0]}–{anos[-1]}"
+
+
 def _achados_sancoes(staged) -> list[Finding]:
     """Pagamento a fornecedor que constava no CEIS/CNEP na data do pagamento.
 
-    Duas listas, porque a lei separa: inidoneidade e proibição de contratar
-    valem para toda a administração (efeito nacional); impedimento e suspensão
-    valem para o órgão que os aplicou. Pagar a empresa impedida por um
-    município não é irregularidade do Crea-SP — é contexto. Misturar as duas
-    acusaria onde não há o que acusar.
+    Três perguntas, em ordem, e só a terceira sustenta gravidade alta:
+
+    1. **Quem a sanção alcança** (`alcance`, ver `clients.alcance_sancao`):
+       inidoneidade e proibição por improbidade valem para toda a
+       administração; impedimento e suspensão valem para o ente que os
+       aplicou — um impedimento estadual não alcança o Crea-SP, autarquia
+       federal; um impedimento FEDERAL alcança em tese.
+    2. **Quantos pagamentos de fato**: o CEIS pode ter dois registros da mesma
+       empresa (a rodada 10 contou 22 pagamentos duas vezes por isso). Sanções
+       são deduplicadas antes do cruzamento e pagamentos contados pelo seu
+       próprio índice, nunca por (data, valor) — há pagamentos legítimos de
+       mesmo dia e mesmo valor.
+    3. **Quando foi a contratação**: pagamento de contrato anterior à sanção é
+       execução de obrigação assumida antes (inidoneidade tem efeito ex nunc).
+       Só contrato ou ata firmados DEPOIS do início da sanção, com alcance que
+       atinja o conselho, sustentam "alta". Sem instrumento localizado, é
+       "média" e "a conferir".
     """
     san = df(staged, "sancoes")
     pg = _pagamentos_pj(staged)
@@ -1070,20 +1140,33 @@ def _achados_sancoes(staged) -> list[Finding]:
             como_verificar="Rodar de novo com rede; ou baixar o CSV do CEIS em "
                            "portaldatransparencia.gov.br/download-de-dados/ceis e "
                            "salvar em data/manual/sancoes.csv.",
+            fontes=["sancoes"],
         )]
     if pg.empty or "cnpj" not in pg.columns:
         return []
+    from .. import clients
     san = san.copy()
-    # zfill(14): CNPJ relido como int perde o zero à esquerda (ver contratos.py)
-    san["documento"] = (san["documento"].astype(str).str.replace(r"\D", "", regex=True))
-    san["documento"] = san["documento"].where(san["documento"].eq(""),
-                                              san["documento"].str.zfill(14))
+    san["documento"] = _cnpj14(san["documento"])
     san = san[san["documento"].str.len() == 14]
+    cadastro = coluna(san, "cadastro", "").fillna("").astype(str).str.lower()
+    cepim = san[cadastro.eq("cepim")]
+    san = san[~cadastro.eq("cepim")]
+    achados: list[Finding] = []
+    achados.extend(_achados_cepim(cepim, pg, staged))
+    if san.empty:
+        return achados
+    if "alcance" not in san.columns:
+        san["alcance"] = [clients.alcance_sancao(c, f, e) for c, f, e in zip(
+            coluna(san, "categoria", None), coluna(san, "fundamento", None),
+            coluna(san, "esfera", None))]
+    chaves = [c for c in ("documento", "cadastro", "categoria", "inicio", "fim") if c in san.columns]
+    san = san.drop_duplicates(subset=chaves)
     pagos = pg.copy()
     pagos["DATA"] = pd.to_datetime(coluna(pagos, "DATA", None), errors="coerce")
+    pagos["_pg_id"] = range(len(pagos))
     j = pagos.merge(san, left_on="cnpj", right_on="documento", how="inner")
     if j.empty:
-        return [Finding(
+        achados.append(Finding(
             id="fornecedores-sancionados", frente=FRENTE, gravidade="info",
             titulo="Nenhum fornecedor pago consta no CEIS/CNEP",
             descricao=(f"{pg['cnpj'].nunique()} CNPJ(s) pagos conferidos contra "
@@ -1092,69 +1175,201 @@ def _achados_sancoes(staged) -> list[Finding]:
                        "aparece."),
             metricas={"cnpjs_conferidos": int(pg["cnpj"].nunique()),
                       "sancionados_no_cadastro": int(san["documento"].nunique())},
-        )]
+            fontes=["sancoes", "pagamentos"],
+        ))
+        return achados
     ini = pd.to_datetime(j["inicio"], errors="coerce")
     fim = pd.to_datetime(j["fim"], errors="coerce")
     dentro = j["DATA"].notna() & ini.notna() & (j["DATA"] >= ini) & (fim.isna() | (j["DATA"] <= fim))
-    j["pagamento_durante_sancao"] = dentro
+    j = j[dentro].copy()
+    if j.empty:
+        return achados
+    instr = _instrumentos_por_cnpj(staged)
+    sit = [_situacao_contrato(instr, c, i, d) for c, i, d in
+           zip(j["cnpj"], pd.to_datetime(j["inicio"], errors="coerce"), j["DATA"])]
+    j["situacao_contrato"] = [a for a, _ in sit]
+    j["instrumentos"] = [b for _, b in sit]
+    if "orgao_sancionador" in j.columns:
+        j = j.rename(columns={"orgao_sancionador": "orgao"})
     cols = [c for c in ("cnpj", "FAVORECIDO_NORM", "DATA", "VALOR", "cadastro", "categoria",
-                        "inicio", "fim", "orgao_sancionador", "esfera", "efeito_nacional")
-            if c in j.columns]
-    nac = j[dentro & j["efeito_nacional"].astype(bool)]
-    esc = j[dentro & ~j["efeito_nacional"].astype(bool)]
-    achados: list[Finding] = []
-    if not nac.empty:
-        v = float(pd.to_numeric(nac["VALOR"], errors="coerce").fillna(0).sum())
+                        "inicio", "fim", "orgao", "esfera", "fundamento", "alcance",
+                        "situacao_contrato", "instrumentos") if c in j.columns]
+
+    def resumo(sub: pd.DataFrame) -> dict:
+        unico = sub.drop_duplicates("_pg_id")
+        return {"fornecedores": int(unico["cnpj"].nunique()),
+                "pagamentos": int(len(unico)),
+                "valor": round(float(pd.to_numeric(unico["VALOR"], errors="coerce")
+                                     .fillna(0).sum()), 2),
+                "anos": _anos_de(unico["DATA"])}
+
+    alc = j["alcance"].astype(str)
+    atinge = alc.isin(["nacional", "federal"])
+    durante = j["situacao_contrato"].eq("contrato firmado durante a sanção")
+    anterior = j["situacao_contrato"].eq("contrato anterior à sanção")
+    principal = j[atinge & ~anterior]
+    if not principal.empty:
+        r = resumo(principal)
+        dur = durante.loc[principal.index]
+        r_dur = resumo(principal[dur])
+        r_sem = resumo(principal[~dur])
+        grav = "alta" if r_dur["pagamentos"] else "media"
         achados.append(Finding(
-            id="fornecedores-sancionados", frente=FRENTE, gravidade="alta",
-            titulo=(f"{nac['cnpj'].nunique()} fornecedor(es) receberam {fmt_brl(v)} "
-                    "enquanto constavam como inidôneos ou proibidos de contratar "
-                    "(efeito em toda a administração)"),
+            id="fornecedores-sancionados", frente=FRENTE, gravidade=grav,
+            titulo=(f"{r['fornecedores']} fornecedor(es) receberam {fmt_brl(r['valor'])} "
+                    f"({r['pagamentos']} pagamento(s), {r['anos']}) durante sanção cujo "
+                    f"alcance atinge o Crea-SP — {r_dur['fornecedores']} com contrato firmado "
+                    f"na vigência da sanção, {r_sem['fornecedores']} sem instrumento localizado"),
             descricao=(
-                "Pagamento com data dentro do período de uma sanção de EFEITO "
-                "NACIONAL: declaração de inidoneidade (Lei 8.666, art. 87, IV; "
-                "Lei 14.133, art. 156, IV) ou proibição de contratar (Lei "
-                "12.846). Essas sanções valem para toda a administração pública, "
-                "não só para o órgão que as aplicou.\n\n"
-                "**O que isto não prova:** que o contrato foi firmado durante a "
-                "sanção. Pagamento de contrato anterior à sanção é execução de "
-                "obrigação já assumida — a data da assinatura decide, e ela está "
-                "no portal de contratos. O cruzamento aponta onde olhar."),
-            evidencia=nac[cols].sort_values("VALOR", ascending=False).head(100),
-            base_legal="Lei 8.666/1993, art. 87, IV; Lei 14.133/2021, art. 156, IV; "
-                       "Lei 12.846/2013, art. 19, IV.",
-            como_verificar="Para cada par, comparar a data de assinatura do contrato "
-                           "com o início da sanção; pedir ao órgão a consulta ao "
-                           "CEIS feita à época (art. 91, §4º, Lei 14.133).",
-            metricas={"fornecedores": int(nac["cnpj"].nunique()),
-                      "pagamentos": int(len(nac)), "valor": round(v, 2)},
+                "Pagamento com data dentro do período de uma sanção que alcança o "
+                "conselho: declaração de inidoneidade (Lei 8.666/1993, art. 87, IV; "
+                "Lei 14.133/2021, art. 156, IV — vale para toda a administração, "
+                "STJ MS 13.964/DF), proibição de contratar por improbidade (Lei "
+                "8.429/1992, art. 12) ou impedimento aplicado por órgão FEDERAL "
+                "(Lei 10.520/2002, art. 7º; Lei 14.133, art. 156, III e §4º — o "
+                "Crea-SP é autarquia federal).\n\n"
+                "**O que sustenta gravidade alta:** só o pagamento cujo contrato ou "
+                "ata, no portal próprio ou no PNCP, começou DEPOIS do início da "
+                "sanção (coluna `situacao_contrato`). **O que isto não prova:** "
+                "pagamento de obrigação assumida antes da sanção é execução "
+                "regular — a inidoneidade tem efeitos ex nunc e não rescinde "
+                "contrato em curso. Onde nenhum instrumento foi localizado, o "
+                "caso é 'a conferir': compras pequenas podem ter sido feitas por "
+                "empenho sem contrato publicado.\n\n"
+                "Fonte: CEIS/CNEP (CGU, foto do dia da coleta) × pagamentos do "
+                "portal do Crea-SP; contratos do portal e do PNCP para a data da "
+                "contratação."),
+            evidencia=principal[cols].sort_values("VALOR", ascending=False).head(100),
+            base_legal="Lei 8.666/1993, art. 87, III e IV; Lei 14.133/2021, art. 156, "
+                       "III e IV e §4º; Lei 10.520/2002, art. 7º; Lei 8.429/1992, art. 12.",
+            como_verificar=("Para cada linha, localizar o contrato ou empenho por CNPJ e "
+                            "comparar a data de assinatura com o início da sanção; ler a "
+                            "coluna FUNDAMENTAÇÃO LEGAL do CEIS; para contratações a partir "
+                            "de 2023, pedir a consulta ao CEIS feita à época (Lei 14.133, "
+                            "art. 91, §4º)."),
+            metricas={**r, "contrato_durante_sancao": r_dur, "sem_instrumento": r_sem,
+                      "por_alcance": {k: int(v) for k, v in
+                                      principal.drop_duplicates("_pg_id")["alcance"]
+                                      .value_counts().items()}},
+            fontes=["sancoes", "pagamentos", "contratos", "pncp_contratos"],
         ))
+    ant = j[atinge & anterior]
+    if not ant.empty:
+        r = resumo(ant)
+        achados.append(Finding(
+            id="fornecedores-sancionados-contrato-anterior", frente=FRENTE, gravidade="info",
+            titulo=(f"{r['fornecedores']} fornecedor(es) receberam {fmt_brl(r['valor'])} "
+                    f"({r['anos']}) durante sanção, por contrato ou ata firmados ANTES dela"),
+            descricao=(
+                "Contexto, **não achado**: a sanção começou depois da contratação. "
+                "Pagar o que já estava contratado é cumprir obrigação assumida — a "
+                "inidoneidade e o impedimento produzem efeitos dali em diante (ex "
+                "nunc). A lista existe porque quem cruzar CEIS e pagamentos sem a "
+                "data do contrato vai publicar isto como irregularidade, e não é. "
+                "A coluna `instrumentos` diz qual contrato ou ata foi localizado."),
+            evidencia=ant[cols].sort_values("VALOR", ascending=False).head(100),
+            metricas=r, fontes=["sancoes", "pagamentos", "contratos", "pncp_contratos"],
+        ))
+    esc = j[alc.eq("ente")]
     if not esc.empty:
-        v = float(pd.to_numeric(esc["VALOR"], errors="coerce").fillna(0).sum())
+        r = resumo(esc)
         achados.append(Finding(
             id="fornecedores-sancionados-outro-orgao", frente=FRENTE, gravidade="info",
-            titulo=(f"{esc['cnpj'].nunique()} fornecedor(es) pagos ({fmt_brl(v)}) tinham "
-                    "impedimento ou suspensão aplicados por OUTRO órgão"),
+            titulo=(f"{r['fornecedores']} fornecedor(es) pagos ({fmt_brl(r['valor'])}, "
+                    f"{r['anos']}) tinham impedimento ou suspensão aplicados por órgão "
+                    "estadual ou municipal"),
             descricao=(
                 "Contexto, **não achado**: impedimento e suspensão (Lei 8.666, art. "
-                "87, III; Lei 14.133, art. 156, III) valem para o ente que os "
-                "aplicou. Um impedimento de um município não proíbe o Crea-SP de "
-                "contratar a empresa. A lista existe porque quem cruzar as bases "
-                "sem ler a categoria da sanção vai publicar isto como "
+                "87, III; Lei 10.520, art. 7º; Lei 14.133, art. 156, III e §4º) valem "
+                "para o ente federativo que os aplicou. Um impedimento estadual ou "
+                "municipal não proíbe o Crea-SP, autarquia federal, de contratar a "
+                "empresa. A lista existe porque quem cruzar as bases sem ler a "
+                "esfera e o fundamento da sanção vai publicar isto como "
                 "irregularidade — e não é."),
             evidencia=esc[cols].sort_values("VALOR", ascending=False).head(100),
-            metricas={"fornecedores": int(esc["cnpj"].nunique()), "valor": round(v, 2)},
+            metricas=r, fontes=["sancoes", "pagamentos"],
         ))
-    if not achados:
+    sem = j[alc.eq("nao_impede")]
+    if not sem.empty:
+        r = resumo(sem)
         achados.append(Finding(
-            id="fornecedores-sancionados", frente=FRENTE, gravidade="info",
-            titulo=(f"{j['cnpj'].nunique()} fornecedor(es) pagos constam no CEIS/CNEP, "
-                    "mas nenhum pagamento caiu dentro do período da sanção"),
-            descricao="Sanção anterior ou posterior aos pagamentos. Sem sobreposição "
-                      "de datas não há o que apontar.",
-            evidencia=j[cols].sort_values("DATA").head(100),
+            id="fornecedores-sancionados-sem-restricao", frente=FRENTE, gravidade="info",
+            titulo=(f"{r['fornecedores']} fornecedor(es) pagos ({fmt_brl(r['valor'])}, "
+                    f"{r['anos']}) tinham multa ou outra sanção que não restringe contratar"),
+            descricao=(
+                "Contexto, **não achado**: multa, advertência, publicação extraordinária "
+                "e proibição de receber incentivos (CNEP, Lei 12.846/2013, arts. 6º e "
+                "19) punem a empresa sem proibir que a administração a contrate. O "
+                "registro no CNEP é informação relevante sobre o fornecedor, e por isso "
+                "fica listado — mas pagar a uma empresa multada não é pagar a uma "
+                "empresa inidônea ou impedida."),
+            evidencia=sem[cols].sort_values("VALOR", ascending=False).head(100),
+            metricas=r, fontes=["sancoes", "pagamentos"],
+        ))
+    ind = j[alc.eq("indeterminado")]
+    if not ind.empty:
+        r = resumo(ind)
+        achados.append(Finding(
+            id="fornecedores-sancionados-indeterminado", frente=FRENTE, gravidade="info",
+            titulo=(f"{r['fornecedores']} fornecedor(es) pagos ({fmt_brl(r['valor'])}, "
+                    f"{r['anos']}) constam no CEIS/CNEP com alcance que o cadastro não "
+                    "permite determinar"),
+            descricao=("Categoria e fundamento legal do registro não dizem se a sanção "
+                       "alcança toda a administração ou só o ente que a aplicou. Fica "
+                       "listado para conferência manual do processo citado no CEIS, "
+                       "sem gravidade atribuída."),
+            evidencia=ind[cols].sort_values("VALOR", ascending=False).head(100),
+            metricas=r, fontes=["sancoes", "pagamentos"],
         ))
     return achados
+
+
+def _achados_cepim(cepim: pd.DataFrame, pg: pd.DataFrame, staged) -> list[Finding]:
+    """Entidades pagas ou conveniadas que constam no CEPIM (entidades privadas
+    sem fins lucrativos impedidas de receber recursos federais).
+
+    O CEPIM não tem data de início nem de fim: é uma foto. Por isso o texto é
+    "consta no cadastro na data da coleta", nunca "pagamento durante
+    impedimento" — o impedimento pode ser posterior ao pagamento.
+    """
+    if cepim is None or cepim.empty:
+        return []
+    docs = set(cepim["documento"])
+    pagos = pg[pg["cnpj"].isin(docs)]
+    conv = df(staged, "convenios")
+    conv_hit = pd.DataFrame()
+    if not conv.empty:
+        col_cnpj = next((c for c in conv.columns if "CNPJ" in str(c).upper()), None)
+        if col_cnpj:
+            conv_hit = conv[_cnpj14(conv[col_cnpj]).isin(docs)]
+    if pagos.empty and conv_hit.empty:
+        return []
+    valor = float(pd.to_numeric(pagos["VALOR"], errors="coerce").fillna(0).sum()) if not pagos.empty else 0.0
+    ents = set(pagos["cnpj"]) | (set(_cnpj14(conv_hit[col_cnpj])) if not conv_hit.empty else set())
+    ev = pagos.merge(cepim.drop_duplicates("documento")[
+        [c for c in ("documento", "nome", "orgao_sancionador", "categoria") if c in cepim.columns]],
+        left_on="cnpj", right_on="documento", how="left") if not pagos.empty else cepim[cepim["documento"].isin(ents)]
+    return [Finding(
+        id="fornecedores-entidades-cepim", frente=FRENTE,
+        gravidade="media" if valor > 0 else "info",
+        titulo=(f"{len(ents)} entidade(s) pagas ou conveniadas pelo conselho constam hoje "
+                f"no CEPIM ({fmt_brl(valor)} pagos, {_anos_de(pagos['DATA']) if not pagos.empty else 'sem pagamento'})"),
+        descricao=(
+            "O CEPIM (CGU) lista entidades privadas sem fins lucrativos impedidas "
+            "de celebrar convênios e receber recursos federais por prestação de "
+            "contas rejeitada ou irregularidade em ajuste anterior. O cadastro é "
+            "uma FOTO da data da coleta, sem período de vigência: o impedimento "
+            "pode ser posterior aos pagamentos listados. O que se afirma é só "
+            "que a entidade consta hoje; a data do impedimento está no processo "
+            "citado pelo órgão concedente (coluna `orgao_sancionador`)."),
+        evidencia=ev.head(100),
+        base_legal="Decreto 11.531/2023 (Transferegov), art. 10; Portaria Interministerial "
+                   "424/2016, art. 9º, IV.",
+        como_verificar="Consultar a entidade no CEPIM (portaldatransparencia.gov.br) e a "
+                       "data do impedimento no processo indicado pelo órgão concedente.",
+        metricas={"entidades": len(ents), "valor_pago": round(valor, 2)},
+        fontes=["sancoes", "pagamentos", "convenios"],
+    )]
 
 
 def run(staged) -> list[Finding]:
@@ -1214,14 +1429,34 @@ def run(staged) -> list[Finding]:
             como_verificar="Consultar a data de baixa/inaptidão na Receita e "
                            "compará-la com a data de cada pagamento.",
         ))
+    # Associações, sindicatos, conselhos profissionais e fundações saem: um
+    # conselho federal criado por lei em 2018 e a associação dos procuradores
+    # do próprio Crea não são "empresas" — e a rodada 10 os publicou como
+    # "padrão de fachada". Idade curta do CNPJ é sinal FRACO por si só.
+    _nao_empresa = re.compile(
+        r"ASSOCIA|SINDICAT|CONSELHO (FEDERAL|REGIONAL)|FUNDAC|ORGANIZAC[AÃ]O RELIGIOSA|"
+        r"ATIVIDADES ASSOCIATIVAS|ORDEM DOS|COOPERATIVA|INSTITUTO FEDERAL|PREFEITURA|"
+        r"UNIVERSIDADE", re.I)
+    jovens = [j for j in jovens
+              if not _nao_empresa.search(f"{j.get('razao_social', '')} {j.get('cnae', '')}")]
     if jovens:
+        anos = sorted({pd.Timestamp(j["primeiro_pagamento"]).year for j in jovens
+                       if pd.notna(j.get("primeiro_pagamento"))})
         achados.append(Finding(
-            id="fornecedores-empresa-recente", frente=FRENTE, gravidade="alta",
-            titulo=f"{len(jovens)} fornecedor(es) receberam o 1º pagamento com menos de "
-                   f"{config.IDADE_MINIMA_EMPRESA_DIAS} dias de existência",
-            descricao="Empresa criada às vésperas da contratação é padrão típico de "
-                      "empresa de fachada/direcionamento.",
+            id="fornecedores-empresa-recente", frente=FRENTE, gravidade="media",
+            titulo=(f"{len(jovens)} fornecedor(es) receberam o 1º pagamento com menos de "
+                    f"{config.IDADE_MINIMA_EMPRESA_DIAS} dias de CNPJ"
+                    + (f" ({anos[0]}–{anos[-1]})" if len(anos) > 1 else
+                       (f" ({anos[0]})" if anos else ""))),
+            descricao=("CNPJ com menos de 180 dias no primeiro pagamento é um sinal "
+                       "fraco: só ganha peso somado a outros (sócio em comum com outro "
+                       "fornecedor, ausência de certame identificável, CNAE sem relação "
+                       "com o objeto). Não afirma direcionamento. Associações, sindicatos, "
+                       "conselhos e fundações foram excluídos por não serem empresas. "
+                       "Fonte: ficha cadastral da Receita (data de abertura) × primeiro "
+                       "pagamento no portal."),
             evidencia=pd.DataFrame(jovens),
+            fontes=["pagamentos", "fichas_cnpj"],
         ))
 
     # ------------------------------------------------ sanções (CEIS/CNEP, CGU)

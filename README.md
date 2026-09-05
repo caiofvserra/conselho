@@ -109,12 +109,14 @@ Cinco fontes seguem em zero depois de quatro rodadas: `licitacoes`, `atas`,
 `quadro_pessoal`, `mandatarios`, `indenizacoes_endpoint`. O ledger HTTP diz o
 que cada uma respondeu, e as respostas pedem remédios diferentes:
 
-| fonte | o que o servidor disse | o que isso significa |
+| fonte | o que o servidor disse (ledger da rodada 10, 05/09/2026) | o que isso significa |
 |---|---|---|
-| QuadrosPessoas, Conselheiros | 200 com lista vazia, para os 5 formatos de parâmetro | o endpoint existe e ignora o que mandamos — falta um parâmetro que não conhecemos |
-| Licitacoes | 400 para um formato, 200-vazio para outro | idem: formato errado |
-| 7 caminhos de diárias | 403 no mesmo host que serve Empenhos | o WAF barra esses caminhos; provavelmente não existem nesta instalação |
-| Dados Abertos (6 hosts) | 403, timeout, ou **200 sem JSON** em `servicos.creasp.org.br` | um host respondeu; o corpo agora fica em `data/raw/nao-json/` para leitura |
+| QuadrosPessoas, Conselheiros | 200 com lista vazia, sem parâmetro e com os 4 formatos, nos 2 prefixos | o endpoint existe e ignora o que mandamos. A chamada passou a ser **uma** por endpoint (eram 10, 110 s e um 403 de rajada). Veredito: "respondeu vazio nos parâmetros testados" — não "o órgão não publica", porque o contrato da API nunca foi lido |
+| Licitacoes | 200-vazio com `referenciaInicio/Termino` em 2024–2025; 400 em 2026; **404** com `exercicio`, `data*` e `vigencia*` | o formato certo é `referencia*` (404 é rota que não casa, padrão ASP.NET); o 400 de 2026 é o mesmo dos demais endpoints (abaixo) |
+| 7 nomes chutados de diárias | **404 no prefixo documentado**, 403 no antigo | os nomes não existem. A sondagem saiu do caminho padrão: `QUEDA_DIARIAS_ENDPOINTS=NomeA,NomeB` liga-a com os nomes copiados da documentação |
+| Dados Abertos legado (6 hosts `*.creasp.org.br/service-api`) | 403, ConnectionError, 200 com o shell HTML do site, ConnectTimeout 60 s × 4 | nunca devolveu JSON em 10 rodadas e custava ~5 min por rodada; desligado por padrão (`QUEDA_DADOS_ABERTOS_HOST=<host>` religa) |
+| Todos os endpoints anuais, exercício em curso | **400** com `referenciaTermino=12/2026`, nos 2 prefixos | pedíamos mês final no futuro. A janela do exercício em curso agora termina no mês corrente e recua um mês por vez se ainda der 400 (`clients._mes_final`); o corpo de todo 4xx fica em `data/raw/http-4xx/` — é a evidência que a rodada seguinte traz |
+| Contratos/Aditivos/Comparativos 2010, Balanço 2010–2011, Centro de custo 2010–2020 | 400 repetido em rodadas distintas | referência anterior ao início da série de cada módulo. Recusa de exercício encerrado confirmada em 2 rodadas com a mesma pergunta vale 30 dias, não 12 h |
 
 A documentação pública do produto (a mesma API em todos os conselhos) está em
 `https://confea-br.implanta.net.br/transparencia/` — uma página Stoplight com
@@ -149,7 +151,15 @@ Um cuidado ao copiar da aba Rede: em máquina com Kaspersky, o navegador injeta
 um script próprio em toda página (`me.kes.v2.scr.kaspersky-labs.com`), e ele
 aparece na lista como se fosse da página. O contrato da API é o arquivo
 `.json`/`.yaml` cujo host é `implanta.net.br` — filtre por `swagger` ou
-`openapi`.
+`openapi`. Qualquer arquivo assim salvo em `data/raw/swagger/` é lido por
+`sondar` antes de qualquer rede.
+
+`sondar` também deixou de depender de adivinhar a URL do contrato: guarda o
+HTML da página de documentação, baixa os bundles JavaScript dela e lê neles as
+URLs `.json/.yaml` e os caminhos `/api/v1.0/<Nome>` — a lista de endpoints que
+o usuário vê na tela está no JS, não no HTML —, e tenta `config.json` e
+`assets/config.json` (o DevTools mostra um `config.json` ao abrir a página).
+Os três caminhos usuais de swagger no host do Confea deram 404 em 04/09/2026.
 
 Adivinhar formato custa cinco requisições por janela num portal que responde
 403 por rajada. Dois caminhos custam quase nada:
@@ -180,24 +190,35 @@ viram checkpoint **JSON**, que devolve o que a API mandou. Sem isso a etapa não
 tinha checkpoint nenhum — `contratos` re-coletava seus 15 exercícios em toda
 rodada, num `log.debug` que ninguém via.
 
-A sondagem de diárias (endpoints que o swagger define sem publicar caminho) usa
-`rate_limit_retries=0`: ali um 403 é RESPOSTA — "este caminho não serve" —, não
-bloqueio a esperar. Com retry, a segunda recusa virava `RateLimited`, subia até
-`build_staged` e abortava a coleta inteira; as duas últimas etapas
-(`indenizacoes_endpoint`, `pncp_contratos`) nunca chegavam a ser executadas.
+A sondagem de diárias só roda com nomes vindos de `QUEDA_DIARIAS_ENDPOINTS`, e
+usa `rate_limit_retries=0`: ali um 403 é RESPOSTA — "este caminho não serve" —,
+não bloqueio a esperar. Com retry, a segunda recusa virava `RateLimited`, subia
+até `build_staged` e abortava a coleta inteira.
 
-O portal **recusa** algumas janelas com HTTP 400 — na rodada de 04/09/2026 foram
-o exercício 2026 em onze endpoints e 2010–2020 no `DespesasCentroCusto`. Recusa
-não é "o órgão não publica": é pergunta não aceita, e pode ser do nosso formato
-de parâmetro, então ela nunca vira `.vazio`. É anotada por 12h para a rodada
-seguinte não queimar ritmo insistindo, e reaparece depois; a coluna
-`recusados_pelo_portal` de `faltando` diz quais são. Sem isso, `faltando` e a
-coleta nunca convergiam: ~25 requisições por rodada em perguntas que não seriam
-aceitas, num host que responde 403 por rajada.
+O portal **recusa** algumas janelas com HTTP 400. Recusa não é "o órgão não
+publica": é pergunta não aceita, e pode ser do nosso formato de parâmetro, então
+ela nunca vira `.vazio`. O marcador `.recusado` guarda `timestamp|n|assinatura`
+(quantas rodadas recusaram a mesma pergunta e com que nomes de parâmetro): vale
+12 h no exercício em curso; em exercício **encerrado**, recusado em duas rodadas
+distintas com a mesma pergunta, vale 30 dias — e cai sozinho se a pergunta
+mudar. A coluna `recusados_pelo_portal` de `faltando` diz quais são. Medido na
+rodada 10: 87% do tempo (979 s de 1.123 s) foi rede sem uma linha nova — 56
+requisições recusadas com 400, 374 s de esperas por 403, 297 s na sondagem
+legada de Dados Abertos.
+
+Ritmo: depois do primeiro 403 de um host na execução, o intervalo mínimo entre
+requisições a ele passa de 2,5 s para 6 s, e a primeira espera de rate-limit é
+de 45 s (a de 20 s nunca bastou em 6 de 6 bloqueios medidos).
 
 Para forçar recoleta de um período, `python main.py limpar --etapa licitacoes,atas`
 apaga os marcadores de janela vazia dessas etapas (`--tudo` apaga também os
-checkpoints com dado). Rodar **sem** `--retomar` não serve para isso: `--retomar`
+checkpoints com dado; `--staged` apaga o CSV staged da etapa, para quando ele é
+de uma versão anterior do código). Um staged sem as colunas que a versão atual
+exige (`COLUNAS_OBRIGATORIAS` em `pipeline.py`: `_ano` no benchmark,
+`tipoContrato_nome` no PNCP, `alcance` nas sanções) é refeito sozinho na
+retomada; o do PNCP também apaga seus checkpoints, que guardam a projeção antiga
+— a recoleta sai do cache HTTP em `data/raw/pncp.gov.br/`, sem rede. Rodar
+**sem** `--retomar` não serve para isso: `--retomar`
 só governa o pulo de etapa, e a leitura do checkpoint por janela é
 incondicional — só `QUEDA_CHECKPOINT=0` a desliga.
 
@@ -401,22 +422,49 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     pagamentos que apontam para ele. Reprovado na conferência, o casamento é
     descartado e o caso vira diagnóstico (`empenhos-chave-nao-casa`), nunca
     acusação. `_regressao_chave_empenho`, no selftest, tranca as duas.
-19. **Contratações no PNCP e modalidade de origem** — o portal do conselho não
-    publica o rol de licitações nem o certame de cada contrato. O PNCP publica
-    as contratações que a Lei 14.133 obriga (desde 30/12/2023), e liga cada
-    contrato à compra de origem pelo `numeroControlePNCPCompra`. Daí sai a
-    pergunta que "100% sem licitação vinculada" deixava aberta: **pregão,
-    dispensa ou inexigibilidade?** Contratação direta é legal quando cabe numa
-    hipótese dos arts. 74–75; a coluna `amparo_legal` traz a declarada. Só as
-    modalidades típicas de um conselho são varridas (pregão, concorrência,
-    dispensa, inexigibilidade, credenciamento), por mês e com checkpoint.
-20. **Fornecedores sancionados (CEIS/CNEP, CGU)** — pagamento com data dentro
-    de uma sanção. Duas listas, porque a lei separa: **inidoneidade e
-    proibição de contratar valem para toda a administração** (achado alto);
-    **impedimento e suspensão valem só para o ente que os aplicou** — pagar a
-    empresa impedida por um município não é irregularidade do Crea-SP, e sai
-    como contexto. O que o cruzamento não prova: que o contrato foi firmado
-    durante a sanção — a data de assinatura decide.
+19. **Contratações no PNCP e modalidade de origem** — o rol de licitações não
+    veio do portal do conselho, e seus contratos não informam certame. O PNCP
+    publica as contratações sob a Lei 14.133 (obrigatórias desde 30/12/2023;
+    as de 2023 por adesão antecipada, art. 191), e liga cada contrato à compra
+    de origem pelo `numeroControlePNCPCompra`. **O DTO real grafa
+    `numeroControlePncpCompra`** (lido do cache bruto em 05/09/2026): a leitura
+    esperava outra caixa, e 145 contratos ficaram seis rodadas com a coluna
+    vazia — os dois achados que dependem dela nunca dispararam. A projeção
+    agora lê as chaves sem distinguir caixa e avisa quando uma janela inteira
+    vem sem compra de origem. Daí sai a pergunta que "100% sem licitação
+    vinculada" deixava aberta: **pregão, dispensa ou inexigibilidade?** Só as
+    modalidades típicas de um conselho são varridas, por mês e com checkpoint.
+    O cruzamento portal × PNCP é **contrato a contrato** (CNPJ + ano e número,
+    ou valor), e cada dúvida vira rótulo em vez de acusação: atas de registro de
+    preços vão para achado próprio (o PNCP as publica em `/v1/atas`, coletado
+    pela etapa `pncp_atas`, parâmetro do órgão a confirmar); filial/matriz do
+    mesmo CNPJ-raiz é "provável correspondente"; contrato de 2024 cujo CNPJ tem
+    ata ou contrato de 2021–2023 no portal pode decorrer de certame anterior a
+    30/12/2023, regido pela Lei 8.666 durante toda a vigência (art. 191,
+    parágrafo único) — "conferir regime no edital". Na rodada 10 isso separou
+    R$ 36,7 mi de "ausentes" em 2 contratos com ata de 2023 do mesmo CNPJ e
+    6 atas que nunca casariam.
+20. **Fornecedores sancionados (CEIS/CNEP/CEPIM, CGU)** — pagamento com data
+    dentro de uma sanção, em três perguntas: **quem a sanção alcança**
+    (`alcance`: inidoneidade e proibição por improbidade valem para toda a
+    administração; impedimento e suspensão valem para o ente que os aplicou —
+    estadual ou municipal não alcança o Crea-SP, autarquia federal; federal
+    alcança em tese; multa e publicação extraordinária do CNEP, Lei
+    12.846/13, não restringem contratar — `nao_impede`), decidido pelo
+    campo FUNDAMENTAÇÃO LEGAL quando a
+    categoria consolidada "Impedimento/proibição de contratar" mistura os dois;
+    **quantos pagamentos de fato** (sanções deduplicadas antes do cruzamento e
+    pagamentos contados pelo próprio índice — a rodada 10 contou 22 pagamentos
+    duas vezes porque a empresa tinha dois registros no CEIS); e **quando foi a
+    contratação** (contratos do portal e do PNCP por CNPJ: só instrumento
+    firmado DEPOIS do início da sanção sustenta gravidade alta; contrato
+    anterior é execução de obrigação assumida, efeitos ex nunc; sem instrumento
+    localizado é "a conferir"). A rodada 10 publicou como alto R$ 239 mil dos
+    quais R$ 199 mil eram impedimento **estadual** — e a coluna "órgão
+    sancionador" trazia o nome da empresa, porque o resolvedor de colunas casava
+    "NOME INFORMADO PELO ÓRGÃO SANCIONADOR" antes de "ÓRGÃO SANCIONADOR". O
+    CEPIM (entidades sem fins lucrativos impedidas) entra como foto do dia:
+    "consta no cadastro", nunca "pagamento durante impedimento".
 21. **Comparação entre Creas** (opt-in, `--comparar-creas`) — a mesma API
     serve os 27 conselhos e o Confea. Despesa por profissional ativo e parcela
     em diárias/jetons/indenizações, pelo mesmo endpoint e pela mesma taxonomia,
@@ -427,10 +475,15 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
 22. **Diagnóstico da coleta** — a ferramenta auditando a si mesma: o que veio,
     o que faltou, que exercícios ficaram fora, **qual análise está desligada
     por falta de qual fonte** e, lido do registro de status HTTP, **por que**
-    cada fonte vazia veio vazia — separando "o órgão não publica" (achado de
-    transparência, Lei 12.527/2011, art. 8º) de "não conseguimos coletar"
-    (limitação nossa). Poucos achados numa frente cuja fonte veio vazia não é
-    sinal de regularidade.
+    cada fonte vazia veio vazia — separando "endpoint respondeu 200 com lista
+    vazia nos parâmetros testados" (o sinal mais forte de não publicação, mas
+    não prova sem o contrato da API) de "não conseguimos coletar" (limitação
+    nossa) e de "endpoint não identificado". Um 403 de rajada superado por um
+    200 na retentativa não conta como bloqueio. Falha de uma frente da própria
+    ferramenta recebe gravidade **erro**, aparece em bloco próprio no relatório
+    e não entra na contagem de achados altos sobre o conselho. Todo achado leva
+    um rodapé "Fonte: … · exercícios … · coleta …". Poucos achados numa frente
+    cuja fonte veio vazia não é sinal de regularidade.
 
 Thresholds (teto de diária, limites de dispensa por ano, jetons por mês,
 janelas, anos eleitorais) são parâmetros em `src/queda/config.py`.

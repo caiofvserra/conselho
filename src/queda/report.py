@@ -84,6 +84,38 @@ def comparar_com_anterior(achados: list[Finding]) -> dict:
             "novos": novos, "sumiram": sumiram, "mudaram": mudou}
 
 
+# Datasets staged que cada frente lê, para o rodapé "Fonte:" de achados que
+# não declararam `fontes`. Não é enfeite: todo número publicado leva ano e
+# fonte, e a rodada 10 saiu sem uma linha de fonte sequer.
+FONTES_POR_FRENTE: dict[str, list[str]] = {
+    "Para onde vai o dinheiro": ["comparativo_despesa", "despesas_centro_custo", "pagamentos"],
+    "Superintendências e fiscalização": ["despesas_centro_custo", "pagamentos"],
+    "Receita e cobertura": ["comparativo_receita", "balanco_orcamentario"],
+    "Orçamento": ["comparativo_despesa", "comparativo_receita", "despesas_centro_custo"],
+    "Plano de contas oficial": ["plano_contas", "comparativo_despesa"],
+    "Opacidade e transparência": ["pagamentos", "empenhos", "demonstrativo"],
+    "Diárias e verbas a pessoas": ["pagamentos", "despesas_centro_custo"],
+    "Custo real por categoria": ["comparativo_despesa", "pagamentos"],
+    "Sazonalidade mensal da despesa": ["pagamentos", "despesas_centro_custo"],
+    "Representação e interesses": ["pagamentos", "convenios", "mandatarios"],
+    "Casos concentrados": ["pagamentos", "contratos", "aditivos"],
+    "Empenhos e pagamentos": ["empenhos", "pagamentos"],
+    "Contratos e licitações": ["contratos", "aditivos", "pagamentos", "pncp_contratos",
+                               "licitacoes_pncp"],
+    "Rede de influência": ["pagamentos", "convenios", "fichas_cnpj"],
+    "Deliberações dos colegiados": ["atas"],
+    "Forense estatística": ["pagamentos"],
+    "Fornecedores": ["pagamentos", "fichas_cnpj", "sancoes"],
+    "Comparação entre Creas": ["benchmark_creas"],
+    "Diagnóstico da coleta": ["_coleta_diagnostico", "_coleta_http"],
+}
+FONTE_URL: dict[str, str] = {
+    "pncp_contratos": "pncp.gov.br", "licitacoes_pncp": "pncp.gov.br", "pncp_atas": "pncp.gov.br",
+    "sancoes": "CEIS/CNEP (CGU)", "fichas_cnpj": "Receita Federal (ficha CNPJ)",
+    "benchmark_creas": "crea-XX.implanta.net.br",
+}
+
+
 def gerar(achados: list[Finding], staged: dict, *, resumo_llm: str = "") -> None:
     """Grava a rodada numa pasta própria e atualiza os atalhos da raiz.
 
@@ -124,7 +156,10 @@ def gerar(achados: list[Finding], staged: dict, *, resumo_llm: str = "") -> None
         "rodada": config.RUN_ID,
         "staged": resumo_staged,
         "findings": payload_findings,
-        "frentes": sorted({f.frente for f in achados}),
+        "frentes": sorted({f.frente for f in achados if f.gravidade != "erro"}
+                          | {f.frente for f in achados if f.gravidade == "erro"}),
+        "fontes_por_frente": FONTES_POR_FRENTE,
+        "fontes_url": FONTE_URL,
         "resumo_llm": resumo_llm,
         "comparacao": comparacao,
     }
@@ -160,9 +195,9 @@ def _escrever_indice() -> None:
     for p in _rodadas_anteriores():
         try:
             d = json.loads((p / "achados.json").read_text())
-            n = len(d.get("findings", []))
-            altas = sum(1 for f in d.get("findings", [])
-                        if f.get("gravidade") == "alta")
+            fs = [f for f in d.get("findings", []) if f.get("gravidade") != "erro"]
+            n = len(fs)
+            altas = sum(1 for f in fs if f.get("gravidade") == "alta")
         except (ValueError, OSError):
             n = altas = 0
         linhas.append(
@@ -185,7 +220,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <title>QUEDA — Fiscalização Crea-SP</title>
 <style>
 :root{--bg:#0f1419;--panel:#1a2129;--line:#2a333d;--txt:#e6e6e6;--mut:#8b98a5;
---alta:#e5484d;--media:#f5a524;--baixa:#4d9de0;--info:#6b7785;--acc:#38b26f}
+--alta:#e5484d;--media:#f5a524;--baixa:#4d9de0;--info:#6b7785;--erro:#9b8afb;--acc:#38b26f}
+.fonte{color:var(--mut);font-size:11.5px;margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}
 *{box-sizing:border-box;margin:0}
 body{background:var(--bg);color:var(--txt);font:15px/1.55 system-ui,Segoe UI,Roboto,sans-serif}
 header{padding:22px 32px;border-bottom:1px solid var(--line)}
@@ -282,7 +318,23 @@ function card(f,idx){
   </div>`:''}
  ${f.tabela_anual&&f.tabela_anual.length?`<details><summary>tabela ano a ano</summary>${tbl(f.tabela_anual)}</details>`:''}
  ${f.amostra.length?`<details><summary>evidência (${f.linhas_evidencia} linhas${f.csv?` — <a href="${f.csv}">CSV completo</a>`:''})</summary>${tbl(f.amostra)}</details>`:''}
+ <div class="fonte">${fonteDe(f)}</div>
  </div>`}
+function periodoDe(f){
+ if(f.serie&&f.serie.anos&&f.serie.anos.length){const a=f.serie.anos;return a[0]===a[a.length-1]?String(a[0]):a[0]+'–'+a[a.length-1];}
+ const m=f.metricas||{};
+ if(typeof m.anos==='string'&&m.anos)return m.anos;
+ if(m.periodo)return String(m.periodo);
+ const t=(f.titulo||'').match(/\b(20\d\d)(?:\s*[–-]\s*(20\d\d))?\b/);
+ if(t)return t[2]?t[1]+'–'+t[2]:t[1];
+ return 'exercícios conforme a série';
+}
+function fonteDe(f){
+ const ds=(f.fontes&&f.fontes.length)?f.fontes:((P.fontes_por_frente||{})[f.frente]||[]);
+ const nomes=ds.map(d=>{const u=(P.fontes_url||{})[d];return u?`${d} (${u})`:d;});
+ const origem=nomes.length?nomes.join(', '):'portal da transparência do Crea-SP (crea-sp.implanta.net.br)';
+ return `Fonte: ${esc(origem)} · exercícios ${esc(periodoDe(f))} · coleta ${esc(P.rodada)}`;
+}
 function drawSerie(f,idx){
  if(!f.serie)return; const cid='ch_'+f.id.replace(/[^a-z0-9]/g,'')+'_'+idx;
  const el=document.getElementById(cid); if(!el)return;
@@ -312,6 +364,10 @@ function show(tab,btn){
   <div class="aviso">Ferramenta de <b>triagem</b> sobre dados públicos. Todo achado é <b>indício</b>, não prova:
   homonímia, falha de cadastro e limitação das APIs geram falsos positivos. Confirme cada caso na fonte
   antes de qualquer denúncia. Coleta anônima, sem autenticação.</div>`;
+  const falhas=P.findings.filter(f=>f.gravidade==='erro');
+  if(falhas.length) html+=`<div class="resumo" style="border-left:4px solid var(--erro)"><h3>Falhas da ferramenta nesta rodada (${falhas.length})</h3>
+   <p>Frentes que levantaram exceção e não produziram achados. Não são achados sobre o conselho e não entram na contagem acima; o que elas mediriam está ausente deste relatório.</p>
+   <ul>${falhas.map(f=>`<li><b>${esc(f.titulo)}</b><br><span style="color:var(--mut)">${esc((f.descricao||'').slice(0,300))}</span></li>`).join('')}</ul></div>`;
   if(P.resumo_llm) html+=`<div class="resumo"><h3>Resumo executivo</h3>${
     P.resumo_llm.split(/\n\n+/).map(p=>`<p>${esc(p)}</p>`).join('')}</div>`;
   const C=P.comparacao;

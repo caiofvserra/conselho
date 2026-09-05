@@ -65,6 +65,11 @@ def _parse_args():
     p.add_argument("--tudo", action="store_true",
                    help="limpar: apagar também os checkpoints COM dado, não só "
                         "os marcadores de janela vazia")
+    p.add_argument("--staged", action="store_true",
+                   help="limpar: apagar também data/staged/<etapa>.csv. Use quando "
+                        "o CSV staged é de uma versão anterior do código e a "
+                        "retomada insiste em reaproveitá-lo (a rodada refaz a "
+                        "etapa a partir dos checkpoints e do cache HTTP)")
     p.add_argument("--desde", default="auto",
                    help="ano inicial, ou 'auto' para sondar retroativamente (padrão)")
     p.add_argument("--ate", type=int, default=config.ANO_ATUAL)
@@ -259,6 +264,13 @@ def main():
             total += len(alvos)
             print(f"{etapa}: {len(alvos)} checkpoint(s) apagado(s) "
                   f"({'todos' if args.tudo else 'vazios e recusados; o dado ficou'})")
+            if args.staged:
+                staged_csv = config.STAGED_DIR / f"{etapa}.csv"
+                if staged_csv.exists():
+                    staged_csv.unlink()
+                    total += 1
+                    print(f"{etapa}: staged/{etapa}.csv apagado — a próxima rodada "
+                          "refaz a etapa a partir dos checkpoints e do cache HTTP")
         print(f"\n{total} arquivo(s) removido(s). A próxima rodada vai à rede "
               "por essas janelas.")
         return 0
@@ -339,9 +351,20 @@ def main():
 
     report.gerar(achados, staged, resumo_llm=resumo_llm)
     altas = [f for f in achados if f.gravidade == "alta"]
-    print(f"\n{len(achados)} achados ({len(altas)} de gravidade alta)")
+    erros = [f for f in achados if f.gravidade == "erro"]
+    sobre_o_conselho = len(achados) - len(erros)
+    print(f"\n{sobre_o_conselho} achados ({len(altas)} de gravidade alta)"
+          + (f" — e {len(erros)} falha(s) da ferramenta" if erros else ""))
+    for f in erros:
+        print(f"  [ERRO DA FERRAMENTA] {f.titulo}")
     for f in altas:
         print(f"  [ALTA] {f.titulo}")
+    pasta_4xx = config.RAW_DIR / "http-4xx"
+    if pasta_4xx.is_dir():
+        n_4xx = sum(1 for _ in pasta_4xx.glob("*.txt"))
+        if n_4xx:
+            print(f"\nCorpos de respostas 4xx guardados em {pasta_4xx} ({n_4xx} arquivo(s)) "
+                  "— é o que diz por que o portal recusou cada janela.")
     print(f"\nRelatório: {config.OUTPUT_DIR / 'report.html'}")
     if coleta_incompleta:
         # Relatório entregue, coleta pela metade: o código de saída diz a
