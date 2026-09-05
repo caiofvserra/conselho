@@ -686,8 +686,8 @@ def run(staged) -> list[Finding]:
                 "Um plano de contas contém, por desenho, uma conta para cada "
                 "situação prevista — inclusive as que nunca ocorrem. "
                 "**Publicar esse percentual como achado seria ruído.**\n\n"
-                f"O que resta útil está nos outros achados desta frente: a "
-                f"despesa relida pelos nós do plano oficial e as famílias que a "
+                "O que resta útil está nos outros achados desta frente: a "
+                "despesa relida pelos nós do plano oficial e as famílias que a "
                 "nossa taxonomia não classifica."),
             metricas={"contas_analiticas_no_universo": int(len(folhas)),
                       "com_movimento": int(len(com_mov)),

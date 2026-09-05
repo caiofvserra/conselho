@@ -14,7 +14,8 @@ rede de influência entre órgãos do sistema Confea/Crea e fornecedores suspeit
 | Fonte | Uso |
 |---|---|
 | Portal Transparência (Implanta) `crea-sp.implanta.net.br` | empenhos, pagamentos, contratos, aditivos, licitações, convênios, quadro, conselheiros, comparativo de despesa |
-| Dados Abertos Crea-SP (`/service-api`, host descoberto em runtime) | indenizações, quadro de colaboradores, mandatários |
+| TCU `dados-abertos.apps.tcu.gov.br` | inidôneos e condenados, acórdãos que citam o conselho e seus fornecedores |
+| CGU (Portal da Transparência) | CEIS, CNEP e CEPIM — sanções administrativas |
 | PNCP `pncp.gov.br` | contratos/atas/NF-e do Crea-SP e de órgãos relacionados (Confea, Mútua, outros CREAs) |
 | BrasilAPI / minhareceita | ficha cadastral (CNPJ) dos fornecedores relevantes |
 
@@ -139,9 +140,9 @@ que cada uma respondeu, e as respostas pedem remédios diferentes:
 | QuadrosPessoas, Conselheiros | 200 com lista vazia, sem parâmetro e com os 4 formatos, nos 2 prefixos | o endpoint existe e ignora o que mandamos. A chamada passou a ser **uma** por endpoint (eram 10, 110 s e um 403 de rajada). Veredito: "respondeu vazio nos parâmetros testados" — não "o órgão não publica", porque o contrato da API nunca foi lido |
 | Licitacoes | 200-vazio com `referenciaInicio/Termino` em 2024–2025; 400 em 2026; **404** com `exercicio`, `data*` e `vigencia*` | o formato certo é `referencia*` (404 é rota que não casa, padrão ASP.NET); o 400 de 2026 é o mesmo dos demais endpoints (abaixo) |
 | 7 nomes chutados de diárias | **404 no prefixo documentado**, 403 no antigo | os nomes não existem. A sondagem saiu do caminho padrão: `QUEDA_DIARIAS_ENDPOINTS=NomeA,NomeB` liga-a com os nomes copiados da documentação |
-| Dados Abertos legado (6 hosts `*.creasp.org.br/service-api`) | 403, ConnectionError, 200 com o shell HTML do site, ConnectTimeout 60 s × 4 | nunca devolveu JSON em 10 rodadas e custava ~5 min por rodada; desligado por padrão (`QUEDA_DADOS_ABERTOS_HOST=<host>` religa) |
+| Dados Abertos legado (6 hosts `*.creasp.org.br/service-api`) | 403, ConnectionError, 200 com o shell HTML do site, ConnectTimeout 60 s × 4 | nunca devolveu JSON em 13 rodadas. **Removido do código** na rodada 17: se um host for descoberto algum dia, volta como fonte normal — é uma chamada e uma projeção |
 | Todos os endpoints anuais, exercício em curso | **400** com `referenciaTermino=12/2026`, nos 2 prefixos | pedíamos mês final no futuro. A janela do exercício em curso agora termina no mês corrente e recua um mês por vez se ainda der 400 (`clients._mes_final`); o corpo de todo 4xx fica em `data/raw/http-4xx/` — é a evidência que a rodada seguinte traz |
-| Contratos/Aditivos/Comparativos 2010, Balanço 2010–2011, Centro de custo 2010–2020 | 400 repetido em rodadas distintas | referência anterior ao início da série de cada módulo. Recusa de exercício encerrado confirmada em 2 rodadas com a mesma pergunta vale 30 dias, não 12 h |
+| Contratos/Aditivos/Comparativos 2010, Balanço 2010–2011, Centro de custo 2010–2020 | 400 com **"O período de referência informado está fora do período de liberação configurado."** | não é o nosso parâmetro: o portal tem uma janela de liberação por endpoint (rodada 13). Vira o achado `diagnostico-periodo-de-liberacao`; a recusa de exercício encerrado confirmada em 2 rodadas com a mesma pergunta vale 30 dias, não 12 h |
 
 A documentação pública do produto (a mesma API em todos os conselhos) está em
 `https://confea-br.implanta.net.br/transparencia/` — uma página Stoplight com
@@ -234,8 +235,8 @@ corrente (rodada 11: nenhum endpoint
 anual foi à rede por 2026 por causa disso). A coluna `recusados_pelo_portal`
 de `faltando` diz quais são. Medido na
 rodada 10: 87% do tempo (979 s de 1.123 s) foi rede sem uma linha nova — 56
-requisições recusadas com 400, 374 s de esperas por 403, 297 s na sondagem
-legada de Dados Abertos.
+requisições recusadas com 400 e 374 s de esperas por 403. A sondagem legada de
+Dados Abertos, que custava mais 297 s, saiu do código na rodada 17.
 
 Ritmo: depois do primeiro 403 de um host na execução, o intervalo mínimo entre
 requisições a ele passa de 2,5 s para 6 s, e a primeira espera de rate-limit é

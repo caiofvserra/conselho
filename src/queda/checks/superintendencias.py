@@ -29,7 +29,7 @@ import pandas as pd
 from .. import analytics as A
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl, norm_nome
+from ..utils import coluna, fmt_brl
 from .common import df
 
 FRENTE = "Superintendências e fiscalização"

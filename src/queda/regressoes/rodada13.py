@@ -17,13 +17,13 @@ Tudo offline: rede substituída por funções locais, disco em pasta temporária
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
 
 from .. import clients, config, pipeline
 from ..checks import contratos as C
-from .rodada12 import _ambiente, _diagnostico_limpo, _erro, _trocar
+from .rodada12 import _ambiente, _erro, _trocar
 
 
 def _janela_de_trinta_dias(erros: list[str]) -> None:
@@ -40,8 +40,11 @@ def _janela_de_trinta_dias(erros: list[str]) -> None:
                               "numeroControlePNCP": "x-2-000007/2023"}}],
                 "paginasRestantes": 0}
 
+    # exatamente como `stage_pncp` percorre: uma janela por mês do PNCP
     with _trocar(clients, get_json=_get_json):
-        rows = clients.pncp_instrumentos_cobranca("60985017000177", 2024, 2024)
+        rows = [r for ini, fim in clients.pncp_meses(2024, 2024)
+                for r in (clients.pncp_instrumentos_cobranca_mes(
+                    "60985017000177", ini, fim) or [])]
     _erro(erros, len(rows) == 12,
           f"cobranças: 12 meses de 2024 deveriam dar 12 janelas, deram {len(rows)}")
     for p in pedidos:
@@ -116,7 +119,7 @@ def _veredito_404(erros: list[str]) -> None:
     aqui, direto sobre a regra."""
     from ..checks import diagnostico as D
     ledger = pd.DataFrame([
-        {"caminho": "/api/dadosabertos/indenizacoes", "status": 404,
+        {"caminho": "/api/v1.0/EndpointQueNaoExiste", "status": 404,
          "resultado": "inexistente", "itens": 0, "params": "", "ts": "2026-09-05T09:00:00"}
         for _ in range(2)])
     causa = D._causa(ledger, retomado=False)

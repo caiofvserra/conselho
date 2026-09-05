@@ -1074,26 +1074,20 @@ def _primeira_coluna(df: pd.DataFrame, *nomes: str) -> pd.Series:
 
 
 def stage_quadro_pessoal(ate=None):
-    """Quadro de pessoal: Dados Abertos e, se falhar, Implanta QuadrosPessoas.
-
-    O Implanta responde mesmo quando o host de Dados Abertos está barrado — é
-    o caminho que mantém viva a frente de pessoal.
-    """
+    """Quadro de pessoal, pelo endpoint QuadrosPessoas do portal."""
     manual = manual_rows("quadro_pessoal")
     if manual is not None:
         df = pd.DataFrame(manual)
         _marcar_manual("quadro_pessoal", len(df))
     else:
-        df = pd.DataFrame(clients.dados_abertos("quadro-colaboradores"))
-        if df.empty:
-            # A documentação de "Quadros de Pessoas" não declara parâmetro de
-            # consulta, e o endpoint pode morar sob outro prefixo — as duas
-            # coisas ficam com `implanta_primeiro_nome`/`implanta`.
-            linhas, nome = clients.implanta_primeiro_nome(
-                config.ENDPOINT_CANDIDATOS["quadro_pessoal"], ate)
-            if nome:
-                log.info("quadro_pessoal: veio de %s", nome)
-            df = pd.DataFrame(linhas or [])
+        # A documentação de "Quadros de Pessoas" não declara parâmetro de
+        # consulta, e o endpoint pode morar sob outro prefixo — as duas coisas
+        # ficam com `implanta_primeiro_nome`/`implanta`.
+        linhas, nome = clients.implanta_primeiro_nome(
+            config.ENDPOINT_CANDIDATOS["quadro_pessoal"], ate)
+        if nome:
+            log.info("quadro_pessoal: veio de %s", nome)
+        df = pd.DataFrame(linhas or [])
     if not df.empty:
         df["nome"] = _primeira_coluna(df, "nome", "NOME", "NOME_PESSOA")
         df["vinculo"] = _primeira_coluna(df, "vinculo", "VINCULO", "TIPO_VINCULO",
@@ -1122,15 +1116,13 @@ def stage_mandatarios(ate=None):
         df = pd.DataFrame(manual)
         _marcar_manual("mandatarios", len(df))
     else:
-        df = pd.DataFrame(clients.dados_abertos("mandatarios"))
-        if df.empty:
-            # "Rol de Mandatários" é endpoint próprio na documentação;
-            # `Conselheiros` (o que chamávamos) existe e responde vazio.
-            linhas, nome = clients.implanta_primeiro_nome(
-                config.ENDPOINT_CANDIDATOS["mandatarios"], ate)
-            if nome:
-                log.info("mandatarios: veio de %s", nome)
-            df = pd.DataFrame(linhas or [])
+        # "Rol de Mandatários" é endpoint próprio na documentação;
+        # `Conselheiros` (o que chamávamos) existe e responde vazio.
+        linhas, nome = clients.implanta_primeiro_nome(
+            config.ENDPOINT_CANDIDATOS["mandatarios"], ate)
+        if nome:
+            log.info("mandatarios: veio de %s", nome)
+        df = pd.DataFrame(linhas or [])
     if not df.empty:
         df["nome"] = _primeira_coluna(df, "nomeMandatario", "NOME_MANDATARIO",
                                       "NOME_CONSELHEIRO", "NOME")
@@ -1185,19 +1177,14 @@ def stage_indenizacoes(desde, ate):
             df["FAVORECIDO_NORM"] = coluna(df,
                                            "nomeFavorecidoPagamento").map(norm_nome)
         return _salvar("indenizacoes_endpoint", df)
-    frames = []
-    for ano in range((desde or 2015), ate + 1):
-        for r in clients.dados_abertos("indenizacoes", {"exercicio": str(ano)}):
-            r["_ano"] = ano
-            frames.append(r)
-    probe = {}
+    # Sem nome de endpoint confirmado, `implanta_probe_diarias` devolve {} SEM
+    # rede: a fonte fica vazia e o diagnóstico diz "endpoint não identificado".
+    # É o registro de uma lacuna real, não uma falha da coleta.
+    probe: dict[str, list[dict]] = {}
     for ano in range((desde or 2015), ate + 1):
         for ep, rows in clients.implanta_probe_diarias(ano).items():
             probe.setdefault(ep, []).extend({**r, "_ano": ano} for r in rows)
-    df = pd.DataFrame(frames)
-    if not df.empty:
-        df["valor"] = coluna(df, "valorBrutoPagamento", 0).map(parse_valor)
-        df["FAVORECIDO_NORM"] = coluna(df, "nomeFavorecidoPagamento").map(norm_nome)
+    df = pd.DataFrame()
     _salvar("indenizacoes_endpoint", df)
     for ep, rows in probe.items():
         _salvar(f"implanta_probe_{ep.lower()}", pd.DataFrame(rows))
@@ -1687,8 +1674,6 @@ def stage_sancoes(ate=None):
     if not df.empty:
         df["inicio"] = parse_data(df["inicio"])
         df["fim"] = parse_data(df["fim"])
-        df["efeito_nacional"] = [clients.efeito_nacional(c, f)
-                                 for c, f in zip(df["categoria"], df["fundamento"])]
         # Alcance por fundamento legal e esfera (nacional / federal / ente /
         # indeterminado): é o que separa "vale contra o Crea-SP" de contexto.
         # A rodada 10 publicou como efeito nacional um impedimento ESTADUAL de

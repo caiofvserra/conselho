@@ -24,7 +24,7 @@ from .. import clients, config
 from ..checks import common as CM
 from ..checks import fornecedores as F
 from ..http import RateLimited
-from .rodada12 import _ambiente, _erro, _trocar
+from .rodada12 import _erro, _trocar
 
 _ORDS = {"items": [{"cpf_cnpj": "12345678000199", "nome": "EMPRESA INIDONEA LTDA",
                     "data_transito_julgado": "2022-01-10", "data_final": "2027-01-10",

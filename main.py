@@ -120,8 +120,6 @@ def _sondar(pipeline) -> int:
         print("Nenhum caminho de swagger respondeu. Tentados:")
         for u in config.SWAGGER_CANDIDATOS_IMPLANTA:
             print("  ", u)
-        for base in config.DADOS_ABERTOS_CANDIDATES:
-            print("  ", base + "/swagger/...")
         print("\nA documentação pública da API está em "
               "https://confea-br.implanta.net.br/transparencia/ (Stoplight). Nela: "
               "clique em 'Busca as informações dos Quadros de Pessoas', copie a "

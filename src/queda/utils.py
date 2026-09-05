@@ -152,10 +152,6 @@ def classificar_pessoa(cpf_cnpj, nome=None) -> str:
     return "INDEFINIDO"
 
 
-def eh_pf(cpf_cnpj, nome=None) -> bool:
-    return classificar_pessoa(cpf_cnpj, nome) == "PF"
-
-
 def eh_pj(cpf_cnpj, nome=None) -> bool:
     """Só devolve True com evidência positiva de pessoa jurídica."""
     return classificar_pessoa(cpf_cnpj, nome) == "PJ"

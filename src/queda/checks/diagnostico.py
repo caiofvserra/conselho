@@ -98,14 +98,12 @@ ENDPOINTS: dict[str, tuple[str, ...]] = {
     "processos_itens": _implanta("ProcessosComprasServicos"),
     "processos_compras": _implanta("ProcessosComprasServicos"),
     "atas": _implanta("AtasColegiados"),
-    # dois caminhos por dataset: o portal Implanta e o serviço de Dados
-    # Abertos. O vazio só é do órgão se OS DOIS responderem vazio.
-    "quadro_pessoal": _implanta("QuadrosPessoas") + (
-        "/api/dadosabertos/quadro-colaboradores",),
-    "mandatarios": _implanta("Conselheiros") + ("/api/dadosabertos/mandatarios",),
-    # os nomes Implanta de diárias entram em `_endpoints()`, lidos do
-    # ambiente na chamada (a sessão do Colab define-os depois do import)
-    "indenizacoes_endpoint": ("/api/dadosabertos/indenizacoes",),
+    "quadro_pessoal": _implanta("QuadrosPessoas"),
+    "mandatarios": _implanta("Conselheiros"),
+    # sem caminho fixo: os nomes Implanta de diárias entram em `_endpoints()`,
+    # lidos de QUEDA_DIARIAS_ENDPOINTS na chamada (a sessão do Colab pode
+    # defini-los depois do import). Sem nome definido, a fonte fica sem veredito.
+    "indenizacoes_endpoint": (),
     "pncp_contratos": ("/api/consulta/v1/contratos",),
     "pncp_atas": ("/api/consulta/v1/atas",),
     "pncp_cobrancas": ("/api/consulta/v1/instrumentoscobranca/inclusao",),
@@ -285,10 +283,9 @@ def _sem_superados(sub: pd.DataFrame) -> pd.DataFrame:
 
 
 # dataset → pasta de checkpoint quando os nomes divergem
-_ETAPA_CHECKPOINT = {"comparativo_receita": "comparativo_receita",
-                     "balanco_orcamentario": "balanco_orcamentario",
-                     # a pasta é `benchmark/<host>/<ano>.*` (ver stage_benchmark_creas)
-                     "benchmark_creas": "benchmark"}
+# Só os datasets cuja PASTA de checkpoint tem outro nome (ver os `etapa=` em
+# `pipeline.py`); o resto casa pelo próprio nome.
+_ETAPA_CHECKPOINT = {"benchmark_creas": "benchmark"}
 
 
 def _marcadores_checkpoint(dataset: str) -> dict | None:

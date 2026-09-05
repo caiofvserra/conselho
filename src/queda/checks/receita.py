@@ -254,7 +254,7 @@ def run(staged) -> list[Finding]:
                 "outra receita tem.\n\n"
                 "**Esta reclassificação é uma leitura da ferramenta, e é por "
                 "isso que ela está publicada linha a linha.** Sem ela, a "
-                f"composição da receita atribuía à anuidade apenas as contas "
+                "composição da receita atribuía à anuidade apenas as contas "
                 "que a nomeiam, e o relatório afirmava que 10% da receita vinha "
                 "da anuidade compulsória. Num conselho profissional, onde a "
                 "anuidade é a fonte principal por força de lei (Lei "

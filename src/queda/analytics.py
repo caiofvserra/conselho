@@ -12,7 +12,6 @@ import math
 import numpy as np
 import pandas as pd
 
-from . import config
 from .http import get_json, memo
 
 log = logging.getLogger("queda.analytics")
@@ -150,31 +149,6 @@ def anos_sem_deflator(anos) -> list[int]:
     """Anos para os quais não há IPCA — a série ali é NOMINAL, não real."""
     indice = _ipca_indice_medio()
     return sorted({int(a) for a in anos if int(a) not in indice})
-
-
-def _ipca_anual() -> dict[int, float]:
-    """% anual do IPCA (dez/dez). Mantido para exibição, não para deflação."""
-    def buscar():
-        url = ("https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados"
-               "?formato=json&dataInicial=01/01/2009")
-        data = get_json(url)
-        if not isinstance(data, list) or not data:
-            return None
-        df = pd.DataFrame(data)
-        df["ano"] = df["data"].str[-4:].astype(int)
-        df["v"] = df["valor"].astype(str).str.replace(",", ".").astype(float)
-        # composição das variações mensais dentro de cada ano
-        return {int(a): float((np.prod(1 + g["v"] / 100) - 1) * 100)
-                for a, g in df.groupby("ano")}
-    try:
-        vindo = memo("ipca_anual", buscar)
-    except Exception as e:                          # pragma: no cover
-        log.warning("IPCA: falha ao consultar BCB (%s) — usando fallback", e)
-        vindo = None
-    if not vindo:
-        log.info("IPCA: usando tabela embutida (2013–2024)")
-        return dict(IPCA_FALLBACK)
-    return {int(k): float(v) for k, v in vindo.items()}
 
 
 def fatores_ipca(base_ano: int) -> dict[int, float]:

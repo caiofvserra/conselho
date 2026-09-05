@@ -173,7 +173,6 @@ def diarias_probe() -> list[str]:
     return [n.strip() for n in os.environ.get(env, "").split(",") if n.strip()]
 
 
-DIARIAS_PROBE = diarias_probe()
 _AVISO_DIARIAS: set[str] = set()
 
 
@@ -676,8 +675,8 @@ def descobrir_swagger() -> list[dict]:
     """Descobre o contrato da API: arquivos locais, página de docs, bundles,
     config.json e os caminhos usuais — nessa ordem, e devolve o que achou.
 
-    Itens com "spec": {"fonte": "implanta"|"implanta (local)"|"dados_abertos",
-    "url", "spec"}. Itens sem spec: {"fonte": "bundle", "url", "endpoints"} (a
+    Itens com "spec": {"fonte": "implanta"|"implanta (local)", "url", "spec"}.
+    Itens sem spec: {"fonte": "bundle", "url", "endpoints"} (a
     lista de nomes de endpoint citada no JavaScript da documentação, quando
     tem 5 ou mais) e {"fonte": "config", "url", "config", "chaves"}. Quem
     consome deve olhar a chave "spec" antes de resumir.
@@ -713,18 +712,12 @@ def descobrir_swagger() -> list[dict]:
         achados.extend(_sondar_config_json(url_doc, pasta))
         if any("spec" in a for a in achados):
             return achados
-    # 2) caminhos usuais. Os hosts legados de Dados Abertos só entram se o
-    #    operador informou um (ver `_hosts_dados_abertos`): em 10 rodadas nenhum
-    #    dos seis candidatos respondeu JSON, e cada um custa até 60 s de timeout.
-    candidatos = [("implanta", u) for u in config.SWAGGER_CANDIDATOS_IMPLANTA]
-    for base in _hosts_dados_abertos():
-        for suf in config.SWAGGER_CANDIDATOS_DADOS_ABERTOS_SUFIXOS:
-            candidatos.append(("dados_abertos", base + suf))
-    for fonte, url in candidatos:
+    # 2) caminhos usuais do produto Implanta.
+    for url in config.SWAGGER_CANDIDATOS_IMPLANTA:
         data = _get_json_sondagem(url)
         if _e_spec(data):
             log.info("swagger encontrado: %s (%d caminho(s))", url, len(data["paths"]))
-            achados.append({"fonte": fonte, "url": url, "spec": data})
+            achados.append({"fonte": "implanta", "url": url, "spec": data})
     return achados
 
 
@@ -749,7 +742,7 @@ ENDPOINTS_IMPLANTA_USADOS: dict[str, str] = {
     "QuadrosPessoas": "sem parâmetro (a documentação não declara nenhum); variantes só se responder vazio",
     **{n: "candidato a 'Rol de Mandatários': sem parâmetro, depois variantes"
        for n in config.ENDPOINT_CANDIDATOS["mandatarios"]},
-    **{ep: "sondagem: referenciaInicio/referenciaTermino" for ep in DIARIAS_PROBE},
+    **{ep: "sondagem: referenciaInicio/referenciaTermino" for ep in diarias_probe()},
 }
 
 
@@ -780,81 +773,6 @@ def achatar_plano_contas(rows: list, nivel: int = 0, pai: str = "") -> list[dict
         if filhos:
             out.extend(achatar_plano_contas(filhos, nivel + 1, r.get("Codigo") or ""))
     return out
-
-
-# ================================================================ Dados Abertos
-# O serviço legado `*.creasp.org.br/service-api` NUNCA devolveu JSON em 10
-# rodadas (ledger da rodada 10: transparencia./www. → 403; portaltransparencia./
-# api. → ConnectionError; servicos. → shell Angular em HTML; creasp.org.br →
-# ConnectTimeout de 60 s ×4). A varredura custava ~5 min por rodada e ainda
-# fazia o diagnóstico de mandatarios sair "bloqueio 403". Por isso ela só roda
-# quando o operador informa o host (QUEDA_DADOS_ABERTOS_HOST) ou quando um
-# memo em cache diz que algum já respondeu.
-def _hosts_dados_abertos() -> list[str]:
-    """Bases `https://<host>/service-api` a sondar — só a informada no ambiente."""
-    env = getattr(config, "DADOS_ABERTOS_HOST_ENV", "QUEDA_DADOS_ABERTOS_HOST")
-    host = (os.environ.get(env) or "").strip().rstrip("/")
-    if not host:
-        return []
-    if not host.startswith("http"):
-        host = "https://" + host
-    if not host.endswith("/service-api"):
-        host += "/service-api"
-    return [host]
-
-
-def _discover_dados_abertos(bases: list[str] | None = None) -> str | None:
-    for base in (bases if bases is not None else _hosts_dados_abertos()):
-        # rate_limit_retries=0 e retries=0: sondagem não espera. Um host que
-        # devolve 403 está barrando (WAF), não limitando ritmo; e um host que
-        # não conecta em 60 s não vai conectar na 4ª tentativa — eram 4 × 60 s
-        # de timeout só no creasp.org.br.
-        try:
-            data = get_json(f"{base}/api/DadosAbertos/mandatarios",
-                            use_cache=False, rate_limit_retries=0, retries=0)
-        except RuntimeError:
-            continue
-        if isinstance(data, dict) and data.get("result") is not None:
-            log.info("Dados Abertos: host descoberto em %s", base)
-            return base
-    return None
-
-
-# A descoberta roda UMA vez por execução, inclusive quando FALHA. Sem isto,
-# cada chamada a dados_abertos() refazia a varredura inteira dos candidatos —
-# e stage_indenizacoes chama uma vez por exercício, o que multiplicava a
-# espera por doze.
-_BASE_SONDADA: dict[str, str | None] = {}
-
-
-def dados_abertos_base() -> str | None:
-    """Base do serviço legado de Dados Abertos, ou None SEM rede quando nem o
-    ambiente nem o cache apontam um host (ver `_hosts_dados_abertos`)."""
-    if "base" in _BASE_SONDADA:
-        return _BASE_SONDADA["base"]
-    memo_existe = (config.CACHE_DIR / "dados_abertos_base.json").exists()
-    if _hosts_dados_abertos() or memo_existe:
-        _BASE_SONDADA["base"] = memo("dados_abertos_base", _discover_dados_abertos)
-    else:
-        env = getattr(config, "DADOS_ABERTOS_HOST_ENV", "QUEDA_DADOS_ABERTOS_HOST")
-        log.info("Dados Abertos legado desligado: nenhum host respondeu JSON em "
-                 "10 rodadas; defina %s se souber o host", env)
-        _BASE_SONDADA["base"] = None
-    return _BASE_SONDADA["base"]
-
-
-def dados_abertos(endpoint: str, params: dict | None = None) -> list:
-    base = dados_abertos_base()
-    if not base:
-        return []
-    data = get_json(f"{base}/api/DadosAbertos/{endpoint}", params)
-    if isinstance(data, dict):
-        inner = data.get("data")
-        if isinstance(inner, list):
-            return inner
-        if isinstance(inner, dict):
-            return [inner]
-    return data if isinstance(data, list) else []
 
 
 # ================================================================ PNCP
@@ -974,7 +892,6 @@ def pncp_resolver_orgao(razao_social: str, *, cnpj_fixo=None,
 
     def resolve():
         alvo = _norm(razao_social)
-        distintivos = _tokens_distintivos(alvo)
         # `termo_busca` existe porque a busca do PNCP é por PREFIXO da razão
         # social, e o nome registrado lá nem sempre começa como o nosso: a
         # Mútua devolveu zero resultados para "mutua caixa de assistencia
@@ -1132,29 +1049,6 @@ def pncp_instrumentos_cobranca_mes(cnpj: str, ini: str, fim: str) -> list | None
     if primeira is None:
         return None
     return pncp_paginado("/v1/instrumentoscobranca/inclusao", params)
-
-
-def pncp_instrumentos_cobranca(cnpj: str, ano_ini: int, ano_fim: int) -> list:
-    """Compatibilidade: percorre os meses e devolve tudo o que veio."""
-    out: list = []
-    for ini, fim in _meses(ano_ini, ano_fim):
-        rows = pncp_instrumentos_cobranca_mes(cnpj, ini, fim)
-        if rows:
-            out.extend(rows)
-    return out
-
-
-def pncp_contratacoes(cnpj: str, ano_ini: int, ano_fim: int,
-                      modalidades: range = range(1, 15)) -> list:
-    out = []
-    for ano in range(ano_ini, ano_fim + 1):
-        for mod in modalidades:
-            out.extend(pncp_paginado("/v1/contratacoes/publicacao", {
-                "dataInicial": f"{ano}0101", "dataFinal": f"{ano}1231",
-                "codigoModalidadeContratacao": mod, "cnpj": cnpj,
-                "tamanhoPagina": 50,
-            }))
-    return out
 
 
 def pncp_contratacoes_mes(cnpj: str, ini: str, fim: str, modalidade: int):
@@ -1412,11 +1306,6 @@ def alcance_sancao(categoria: str | None, fundamento: str | None = None,
     if "PROIBI" in cat or "IMPROBIDADE" in cat or "ELEITORAL" in cat:
         return "nacional"
     return "indeterminado"
-
-
-def efeito_nacional(categoria: str | None, fundamento: str | None = None) -> bool:
-    """Compatibilidade: True só quando `alcance_sancao` diz 'nacional'."""
-    return alcance_sancao(categoria, fundamento, None) == "nacional"
 
 
 # ====================================================== outros conselhos

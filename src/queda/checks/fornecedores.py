@@ -1049,11 +1049,6 @@ def _ultimo_pagamento(staged) -> dict[str, pd.Timestamp]:
     return {} if g is None else g.max().to_dict()
 
 
-def _cnpj14(serie: pd.Series) -> pd.Series:
-    """Ver `utils.cnpj14`: tolerante a float e a zero à esquerda perdido."""
-    return cnpj14(serie)
-
-
 def _instrumentos_por_cnpj(staged) -> dict[str, list[tuple[pd.Timestamp, str]]]:
     """Datas de início de contrato/ata por CNPJ, no portal próprio e no PNCP.
 
@@ -1148,7 +1143,7 @@ def _achados_sancoes(staged) -> list[Finding]:
         return []
     from .. import clients
     san = san.copy()
-    san["documento"] = _cnpj14(san["documento"])
+    san["documento"] = cnpj14(san["documento"])
     san = san[san["documento"].str.len() == 14]
     cadastro = coluna(san, "cadastro", "").fillna("").astype(str).str.lower()
     cepim = san[cadastro.eq("cepim")]
@@ -1343,11 +1338,11 @@ def _achados_cepim(cepim: pd.DataFrame, pg: pd.DataFrame, staged) -> list[Findin
     if not conv.empty:
         col_cnpj = next((c for c in conv.columns if "CNPJ" in str(c).upper()), None)
         if col_cnpj:
-            conv_hit = conv[_cnpj14(conv[col_cnpj]).isin(docs)]
+            conv_hit = conv[cnpj14(conv[col_cnpj]).isin(docs)]
     if pagos.empty and conv_hit.empty:
         return []
     valor = float(pd.to_numeric(pagos["VALOR"], errors="coerce").fillna(0).sum()) if not pagos.empty else 0.0
-    ents = set(pagos["cnpj"]) | (set(_cnpj14(conv_hit[col_cnpj])) if not conv_hit.empty else set())
+    ents = set(pagos["cnpj"]) | (set(cnpj14(conv_hit[col_cnpj])) if not conv_hit.empty else set())
     ev = pagos.merge(cepim.drop_duplicates("documento")[
         [c for c in ("documento", "nome", "orgao_sancionador", "categoria") if c in cepim.columns]],
         left_on="cnpj", right_on="documento", how="left") if not pagos.empty else cepim[cepim["documento"].isin(ents)]

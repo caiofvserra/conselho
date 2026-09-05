@@ -59,8 +59,6 @@ IMPLANTA_HOST = "https://crea-sp.implanta.net.br"
 # 404 ou 500 para tudo e derrubava etapas inteiras: saiu.
 IMPLANTA_PREFIXOS = ["/portalTransparencia/api/v1.0",
                      "/transparencia/api/v1.0"]
-IMPLANTA_BASE = IMPLANTA_HOST + IMPLANTA_PREFIXOS[0]
-
 # Nomes de endpoint por dataset, CONFIRMADOS pelo exemplo cURL da documentação
 # do próprio Crea-SP (04/09/2026):
 #   GET https://crea-sp.implanta.net.br/transparencia/api/v1.0/QuadrosPessoas
@@ -87,43 +85,12 @@ DOC_IMPLANTA_CANDIDATOS = [
     "https://confea-br.implanta.net.br/transparencia/api-docs",
 ]
 
-# O swagger do serviço de Dados Abertos publica apenas `servers: /service-api`.
-# O host é descoberto em tempo de execução testando os candidatos abaixo.
-DADOS_ABERTOS_CANDIDATES = [
-    "https://transparencia.creasp.org.br/service-api",
-    "https://portaltransparencia.creasp.org.br/service-api",
-    "https://servicos.creasp.org.br/service-api",
-    "https://api.creasp.org.br/service-api",
-    "https://www.creasp.org.br/service-api",
-    "https://creasp.org.br/service-api",
-]
-# Em dez rodadas (até 05/09/2026) nenhum dos seis candidatos devolveu JSON:
-# 403, timeout de 60 s x4 ou o shell HTML da "Plataforma de Serviços" — ~297 s
-# por rodada sem dado. A sondagem só roda quando o operador fixar o host por
-# esta variável de ambiente (base do serviço, ex.
-# `https://transparencia.creasp.org.br/service-api`); sem ela, a fonte é
-# declarada "endpoint não identificado" sem gastar rede.
-DADOS_ABERTOS_HOST_ENV = "QUEDA_DADOS_ABERTOS_HOST"
-
-
-def dados_abertos_host() -> str | None:
-    """Base do serviço de Dados Abertos fixada pelo operador, ou None."""
-    valor = (os.environ.get(DADOS_ABERTOS_HOST_ENV) or "").strip().rstrip("/")
-    return valor or None
-
-
 # Diárias/indenizações no Implanta: os 7 nomes de endpoint tentados até a
 # rodada 10 (DiariasDeslocamentos etc.) responderam 404 no prefixo documentado
 # e 403 no antigo — os nomes não existem. Sem nome confirmado pela documentação
 # do portal, nenhum é tentado; quem souber o nome real informa aqui, separado
 # por vírgula (ex. `QUEDA_DIARIAS_ENDPOINTS=Diarias,Deslocamentos`).
 DIARIAS_ENDPOINTS_ENV = "QUEDA_DIARIAS_ENDPOINTS"
-
-
-def diarias_endpoints() -> list[str]:
-    """Nomes de endpoint de diárias informados pelo operador (padrão: nenhum)."""
-    bruto = os.environ.get(DIARIAS_ENDPOINTS_ENV) or ""
-    return [n.strip().strip("/") for n in bruto.split(",") if n.strip()]
 
 
 PNCP_CONSULTA = "https://pncp.gov.br/api/consulta"
@@ -289,7 +256,6 @@ CNPJ_APIS = [
 # toda a frente de contratos falar de outro conselho — foi o que aconteceu na
 # primeira rodada, quando a busca por razão social devolveu o Crea-PE.
 ORGAO_ALVO_CNPJ_CANDIDATOS = ["60985017000177", "60986174000114"]
-ORGAO_ALVO_CNPJ = ORGAO_ALVO_CNPJ_CANDIDATOS[0]
 ORGAO_ALVO_RAZAO = "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO ESTADO DE SAO PAULO"
 ORGAO_ALVO_UF = "SP"
 
@@ -315,9 +281,6 @@ ORGAOS_RELACIONADOS = [
     {"razao": "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DE MINAS GERAIS"},
     {"razao": "CONSELHO REGIONAL DE ENGENHARIA E AGRONOMIA DO PARANA"},
 ]
-# Compatibilidade: quem só quer os nomes.
-ORGAOS_RELACIONADOS_RAZAO = [o["razao"] for o in ORGAOS_RELACIONADOS]
-
 # Onde os portais costumam publicar o contrato da API (Swashbuckle/.NET e
 # afins). `main.py sondar` tenta cada um e guarda o que responder. É a
 # alternativa a ADIVINHAR nome de endpoint e de parâmetro: na rodada de
@@ -356,11 +319,6 @@ SWAGGER_CANDIDATOS_IMPLANTA = [
     "https://crea-sp.implanta.net.br/portalTransparencia/swagger/docs/v1.0",
     "https://crea-sp.implanta.net.br/portalTransparencia/swagger/docs/v1",
 ]
-SWAGGER_CANDIDATOS_DADOS_ABERTOS_SUFIXOS = [
-    "/swagger/v1/swagger.json", "/swagger/v1.0/swagger.json",
-    "/swagger/docs/v1", "/swagger.json", "/api-docs",
-]
-
 # ---------------------------------------------------------------- período
 ANO_ATUAL = 2026
 ANO_PISO = 2010          # nunca sondar antes disso
@@ -414,9 +372,6 @@ REGEX_INDENIZACAO = (
     r"di[áa]ria|indeniza|quilometr|\bkm\b|ajuda de custo|jeton|passag|"
     r"desloc|reembols|hospedag|aux[íi]lio repres"
 )
-REGEX_JURIDICO = r"advocat|advog|honor[áa]r|judicial|senten[çc]a|precat[óo]r|per[íi]cia"
-
-TETO_DIARIA_UNITARIA = 900.0     # R$: diária unitária acima disso vira achado
 MAX_DIARIAS_ANO = 100            # nº de diárias/ano por pessoa acima disso vira achado
 
 # Jetons (verba de presença de conselheiro): o teto é normativo do Confea e

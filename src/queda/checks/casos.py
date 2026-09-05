@@ -14,7 +14,7 @@ import pandas as pd
 from .. import analytics as A
 from ..findings import Finding
 from ..utils import coluna, fmt_brl, norm_nome
-from .common import df, fichas_cnpj, fornecedores_mercado
+from .common import df, fichas_cnpj
 
 FRENTE = "Casos concentrados"
 
@@ -128,8 +128,6 @@ def run(staged) -> list[Finding]:
     frames = []
     if not ctr.empty:
         obj = ctr.get("OBJETO", pd.Series("", index=ctr.index)).fillna("").astype(str)
-        nome_c = ctr.get("CONTRATADA_NOME",
-                         ctr.get("CONTRATADA", pd.Series("", index=ctr.index)))
         m = obj.str.contains(RX_OBRA, regex=True, na=False)
         if m.any():
             frames.append(ctr[m])

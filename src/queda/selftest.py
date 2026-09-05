@@ -831,17 +831,16 @@ def _staged() -> dict[str, pd.DataFrame]:
          "categoria": "Declaração de Inidoneidade", "inicio": pd.Timestamp("2024-01-01"),
          "fim": pd.Timestamp("2024-12-31"), "orgao_sancionador": "MINISTERIO X",
          "esfera": "FEDERAL", "uf_orgao": "DF", "fundamento": "Lei 8.666, art. 87, IV",
-         "efeito_nacional": True},
+        },
         {"cadastro": "ceis", "documento": _CNPJ_BAIXADO, "nome": "DELTA COMERCIO LTDA",
          "categoria": "Impedimento de licitar e contratar", "inicio": pd.Timestamp("2023-01-01"),
          "fim": pd.Timestamp("2023-12-31"), "orgao_sancionador": "PREFEITURA MUNICIPAL DE Y",
          "esfera": "MUNICIPAL", "uf_orgao": "SP", "fundamento": "Lei 14.133, art. 156, III",
-         "efeito_nacional": False},
+        },
         {"cadastro": "cnep", "documento": "77888999000122", "nome": "CONSTRUTORA NOVA SEDE",
          "categoria": "Multa", "inicio": pd.Timestamp("2015-01-01"),
          "fim": pd.Timestamp("2015-06-30"), "orgao_sancionador": "CGU",
-         "esfera": "FEDERAL", "uf_orgao": "DF", "fundamento": "Lei 12.846",
-         "efeito_nacional": False},
+         "esfera": "FEDERAL", "uf_orgao": "DF", "fundamento": "Lei 12.846"},
     ])
 
     # Comparação entre Creas: 6 conselhos × 2 exercícios, mesmas contas. SP com
@@ -1255,7 +1254,7 @@ def _confere_metricas(achados) -> list[str]:
     from .regressoes import (http_config as _reg_http, rodada11 as _reg_r11,
                             rodada12 as _reg_r12, rodada13 as _reg_r13,
                             rodada14 as _reg_r14, rodada15 as _reg_r15,
-                            rodada16 as _reg_r16)
+                            rodada16 as _reg_r16, rodada17 as _reg_r17)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
@@ -1263,6 +1262,7 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_reg_r14.run())
     erros.extend(_reg_r15.run())
     erros.extend(_reg_r16.run())
+    erros.extend(_reg_r17.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1691,8 +1691,10 @@ def _regressao_novas_fontes() -> list[str]:
              ("Multa", "Lei 12.846", False),
              ("Publicação Extraordinária", "Lei 12.846 art. 6º II", False)]
     for cat, fund, esperado_ in casos:
-        if clients.efeito_nacional(cat, fund) != esperado_:
-            erros.append(f"sanções: efeito_nacional({cat!r}) deveria ser {esperado_}")
+        got = clients.alcance_sancao(cat, fund, None) == "nacional"
+        if got != esperado_:
+            erros.append(f"sanções: alcance de {cat!r} deveria ser "
+                         f"{'nacional' if esperado_ else 'outro'}, saiu {got}")
     if clients.alcance_sancao("Multa", "Lei 12.846", "FEDERAL") != "nao_impede":
         erros.append("sanções: multa do CNEP (Lei 12.846) saiu como "
                      f"{clients.alcance_sancao('Multa', 'Lei 12.846', 'FEDERAL')!r} — "
@@ -1895,7 +1897,6 @@ def _regressao_sondagem_e_orgaos() -> list[str]:
     devolveu zero. As peças abaixo atacam cada um desses pontos, e a última
     fecha um buraco que a solução do Confea teria ABERTO.
     """
-    import os
     import tempfile
     from pathlib import Path
     from . import clients, http

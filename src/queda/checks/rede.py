@@ -15,7 +15,7 @@ import pandas as pd
 from .. import analytics as A
 from .. import config
 from ..findings import Finding
-from ..utils import fmt_brl, norm_nome
+from ..utils import norm_nome
 from .common import df, fichas_cnpj, qsa_nomes
 
 log = logging.getLogger("queda.checks.rede")
