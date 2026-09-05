@@ -1112,13 +1112,35 @@ def pncp_contratos(cnpj: str, ano_ini: int, ano_fim: int) -> list:
     return out
 
 
+def pncp_instrumentos_cobranca_mes(cnpj: str, ini: str, fim: str) -> list | None:
+    """Notas fiscais vinculadas a contrato do órgão numa janela MENSAL.
+
+    O endpoint aceita no máximo 30 dias por consulta. A janela anual que
+    mandávamos era recusada com 422 e a mensagem exata — "Período inicial e
+    final maior que 30 dias." —, mas o corpo do 4xx não era guardado, então
+    `pncp_cobrancas` saía vazio em toda rodada desde que a etapa existe e
+    ninguém sabia por quê. O primeiro corpo guardado (rodada 12) resolveu.
+
+    Devolve a lista (vazia quando não há nota na janela) ou **None** quando a
+    janela não pôde ser coletada — o chamador trata None como "indisponível",
+    nunca como "sem nota".
+    """
+    params = {"dataInicial": ini, "dataFinal": fim,
+              "cnpjOrgao": cnpj, "tamanhoPagina": 100}
+    primeira = get_json(f"{config.PNCP_CONSULTA}/v1/instrumentoscobranca/inclusao",
+                        {**params, "pagina": 1})
+    if primeira is None:
+        return None
+    return pncp_paginado("/v1/instrumentoscobranca/inclusao", params)
+
+
 def pncp_instrumentos_cobranca(cnpj: str, ano_ini: int, ano_fim: int) -> list:
-    out = []
-    for ano in range(ano_ini, ano_fim + 1):
-        out.extend(pncp_paginado("/v1/instrumentoscobranca/inclusao", {
-            "dataInicial": f"{ano}0101", "dataFinal": f"{ano}1231",
-            "cnpjOrgao": cnpj, "tamanhoPagina": 100,
-        }))
+    """Compatibilidade: percorre os meses e devolve tudo o que veio."""
+    out: list = []
+    for ini, fim in _meses(ano_ini, ano_fim):
+        rows = pncp_instrumentos_cobranca_mes(cnpj, ini, fim)
+        if rows:
+            out.extend(rows)
     return out
 
 

@@ -202,12 +202,14 @@ def _pncp_tolerante(erros: list[str]) -> None:
                  "tipoContrato": {"id": 1, "nome": "Contrato (termo inicial)"},
                  "unidadeOrgao": {"codigoUnidade": "1"}}]
 
-    def cobranca(cnpj, ini, ate):
+    def cobranca(cnpj, ini, fim):
+        # `stage_pncp` percorre as notas mês a mês desde a rodada 13; sem este
+        # substituto o teste offline sairia pela rede de verdade.
         raise RuntimeError("Falha após retries: instrumentoscobranca")
 
     with _ambiente(checkpoint="0"), _trocar(
             clients, pncp_resolver_orgao=resolver, pncp_contratos_mes=contratos_mes,
-            pncp_instrumentos_cobranca=cobranca,
+            pncp_instrumentos_cobranca_mes=cobranca,
             pncp_meses=lambda ini, ate: [("20250101", "20250131")]), _diagnostico_limpo():
         try:
             df = pipeline.stage_pncp(2025, 2025)
@@ -219,8 +221,14 @@ def _pncp_tolerante(erros: list[str]) -> None:
               f"stage_pncp: contratos do alvo não sobreviveram ({len(df)} linha(s))")
         diag = {d["dataset"]: d for d in pipeline._DIAGNOSTICO}
         nota = str(diag.get("pncp_contratos", {}).get("indisponivel", ""))
-        _erro(erros, "CONSELHO FEDERAL" in nota.upper() and "cobran" in nota.lower(),
-              f"stage_pncp: o diagnóstico não registrou os órgãos/etapas não consultados ({nota!r})")
+        _erro(erros, "CONSELHO FEDERAL" in nota.upper(),
+              f"stage_pncp: o diagnóstico não registrou os órgãos não consultados ({nota!r})")
+        # A falha das notas fiscais é POR JANELA desde a rodada 13 (mês a mês
+        # com checkpoint): tem de aparecer como janela sem coleta, que é mais
+        # preciso que uma nota geral na etapa.
+        cob = diag.get("pncp_cobrancas", {})
+        _erro(erros, cob.get("janelas_sem_coleta"),
+              f"stage_pncp: janela de nota fiscal que falhou não foi contada ({cob})")
         orgaos = pd.read_csv(config.STAGED_DIR / "pncp_orgaos.csv", dtype=str)
         _erro(erros, len(orgaos) == 1 and orgaos["papel"].iloc[0] == "alvo",
               "stage_pncp: pncp_orgaos deveria ter só o alvo")
@@ -236,7 +244,7 @@ def _pncp_tolerante(erros: list[str]) -> None:
 
     with _ambiente(checkpoint="0"), _trocar(
             clients, pncp_resolver_orgao=bloqueado, pncp_contratos_mes=contratos_mes,
-            pncp_instrumentos_cobranca=cobranca,
+            pncp_instrumentos_cobranca_mes=cobranca,
             pncp_meses=lambda ini, ate: [("20250101", "20250131")]), _diagnostico_limpo():
         try:
             pipeline.stage_pncp(2025, 2025)

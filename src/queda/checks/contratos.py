@@ -354,6 +354,126 @@ _RESSALVA = (
     "explicar, não uma irregularidade demonstrada.")
 
 
+def _faturamento_pncp(staged) -> list[Finding]:
+    """Notas fiscais registradas no PNCP contra os contratos do órgão.
+
+    Terceira fonte independente sobre o mesmo contrato: empenho é compromisso,
+    pagamento é saída de caixa, e a nota fiscal é a ENTREGA faturada. É a única
+    das três que traz o CNPJ de quem emitiu — e emitente diferente do
+    contratado é subcontratação ou cessão que o contrato não declara.
+
+    O endpoint (`/v1/instrumentoscobranca/inclusao`) só aceita janela de 30
+    dias; a janela anual que mandávamos até a rodada 12 era recusada com 422 e
+    o dataset vinha vazio em toda rodada. O DTO nunca foi lido contra a rede
+    nesta sessão: se a chave de ligação vier vazia, o achado diz isso em vez de
+    publicar cruzamento nenhum.
+    """
+    cob = df(staged, "pncp_cobrancas")
+    if cob.empty:
+        return []
+    pncp = df(staged, "pncp_contratos")
+    valor = pd.to_numeric(coluna(cob, "valorNota", 0), errors="coerce").fillna(0)
+    total = float(valor.sum())
+    chave = coluna(cob, "numeroControlePNCP", "").fillna("").astype(str)
+    ligadas = int(chave.str.strip().ne("").sum())
+    achados: list[Finding] = []
+
+    if not ligadas:
+        return [Finding(
+            id="contratos-faturamento-sem-chave", frente=FRENTE, gravidade="erro",
+            titulo=(f"{len(cob)} nota(s) fiscal(is) coletadas do PNCP, mas sem a chave "
+                    "que liga cada uma ao contrato"),
+            descricao=(
+                "As notas vieram, e o campo que aponta o contrato de origem "
+                "(`numeroControlePNCP`, dentro de `recuperarContratoDTO`) veio vazio "
+                "em todas — provavelmente outra grafia no DTO. Sem a chave não há "
+                "cruzamento, e este relatório não estima o que não mediu. O JSON "
+                "cru está em `data/raw/pncp.gov.br/`: conferir a grafia e ajustar "
+                "`_pncp_cobranca_linha`, em `pipeline.py`."),
+            evidencia=cob.head(20),
+            metricas={"notas": int(len(cob)), "valor": round(total, 2)},
+            fontes=["pncp_cobrancas"],
+        )]
+
+    por_contrato = pd.DataFrame()
+    if not pncp.empty and "numeroControlePNCP" in pncp.columns:
+        alvo = pncp[coluna(pncp, "orgao_papel", "").eq("alvo")].copy()
+        alvo["_chave"] = coluna(alvo, "numeroControlePNCP", "").fillna("").astype(str)
+        notas = cob.assign(_chave=chave, _valor=valor)
+        agregado = notas.groupby("_chave").agg(
+            notas=("_valor", "size"), faturado=("_valor", "sum")).reset_index()
+        por_contrato = alvo.merge(agregado, on="_chave", how="inner")
+
+    # ---- emitente diferente da contratada: subcontratação não declarada
+    if not por_contrato.empty and "fornecedor_ni" in por_contrato.columns:
+        notas = cob.assign(_chave=chave,
+                           _emitente=_cnpj14(coluna(cob, "emitente_ni", "")))
+        forn = dict(zip(por_contrato["_chave"],
+                        _cnpj14(por_contrato["fornecedor_ni"])))
+        notas["_contratada"] = notas["_chave"].map(forn).fillna("")
+        outra = notas[notas["_contratada"].str.len().eq(14)
+                      & notas["_emitente"].str.len().eq(14)
+                      & notas["_emitente"].ne(notas["_contratada"])
+                      # matriz e filial da mesma empresa não são terceiro
+                      & (notas["_emitente"].str[:8] != notas["_contratada"].str[:8])]
+        if not outra.empty:
+            v = float(pd.to_numeric(coluna(outra, "valorNota", 0),
+                                    errors="coerce").fillna(0).sum())
+            achados.append(Finding(
+                id="contratos-nota-de-terceiro", frente=FRENTE, gravidade="media",
+                titulo=(f"{len(outra)} nota(s) fiscal(is) de {fmt_brl(v)} foram emitidas "
+                        "por CNPJ diferente do da empresa contratada"),
+                descricao=(
+                    "A nota registrada no PNCP contra o contrato veio de um CNPJ de "
+                    "raiz diferente da contratada — matriz e filial da mesma empresa "
+                    "já estão excluídas. **O que isto pode ser:** subcontratação "
+                    "(admitida quando o edital a prevê, Lei 14.133/2021, art. 122), "
+                    "cessão contratual, ou erro de digitação do emitente no registro. "
+                    "**O que não é:** prova de irregularidade — é a lista do que "
+                    "precisa ter o edital conferido, porque quem executa o objeto "
+                    "não é quem venceu o certame."),
+                evidencia=outra.head(100),
+                base_legal="Lei 14.133/2021, art. 122 (subcontratação) e art. 137, "
+                           "§ 1º (cessão); Lei 8.666/1993, art. 72 e art. 78, VI.",
+                como_verificar=("Para cada linha, pedir o edital e o termo de "
+                                "subcontratação ou cessão autorizado pelo conselho."),
+                metricas={"notas": int(len(outra)), "valor": round(v, 2)},
+                fontes=["pncp_cobrancas", "pncp_contratos"],
+            ))
+
+    # ---- cobertura: quanto do contratado tem entrega faturada
+    contratado = faturado = 0.0
+    if not por_contrato.empty:
+        contratado = float(pd.to_numeric(coluna(por_contrato, "valorGlobal", 0),
+                                         errors="coerce").fillna(0).sum())
+        faturado = float(por_contrato["faturado"].sum())
+    achados.append(Finding(
+        id="contratos-faturamento-pncp", frente=FRENTE, gravidade="info",
+        titulo=(f"{len(cob)} nota(s) fiscal(is) de {fmt_brl(total)} registradas no PNCP "
+                f"contra {len(por_contrato)} contrato(s) do conselho"),
+        descricao=(
+            "A nota fiscal é a terceira fonte sobre o mesmo contrato: o empenho diz "
+            "o que foi comprometido, o pagamento diz o que saiu do caixa, e a nota "
+            "diz o que foi entregue e faturado — com o CNPJ de quem emitiu.\n\n"
+            "**O que este número NÃO é:** o total faturado ao conselho. Só entram "
+            "notas que o próprio órgão registrou no PNCP, e só de contratos "
+            "publicados lá — ou seja, a partir de 2021 e, na prática, do que a Lei "
+            "14.133 tornou obrigatório. Contrato antigo e compra sem contrato ficam "
+            "fora por construção."),
+        evidencia=(por_contrato[[c for c in ("numeroContrato", "fornecedor_nome",
+                                             "valorGlobal", "notas", "faturado")
+                                 if c in por_contrato.columns]].head(200)
+                   if not por_contrato.empty else cob.head(50)),
+        metricas={"notas": int(len(cob)), "valor_faturado": round(total, 2),
+                  "notas_ligadas_a_contrato": ligadas,
+                  "contratos_com_nota": int(len(por_contrato)),
+                  "valor_contratado_desses": round(contratado, 2),
+                  "faturado_desses": round(faturado, 2)},
+        fontes=["pncp_cobrancas", "pncp_contratos"],
+    ))
+    return achados
+
+
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
     ctr = df(staged, "contratos")
@@ -688,6 +808,9 @@ def run(staged) -> list[Finding]:
 
     # ------------------------------------ razão pago/contratado por fornecedor
     achados.extend(_achados_razao(ctr, adt, pg, sem_carteira_confiavel))
+
+    # ---------------------- nota fiscal: a entrega, terceira fonte do contrato
+    achados.extend(_faturamento_pncp(staged))
     return achados
 
 

@@ -1318,6 +1318,27 @@ def _resolver_orgao_tolerante(razao: str, **kw) -> dict | None:
         return None
 
 
+def _pncp_cobranca_linha(r: dict) -> dict:
+    """Projeta uma nota fiscal vinculada a contrato (`/v1/instrumentoscobranca`).
+
+    Serve à pergunta que empenho e contrato não respondem: o que foi
+    ENTREGUE e faturado contra cada contrato, com CNPJ do emitente e valor
+    da nota.
+    """
+    nfe = _chave_ci(r, "notaFiscalEletronica") or {}
+    contrato = _chave_ci(r, "recuperarContratoDTO") or {}
+    return {
+        "sequencialContrato": _chave_ci(r, "sequencialContrato"),
+        "numeroNota": _chave_ci(nfe, "numero"),
+        "emitente_ni": so_digitos(_chave_ci(nfe, "niEmitente")),
+        "emitente_nome": _chave_ci(nfe, "nomeEmitente"),
+        "valorNota": parse_valor(_chave_ci(nfe, "valorNotaFiscal")),
+        "dataEmissao": _chave_ci(nfe, "dataEmissao"),
+        "objetoContrato": _chave_ci(contrato, "objetoContrato"),
+        "numeroControlePNCP": _chave_ci(contrato, "numeroControlePNCP"),
+    }
+
+
 def stage_pncp(desde, ate):
     """Contratos PNCP do Crea-SP e dos órgãos relacionados (rede de influência)."""
     ini = max(desde or 2021, 2021)   # PNCP só existe desde ago/2021
@@ -1373,27 +1394,26 @@ def stage_pncp(desde, ate):
              for jini, jfim in clients.pncp_meses(ini, ate)),
             buscar_mes, dataset="pncp_contratos"))
         if o["papel"] == "alvo":
+            # Mês a mês com checkpoint, como os contratos: o endpoint recusa
+            # (422) qualquer janela maior que 30 dias.
+            def buscar_cobranca(jini, jfim, orgao=o):
+                linhas = clients.pncp_instrumentos_cobranca_mes(orgao["cnpj"], jini, jfim)
+                if not isinstance(linhas, list):
+                    return None
+                return [_pncp_cobranca_linha(r) for r in linhas]
+
             try:
-                instrumentos = clients.pncp_instrumentos_cobranca(o["cnpj"], ini, ate)
+                cobrancas.extend(_janelas_nomeadas(
+                    f"pncp_cobrancas/{o['cnpj']}",
+                    ((jini[:6], int(jini[:4]), jini, jfim)
+                     for jini, jfim in clients.pncp_meses(ini, ate)),
+                    buscar_cobranca, dataset="pncp_cobrancas"))
             except RateLimited:
                 raise                     # bloqueio por ritmo: parar tudo
             except RuntimeError as e:
                 log.warning("PNCP: instrumentos de cobrança indisponíveis (%s) — "
                             "os contratos já coletados ficam", e)
                 _PNCP_ORGAOS_FALHOS.append(f"instrumentos de cobrança: {e}")
-                instrumentos = []
-            for r in instrumentos:
-                nfe = r.get("notaFiscalEletronica") or {}
-                contrato = r.get("recuperarContratoDTO") or {}
-                cobrancas.append({
-                    "sequencialContrato": r.get("sequencialContrato"),
-                    "numeroNota": nfe.get("numero"),
-                    "emitente_ni": so_digitos(nfe.get("niEmitente")),
-                    "emitente_nome": nfe.get("nomeEmitente"),
-                    "valorNota": parse_valor(nfe.get("valorNotaFiscal")),
-                    "dataEmissao": nfe.get("dataEmissao"),
-                    "objetoContrato": contrato.get("objetoContrato"),
-                })
     df_c = pd.DataFrame(contratos)
     if not df_c.empty:
         df_c["fornecedor_norm"] = coluna(df_c, "fornecedor_nome").map(norm_nome)
@@ -1756,6 +1776,28 @@ def janelas_pendentes_mensais(chave: str, ate: int, desde: int | None) -> list[s
     return sorted(pendentes, reverse=True)
 
 
+# Datasets que uma etapa grava ALÉM do principal. Sem isto a etapa se dá por
+# pronta pelo principal e nunca volta para o resto: `pncp_cobrancas` ficou
+# vazio em SEIS rodadas porque `stage_pncp` já tinha os 145 contratos em
+# disco — e o motivo real (janela anual recusada com 422) só apareceu quando
+# o corpo do 4xx passou a ser guardado.
+DATASETS_SECUNDARIOS: dict[str, tuple[str, ...]] = {
+    "pncp_contratos": ("pncp_cobrancas",),
+}
+
+
+def _secundarios_pendentes(nome: str) -> list[str]:
+    """Secundários que nunca foram coletados: sem linhas em `staged` E sem
+    pasta de checkpoint. Um secundário que a fonte simplesmente não tem (o
+    servidor respondeu vazio) deixa checkpoint e não conta como pendente."""
+    faltando = []
+    for secundario in DATASETS_SECUNDARIOS.get(nome, ()):
+        if (_ja_coletado(secundario, exigir_esquema=False) is None
+                and not _checkpoint_dir(secundario).is_dir()):
+            faltando.append(f"{secundario} (nunca coletado)")
+    return faltando
+
+
 def etapa_pronta(nome: str, desde: int | None,
                  ate: int) -> tuple[pd.DataFrame | None, list]:
     """(DataFrame pronto ou None, exercícios pendentes).
@@ -1773,6 +1815,7 @@ def etapa_pronta(nome: str, desde: int | None,
     pendentes = sorted(set(pendentes), reverse=True)
     if nome in ETAPAS_JANELA_MENSAL:
         pendentes += janelas_pendentes_mensais(ETAPAS_JANELA_MENSAL[nome], ate, desde)
+    pendentes += _secundarios_pendentes(nome)
     return (pronto if pronto is not None and not pendentes else None), pendentes
 
 
@@ -2097,6 +2140,17 @@ def _ler_csv_staged(caminho: Path) -> pd.DataFrame:
     if list(df.columns) == ["_vazio"]:
         return pd.DataFrame()
     df = _sanear_documentos(df, caminho.stem)
+    # Uma ata vigente em N meses veio N vezes das versões anteriores (138
+    # linhas para 8 atas na rodada 11). A etapa já deduplica, mas o CSV
+    # gravado antes disso é lido tal como está — e a etapa não volta a rodar,
+    # porque os meses fechados são checkpoint permanente.
+    if caminho.stem == "pncp_atas" and "numeroControlePNCPAta" in df.columns:
+        chave = df["numeroControlePNCPAta"].astype(str)
+        if chave.str.strip().ne("").all() and chave.duplicated().any():
+            antes = len(df)
+            df = df.drop_duplicates(subset=["numeroControlePNCPAta"])
+            log.info("pncp_atas: %d linha(s) repetidas de janelas mensais de uma "
+                     "rodada anterior → %d ata(s) distinta(s)", antes, len(df))
     for col in ("DATA", "INI", "FIM"):
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")

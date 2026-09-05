@@ -101,7 +101,7 @@ FONTES_POR_FRENTE: dict[str, list[str]] = {
     "Casos concentrados": ["pagamentos", "contratos", "aditivos"],
     "Empenhos e pagamentos": ["empenhos", "pagamentos"],
     "Contratos e licitações": ["contratos", "aditivos", "pagamentos", "pncp_contratos",
-                               "licitacoes_pncp"],
+                               "licitacoes_pncp", "pncp_atas", "pncp_cobrancas"],
     "Rede de influência": ["pagamentos", "convenios", "fichas_cnpj"],
     "Deliberações dos colegiados": ["atas"],
     "Forense estatística": ["pagamentos"],

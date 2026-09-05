@@ -709,6 +709,7 @@ def _staged() -> dict[str, pd.DataFrame]:
          "vigenciaFim": "2023-12-31", "anoContrato": 2023, "tipoPessoa": "PJ",
          "dataAssinatura": "2023-01-01",
          "numeroControlePNCPCompra": "00000000000191-1-000123/2023",
+         "numeroControlePNCP": "00000000000191-2-000007/2023",
          "processo": "2023/000123"},
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo",
          "orgao_nome": "CREA-SP", "fornecedor_ni": "66777888000199",
@@ -719,6 +720,7 @@ def _staged() -> dict[str, pd.DataFrame]:
          "vigenciaFim": "2024-02-29", "anoContrato": 2023, "tipoPessoa": "PJ",
          "dataAssinatura": "2023-03-01",
          "numeroControlePNCPCompra": "00000000000191-1-000456/2023",
+         "numeroControlePNCP": "00000000000191-2-000008/2023",
          "processo": "2023/000456"},
         {"orgao_cnpj": "00000000000191", "orgao_papel": "alvo", "orgao_nome": "CREA-SP",
          "fornecedor_ni": _CNPJ_REDE, "fornecedor_nome": _FORN_REDE,
@@ -733,6 +735,29 @@ def _staged() -> dict[str, pd.DataFrame]:
          "vigenciaInicio": "2023-01-01", "vigenciaFim": "2023-12-31",
          "anoContrato": 2023, "tipoPessoa": "PJ", "dataAssinatura": "2023-01-01"},
     ])
+    # Notas fiscais registradas contra os contratos acima
+    # (`/v1/instrumentoscobranca/inclusao`, projeção de
+    # `pipeline._pncp_cobranca_linha`). A terceira é emitida por um CNPJ de
+    # outra raiz: subcontratação ou cessão que o contrato não declara.
+    pncp_cobrancas = pd.DataFrame([
+        {"sequencialContrato": 7, "numeroNota": "1001",
+         "emitente_ni": "55666777000188", "emitente_nome": "ELETRICA PREDIAL LTDA",
+         "valorNota": 900_000.0, "dataEmissao": "2023-06-10",
+         "objetoContrato": "instalação elétrica e subestação do prédio sede",
+         "numeroControlePNCP": "00000000000191-2-000007/2023"},
+        {"sequencialContrato": 7, "numeroNota": "1002",
+         # filial da MESMA empresa (mesma raiz): não é terceiro
+         "emitente_ni": "55666777000269", "emitente_nome": "ELETRICA PREDIAL LTDA",
+         "valorNota": 600_000.0, "dataEmissao": "2023-09-10",
+         "objetoContrato": "instalação elétrica e subestação do prédio sede",
+         "numeroControlePNCP": "00000000000191-2-000007/2023"},
+        {"sequencialContrato": 8, "numeroNota": "2001",
+         "emitente_ni": "11222333000144", "emitente_nome": "TERCEIRIZADA ALFA LTDA",
+         "valorNota": 750_000.0, "dataEmissao": "2023-08-15",
+         "objetoContrato": "reforma e impermeabilização da cobertura",
+         "numeroControlePNCP": "00000000000191-2-000008/2023"},
+    ])
+
     pncp["fornecedor_norm"] = pncp["fornecedor_nome"].map(norm_nome)
     # espelha stage_pncp
     pncp["_ano"] = pd.to_numeric(pncp["anoContrato"], errors="coerce")
@@ -831,7 +856,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "demonstrativo": demonstrativo,
         "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
-        "pncp_contratos": pncp, "pncp_cobrancas": pd.DataFrame(),
+        "pncp_contratos": pncp, "pncp_cobrancas": pncp_cobrancas,
         "licitacoes_pncp": licitacoes_pncp, "sancoes": sancoes,
         "pncp_atas": pncp_atas,
         "benchmark_creas": benchmark_creas,
@@ -959,6 +984,8 @@ ESPERADOS = [
     "contratos-certame-no-pncp",       # o PNCP diz qual compra originou o contrato
     "licitacoes-pncp-rol",             # o rol que o portal não publica está no PNCP
     "contratos-modalidade-de-origem",  # pregão × dispensa × inexigibilidade, por contrato
+    "contratos-faturamento-pncp",      # nota fiscal: a entrega, terceira fonte do contrato
+    "contratos-nota-de-terceiro",      # quem emitiu a nota não é quem venceu o certame
     "fornecedores-sancionados",        # pago durante inidoneidade (efeito nacional)
     "fornecedores-sancionados-outro-orgao",  # impedimento de outro ente: contexto
     "benchmark-cobertura",             # quantos Creas responderam
@@ -1130,6 +1157,14 @@ def _confere_metricas(achados) -> list[str]:
     # PNCP: dois contratos ligados à compra de origem; a inexigibilidade (1,8 mi)
     # é 42,9% do valor dos dois (4,2 mi) — abaixo de 50%, gravidade info.
     exige("contratos-modalidade-de-origem", "contratos_com_origem", 2)
+    # Nota fiscal: as três entram no total, só a de outra RAIZ é de terceiro —
+    # filial da mesma empresa não é subcontratação, e contar assim publicaria
+    # uma acusação a cada contrato de empresa com mais de um CNPJ.
+    exige("contratos-faturamento-pncp", "notas", 3)
+    exige("contratos-faturamento-pncp", "contratos_com_nota", 2)
+    exige("contratos-faturamento-pncp", "faturado_desses", 2_250_000)
+    exige("contratos-nota-de-terceiro", "notas", 1)
+    exige("contratos-nota-de-terceiro", "valor", 750_000)
     exige("contratos-modalidade-de-origem", "valor_contratacao_direta", 1_800_000)
     exige("licitacoes-pncp-rol", "contratacoes", 3)
     # Sanções: só ALFA cai em inidoneidade dentro da janela; REFORMA TOTAL é
@@ -1163,10 +1198,12 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_sondagem_e_orgaos())
     erros.extend(_regressao_prefixo_e_nome())
     erros.extend(_regressao_novas_fontes())
-    from .regressoes import http_config as _reg_http, rodada11 as _reg_r11, rodada12 as _reg_r12
+    from .regressoes import (http_config as _reg_http, rodada11 as _reg_r11,
+                            rodada12 as _reg_r12, rodada13 as _reg_r13)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
+    erros.extend(_reg_r13.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1262,7 +1299,11 @@ def _confere_metricas(achados) -> list[str]:
     # o veredito migra em silêncio e o achado continua "detectado".
     exige("diagnostico-porque-vazio", "sem_publicacao", 1)
     exige("diagnostico-porque-vazio", "falha_da_coleta", 1)
-    exige("diagnostico-porque-vazio", "indeterminadas", 1)
+    # `pncp_cobrancas` deixou de ser o caso "indeterminado" da fixture quando
+    # a rodada 13 fez a etapa funcionar (janela de 30 dias). O 404 → veredito
+    # indeterminado passou a ser trancado em `regressoes/rodada13.py`, sobre
+    # `_causa` direto, em vez de depender de um dataset ficar vazio aqui.
+    exige("diagnostico-porque-vazio", "indeterminadas", 0)
     return erros
 
 

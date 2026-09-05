@@ -271,6 +271,11 @@ CONTRATADA → CONTRATADA_CNPJ). `utils.so_digitos` e `utils.cnpj14` reconhecem
 o artefato ("….0", notação científica) e só dão zfill(14) a 12–13 dígitos —
 11 é CPF e fica como está. A regressão está em `regressoes/rodada12.py`.
 
+Uma etapa só está pronta quando os datasets **secundários** dela também
+vieram (`DATASETS_SECUNDARIOS`): `stage_pncp` grava contratos E notas
+fiscais, e se dava por pronta pelos 145 contratos em disco — as notas nunca
+voltariam, por mais correto que o cliente ficasse.
+
 PNCP: 503 na consulta de um órgão **relacionado** (Confea, Mútua, outros
 Creas) não derruba mais `pncp_contratos` — vira o achado
 `diagnostico-coleta-parcial` (gravidade `erro`, que é falha da ferramenta e
@@ -479,13 +484,28 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     O cruzamento portal × PNCP é **contrato a contrato** (CNPJ + ano e número,
     ou valor), e cada dúvida vira rótulo em vez de acusação: atas de registro de
     preços vão para achado próprio (o PNCP as publica em `/v1/atas`, coletado
-    pela etapa `pncp_atas`, parâmetro do órgão a confirmar); filial/matriz do
+    pela etapa `pncp_atas`, parâmetro `cnpj` confirmado na rodada 11);
+    filial/matriz do
     mesmo CNPJ-raiz é "provável correspondente"; contrato de 2024 cujo CNPJ tem
     ata ou contrato de 2021–2023 no portal pode decorrer de certame anterior a
     30/12/2023, regido pela Lei 8.666 durante toda a vigência (art. 191,
     parágrafo único) — "conferir regime no edital". Na rodada 10 isso separou
     R$ 36,7 mi de "ausentes" em 2 contratos com ata de 2023 do mesmo CNPJ e
     6 atas que nunca casariam.
+19b. **Nota fiscal registrada no PNCP** (`/v1/instrumentoscobranca/inclusao`)
+    — a terceira fonte sobre o mesmo contrato: o empenho diz o que foi
+    comprometido, o pagamento diz o que saiu do caixa, a nota diz o que foi
+    **entregue e faturado** — e é a única que traz o CNPJ de quem emitiu.
+    Daí sai `contratos-nota-de-terceiro`: emitente de raiz diferente da
+    contratada é subcontratação (Lei 14.133, art. 122) ou cessão que o
+    contrato não declara — matriz e filial da mesma empresa já ficam de fora.
+    O endpoint só aceita janela de **30 dias**, e a janela anual que
+    mandávamos era recusada com 422: `pncp_cobrancas` saiu vazio em seis
+    rodadas e ninguém sabia por quê, porque o corpo do 4xx não era guardado.
+    O primeiro corpo guardado (rodada 12) trouxe a mensagem exata do
+    servidor. Cobertura: só o que o próprio órgão registrou no PNCP, de
+    contratos publicados lá — 2021 em diante, na prática o que a Lei 14.133
+    tornou obrigatório.
 20. **Fornecedores sancionados (CEIS/CNEP/CEPIM, CGU)** — pagamento com data
     dentro de uma sanção, em três perguntas: **quem a sanção alcança**
     (`alcance`: inidoneidade e proibição por improbidade valem para toda a
