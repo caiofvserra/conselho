@@ -39,7 +39,7 @@ from .. import config
 from .. import taxonomia as T
 from ..findings import Finding
 from ..utils import cnpj14, coluna, fmt_brl, norm_nome, parse_data, so_digitos
-from .common import df, fichas_cnpj, fornecedores_mercado
+from .common import df, fichas_cnpj, fornecedores_mercado, qsa_socios
 
 FRENTE = "Fornecedores"
 
@@ -1374,6 +1374,110 @@ def _achados_cepim(cepim: pd.DataFrame, pg: pd.DataFrame, staged) -> list[Findin
     )]
 
 
+def _achados_tcu_responsaveis(staged) -> list[Finding]:
+    """Sócio de fornecedor condenado pelo TCU — casado por NOME e confirmado
+    pelos dígitos do documento, nunca só por um dos dois.
+
+    O CPF vem mascarado dos dois lados ("***123456**"): seis dígitos não
+    identificam ninguém sozinhos, e nome sozinho é homônimo. Exigir os dois
+    torna o falso positivo improvável e o falso negativo aceitável — este
+    relatório prefere deixar de apontar a apontar a pessoa errada.
+
+    O que a lista significa: contas julgadas irregulares (Lei 8.443/1992, art.
+    16, III) e inabilitação para função de confiança (art. 60) são condenações
+    do TRIBUNAL sobre a pessoa. Não impedem a empresa dela de contratar — quem
+    faz isso é a inidoneidade do art. 46, que entra no cruzamento de sanções.
+    Aqui é contexto sobre com quem o conselho está contratando.
+    """
+    resp = df(staged, "tcu_responsaveis")
+    if resp.empty:
+        return []
+    fichas = fichas_cnpj(staged)
+    if not fichas:
+        return []
+    pg = _pagamentos_pj(staged)
+    pago = ({} if pg.empty else
+            pg.groupby("cnpj")["valor"].sum().to_dict())
+
+    condenados: dict[str, list[dict]] = {}
+    for _, r in resp.iterrows():
+        nome = norm_nome(r.get("nome") or "")
+        if nome:
+            condenados.setdefault(nome, []).append(r.to_dict())
+    if not condenados:
+        return []
+
+    linhas = []
+    for cnpj, ficha in fichas.items():
+        for nome_socio, doc_socio in qsa_socios(ficha):
+            for cond in condenados.get(nome_socio, ()):
+                doc_tcu = so_digitos(cond.get("documento"))
+                # a confirmação é o documento; sem dígitos dos dois lados o par
+                # não é publicado, por mais que o nome bata
+                if not doc_socio or not doc_tcu:
+                    continue
+                curto = min(len(doc_socio), len(doc_tcu))
+                if curto < 6 or doc_socio[-curto:] != doc_tcu[-curto:]:
+                    continue
+                linhas.append({
+                    "cnpj_fornecedor": cnpj,
+                    "fornecedor": ficha.get("razao_social") or "",
+                    "socio": nome_socio,
+                    "documento_confirmado_em": f"{curto} dígitos",
+                    "lista_do_tcu": cond.get("cadastro"),
+                    "processo": cond.get("processo"),
+                    "deliberacao": cond.get("deliberacao"),
+                    "inicio": cond.get("inicio"),
+                    "fim": cond.get("fim"),
+                    "pago_no_periodo": round(float(pago.get(cnpj, 0.0)), 2),
+                })
+    if not linhas:
+        return [Finding(
+            id="fornecedores-tcu-sem-cruzamento", frente=FRENTE, gravidade="info",
+            titulo=(f"Nenhum sócio dos fornecedores consta nas listas de condenados "
+                    f"do TCU ({len(resp)} pessoa(s) conferidas)"),
+            descricao=(
+                "Cruzamento entre o quadro societário das fichas cadastrais e as "
+                "listas de responsáveis do TCU (inabilitados, art. 60; contas "
+                "julgadas irregulares, art. 16, III da Lei 8.443/1992). O par só é "
+                "publicado quando o nome bate E os dígitos visíveis do documento "
+                "confirmam — o CPF vem mascarado dos dois lados, e casar por nome "
+                "produziria acusação contra homônimo."),
+            metricas={"pessoas_no_tcu": int(len(resp)),
+                      "fornecedores_com_ficha": len(fichas)},
+            fontes=["tcu_responsaveis", "fichas_cnpj"],
+        )]
+    ev = pd.DataFrame(linhas).drop_duplicates()
+    valor = float(ev.drop_duplicates("cnpj_fornecedor")["pago_no_periodo"].sum())
+    return [Finding(
+        id="fornecedores-socio-condenado-tcu", frente=FRENTE, gravidade="media",
+        titulo=(f"{ev['cnpj_fornecedor'].nunique()} fornecedor(es) que receberam "
+                f"{fmt_brl(valor)} têm sócio nas listas de condenados do TCU"),
+        descricao=(
+            "O sócio da empresa consta como inabilitado para função de confiança "
+            "(Lei 8.443/1992, art. 60) ou com contas julgadas irregulares (art. "
+            "16, III) pelo Tribunal de Contas da União.\n\n"
+            "**O que isto não é:** impedimento de contratar. Quem impede é a "
+            "declaração de inidoneidade (art. 46), que está no cruzamento de "
+            "sanções desta mesma frente. A condenação aqui é sobre a PESSOA, e a "
+            "empresa dela segue habilitada — a informação é relevante para quem "
+            "decide a contratação, não para desfazê-la depois.\n\n"
+            "**Como o par foi formado:** nome do sócio idêntico ao do condenado E "
+            "os dígitos visíveis do documento coincidindo. O CPF vem mascarado "
+            "dos dois lados; casar só por nome publicaria homônimo."),
+        evidencia=ev.sort_values("pago_no_periodo", ascending=False).head(100),
+        base_legal="Lei 8.443/1992, art. 16, III, art. 46 e art. 60; "
+                   "LC 64/1990, art. 1º, I, 'g'.",
+        como_verificar=("Conferir cada par no processo citado, em "
+                        "contas.tcu.gov.br, e o quadro societário atual na "
+                        "Receita — sócio pode ter saído da empresa depois."),
+        metricas={"fornecedores": int(ev["cnpj_fornecedor"].nunique()),
+                  "socios": int(ev["socio"].nunique()),
+                  "valor_pago": round(valor, 2)},
+        fontes=["tcu_responsaveis", "fichas_cnpj", "pagamentos"],
+    )]
+
+
 def run(staged) -> list[Finding]:
     achados: list[Finding] = []
     fichas = fichas_cnpj(staged)
@@ -1463,6 +1567,7 @@ def run(staged) -> list[Finding]:
 
     # ------------------------------------------------ sanções (CEIS/CNEP, CGU)
     achados.extend(_achados_sancoes(staged))
+    achados.extend(_achados_tcu_responsaveis(staged))
 
     # ---------------------------------------------- geografia, porte e CNAE
     perfil = _perfil_fichas(fichas)

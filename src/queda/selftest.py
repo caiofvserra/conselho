@@ -758,6 +758,25 @@ def _staged() -> dict[str, pd.DataFrame]:
          "numeroControlePNCP": "00000000000191-2-000008/2023"},
     ])
 
+    # Condenados pelo TCU. O primeiro é sócio de um fornecedor E tem os
+    # dígitos do documento batendo: é o único par publicável. O segundo tem o
+    # nome de um sócio e documento DIFERENTE — homônimo, não pode virar
+    # achado. O terceiro não é sócio de ninguém.
+    tcu_responsaveis = pd.DataFrame([
+        {"cadastro": "tcu_contas_irregulares", "documento": "***456789**",
+         "nome": _COMISSIONADO, "inicio": "2022-05-01", "fim": "2030-05-01",
+         "processo": "TC 001.234/2021-0", "deliberacao": "Acórdão 1234/2022",
+         "uf": "SP"},
+        {"cadastro": "tcu_inabilitados", "documento": "***999888**",
+         "nome": "PEDRO HENRIQUE RAMOS", "inicio": "2020-01-01", "fim": "2028-01-01",
+         "processo": "TC 009.999/2019-0", "deliberacao": "Acórdão 9999/2020",
+         "uf": "MG"},
+        {"cadastro": "tcu_inabilitados", "documento": "***777666**",
+         "nome": "FULANO QUE NAO E SOCIO DE NINGUEM", "inicio": "2019-01-01",
+         "fim": "2027-01-01", "processo": "TC 007.777/2018-0",
+         "deliberacao": "Acórdão 777/2019", "uf": "RJ"},
+    ])
+
     pncp["fornecedor_norm"] = pncp["fornecedor_nome"].map(norm_nome)
     # espelha stage_pncp
     pncp["_ano"] = pd.to_numeric(pncp["anoContrato"], errors="coerce")
@@ -857,6 +876,7 @@ def _staged() -> dict[str, pd.DataFrame]:
         "atas": atas, "quadro_pessoal": quadro,
         "mandatarios": mandatarios, "indenizacoes_endpoint": pd.DataFrame(),
         "pncp_contratos": pncp, "pncp_cobrancas": pncp_cobrancas,
+        "tcu_responsaveis": tcu_responsaveis,
         "licitacoes_pncp": licitacoes_pncp, "sancoes": sancoes,
         "pncp_atas": pncp_atas,
         "benchmark_creas": benchmark_creas,
@@ -873,8 +893,10 @@ _FICHAS_FIXTURE = {
                  "cnae_fiscal": 4120400,
                  "cnae_fiscal_descricao": "Obras de engenharia",
                  "municipio": "São Paulo", "uf": "SP", "codigo_porte": 5,
-                 "qsa": [{"nome_socio": _COMISSIONADO},
-                         {"nome_socio": "PEDRO HENRIQUE RAMOS"}]},
+                 "qsa": [{"nome_socio": _COMISSIONADO,
+                          "cnpj_cpf_do_socio": "***456789**"},
+                         {"nome_socio": "PEDRO HENRIQUE RAMOS",
+                          "cnpj_cpf_do_socio": "***111222**"}]},
     # situação só pelo CÓDIGO (8 = baixada), sem descrição: é assim que a
     # minhareceita devolve parte das fichas. Ler o código como texto ("8" não
     # contém "ATIVA") acusava de baixa TODA ficha que viesse só com o número.
@@ -885,7 +907,8 @@ _FICHAS_FIXTURE = {
                     "cnae_fiscal_descricao": "Comércio varejista",
                     "municipio": "Rio de Janeiro", "uf": "RJ",
                     "codigo_porte": "03",
-                    "qsa": [{"nome_socio": "PEDRO HENRIQUE RAMOS"}]},
+                    "qsa": [{"nome_socio": "PEDRO HENRIQUE RAMOS",
+                             "cnpj_cpf_do_socio": "***111222**"}]},
     # ME no interior: sem ela, "quanto chega a micro e pequena" mede zero
     _CNPJ_FRACIONA: {"razao_social": "ALFA SERVICOS LTDA",
                      "descricao_situacao_cadastral": "ATIVA",
@@ -984,6 +1007,7 @@ ESPERADOS = [
     "contratos-certame-no-pncp",       # o PNCP diz qual compra originou o contrato
     "licitacoes-pncp-rol",             # o rol que o portal não publica está no PNCP
     "contratos-modalidade-de-origem",  # pregão × dispensa × inexigibilidade, por contrato
+    "fornecedores-socio-condenado-tcu",  # sócio condenado pelo TCU, casado por nome E documento
     "contratos-faturamento-pncp",      # nota fiscal: a entrega, terceira fonte do contrato
     "contratos-nota-de-terceiro",      # quem emitiu a nota não é quem venceu o certame
     "fornecedores-sancionados",        # pago durante inidoneidade (efeito nacional)
@@ -1163,6 +1187,11 @@ def _confere_metricas(achados) -> list[str]:
     exige("contratos-faturamento-pncp", "notas", 3)
     exige("contratos-faturamento-pncp", "contratos_com_nota", 2)
     exige("contratos-faturamento-pncp", "faturado_desses", 2_250_000)
+    # TCU: um par publicado (nome E dígitos batem). O homônimo — mesmo nome,
+    # documento diferente — NÃO entra: seis dígitos mascarados não identificam
+    # ninguém sozinhos, e nome sozinho acusa terceiro.
+    exige("fornecedores-socio-condenado-tcu", "fornecedores", 1)
+    exige("fornecedores-socio-condenado-tcu", "socios", 1)
     exige("contratos-nota-de-terceiro", "notas", 1)
     exige("contratos-nota-de-terceiro", "valor", 750_000)
     exige("contratos-modalidade-de-origem", "valor_contratacao_direta", 1_800_000)
@@ -1185,7 +1214,7 @@ def _confere_metricas(achados) -> list[str]:
                      f"na fixture, saiu {f.metricas.get('posicao')}º")
     exige("benchmark-despesa-por-profissional", "conselhos", 6)
 
-    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 21)
+    exige("diagnostico-etapas-nao-alcancadas", "etapas_esperadas", 22)
     exige("diagnostico-etapas-nao-alcancadas", "etapas_nao_alcancadas", 1)
     f = por_id.get("diagnostico-etapas-nao-alcancadas")
     if f is not None and f.metricas.get("quais") != "processos_itens":
@@ -1199,11 +1228,13 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_prefixo_e_nome())
     erros.extend(_regressao_novas_fontes())
     from .regressoes import (http_config as _reg_http, rodada11 as _reg_r11,
-                            rodada12 as _reg_r12, rodada13 as _reg_r13)
+                            rodada12 as _reg_r12, rodada13 as _reg_r13,
+                            rodada14 as _reg_r14)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
     erros.extend(_reg_r13.run())
+    erros.extend(_reg_r14.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa

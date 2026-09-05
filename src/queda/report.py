@@ -105,13 +105,16 @@ FONTES_POR_FRENTE: dict[str, list[str]] = {
     "Rede de influência": ["pagamentos", "convenios", "fichas_cnpj"],
     "Deliberações dos colegiados": ["atas"],
     "Forense estatística": ["pagamentos"],
-    "Fornecedores": ["pagamentos", "fichas_cnpj", "sancoes"],
+    "Fornecedores": ["pagamentos", "fichas_cnpj", "sancoes", "tcu_responsaveis"],
     "Comparação entre Creas": ["benchmark_creas"],
     "Diagnóstico da coleta": ["_coleta_diagnostico", "_coleta_http"],
 }
 FONTE_URL: dict[str, str] = {
     "pncp_contratos": "pncp.gov.br", "licitacoes_pncp": "pncp.gov.br", "pncp_atas": "pncp.gov.br",
-    "sancoes": "CEIS/CNEP (CGU)", "fichas_cnpj": "Receita Federal (ficha CNPJ)",
+    "sancoes": "CEIS/CNEP/CEPIM (CGU) + inidôneos (TCU)",
+    "tcu_responsaveis": "contas.tcu.gov.br",
+    "fichas_cnpj": "Receita Federal (ficha CNPJ)",
+    "pncp_cobrancas": "pncp.gov.br",
     "benchmark_creas": "crea-XX.implanta.net.br",
 }
 

@@ -271,6 +271,16 @@ CONTRATADA → CONTRATADA_CNPJ). `utils.so_digitos` e `utils.cnpj14` reconhecem
 o artefato ("….0", notação científica) e só dão zfill(14) a 12–13 dígitos —
 11 é CPF e fica como está. A regressão está em `regressoes/rodada12.py`.
 
+**Fichas cadastrais sem teto.** A frente de fornecedores consultava as 150
+maiores: 82% do VALOR pago, mas 149 das ~800 empresas — e a rede de sócios
+só enxerga quem tem ficha, o que dava quatro grupos econômicos num universo
+de 149. O teto saiu (`QUEDA_MAX_FICHAS` ainda o repõe). O custo é da
+PRIMEIRA rodada: o cache fica em `data/raw`, no Drive, e as seguintes não
+gastam requisição. Se o host bloquear por ritmo no meio, a consulta PARA e a
+rodada segue com o que já veio — toda frente que usa ficha declara a
+cobertura no próprio título, então parar cedo aparece no relatório em vez de
+virar número menor sem explicação.
+
 Uma etapa só está pronta quando os datasets **secundários** dela também
 vieram (`DATASETS_SECUNDARIOS`): `stage_pncp` grava contratos E notas
 fiscais, e se dava por pronta pelos 145 contratos em disco — as notas nunca
@@ -506,7 +516,8 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     servidor. Cobertura: só o que o próprio órgão registrou no PNCP, de
     contratos publicados lá — 2021 em diante, na prática o que a Lei 14.133
     tornou obrigatório.
-20. **Fornecedores sancionados (CEIS/CNEP/CEPIM, CGU)** — pagamento com data
+20. **Fornecedores sancionados (CEIS/CNEP/CEPIM da CGU + inidôneos do TCU)**
+    — pagamento com data
     dentro de uma sanção, em três perguntas: **quem a sanção alcança**
     (`alcance`: inidoneidade e proibição por improbidade valem para toda a
     administração; impedimento e suspensão valem para o ente que os aplicou —
@@ -527,6 +538,22 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     "NOME INFORMADO PELO ÓRGÃO SANCIONADOR" antes de "ÓRGÃO SANCIONADOR". O
     CEPIM (entidades sem fins lucrativos impedidas) entra como foto do dia:
     "consta no cadastro", nunca "pagamento durante impedimento".
+20b. **TCU — a jurisdição que alcança o conselho.** Quem julga as contas de
+    um conselho federal é o Tribunal de Contas da União, não a CGU: o CEIS
+    cobre a sanção administrativa do Executivo, e a **declaração de
+    inidoneidade do art. 46 da Lei 8.443/1992** fica de fora dele. Ela entra
+    no MESMO dataset de sanções (a dedupe, a regra de alcance e o corte pela
+    data do contrato já existem e valem igual) com alcance nacional, que é o
+    que a lei diz. As listas de **pessoas** — inabilitados (art. 60) e contas
+    julgadas irregulares (art. 16, III, o inciso da Ficha Limpa) — vão para
+    dataset próprio e cruzam com o **quadro societário** das fichas: o par só
+    é publicado quando o nome bate **e** os dígitos visíveis do documento
+    confirmam. O CPF vem mascarado dos dois lados; casar por nome publicaria
+    homônimo, que é acusação contra terceiro. Nenhum caminho da API do TCU
+    foi verificado contra a rede na sessão em que isto foi escrito: o cliente
+    sonda candidatos em ordem, aprende o que responder, guarda o corpo de
+    cada recusa em `data/raw/http-4xx/` e declara a fonte **indisponível**
+    enquanto nenhum responder — nunca "não há inidôneo".
 21. **Comparação entre Creas** (opt-in, `--comparar-creas`) — a mesma API
     serve os 27 conselhos e o Confea. Despesa por profissional ativo e parcela
     em diárias/jetons/indenizações, pelo mesmo endpoint e pela mesma taxonomia,

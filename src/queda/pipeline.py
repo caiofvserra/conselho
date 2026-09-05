@@ -1627,8 +1627,45 @@ def stage_pncp_atas(desde, ate):
     return out
 
 
+_CATEGORIA_TCU_INIDONEO = "Declaração de inidoneidade para licitar (TCU)"
+
+
+def _linhas_tcu_inidoneos() -> tuple[list[dict], dict]:
+    """Inidôneos do TCU no formato das sanções da CGU.
+
+    Entram no MESMO dataset de propósito: a dedupe, a regra de alcance e o
+    cruzamento com a data do contrato já existem e valem igual. A categoria
+    contém "inidoneidade", então `alcance_sancao` a classifica como nacional —
+    que é o que a lei diz (Lei 8.443/1992, art. 46: o TCU declara a
+    inidoneidade para licitar na Administração Pública FEDERAL, e o Crea-SP é
+    autarquia federal).
+    """
+    linhas, meta = clients.baixar_tcu("tcu_inidoneos")
+    if not linhas:
+        return [], meta
+    return [{
+        "cadastro": "tcu_inidoneos",
+        "documento": r["documento"],
+        "nome": r["nome"],
+        "categoria": _CATEGORIA_TCU_INIDONEO,
+        "inicio": r["inicio"],
+        "fim": r["fim"],
+        "orgao_sancionador": "TRIBUNAL DE CONTAS DA UNIAO",
+        "esfera": "FEDERAL",
+        "uf_orgao": "DF",
+        "fundamento": "Lei 8.443/1992, art. 46",
+        "processo": r["processo"],
+        "deliberacao": r["deliberacao"],
+    } for r in linhas], meta
+
+
 def stage_sancoes(ate=None):
-    """CEIS + CNEP (CGU), a foto de hoje. Tiro único; a retomada é o cache."""
+    """CEIS + CNEP + CEPIM (CGU) e inidôneos do TCU, a foto de hoje.
+
+    Tiro único; a retomada é o cache. O TCU entra aqui porque é a mesma
+    pergunta sobre o mesmo fornecedor — e é a jurisdição que efetivamente
+    alcança um conselho federal, que o CEIS (sanção do Executivo) não cobre.
+    """
     manual = manual_rows("sancoes")
     if manual is not None:
         _marcar_manual("sancoes", len(manual))
@@ -1642,6 +1679,10 @@ def stage_sancoes(ate=None):
             log.warning("sancoes: %s indisponível (nenhuma data respondeu)", cadastro)
             continue
         todas.extend(linhas)
+    tcu, meta_tcu = _linhas_tcu_inidoneos()
+    metas.append({"cadastro": "tcu_inidoneos",
+                  "data": (f"{len(tcu)} registro(s)" if tcu else None)})
+    todas.extend(tcu)
     df = pd.DataFrame(todas)
     if not df.empty:
         df["inicio"] = parse_data(df["inicio"])
@@ -1658,6 +1699,35 @@ def stage_sancoes(ate=None):
     out = _salvar("sancoes", df)
     _DIAGNOSTICO[-1]["fontes"] = "; ".join(
         f"{m['cadastro']}: {m.get('data') or 'sem resposta'}" for m in metas)
+    return out
+
+
+def stage_tcu_responsaveis(ate=None):
+    """Pessoas condenadas pelo TCU: inabilitadas para função de confiança
+    (Lei 8.443/1992, art. 60) e com contas julgadas irregulares (que é o
+    inciso da Lei da Ficha Limpa, LC 64/1990, art. 1º, I, "g").
+
+    Dataset próprio porque a chave é CPF, não CNPJ: cruza com o quadro
+    societário das fichas cadastrais dos fornecedores, nunca por nome — nome
+    de pessoa gera homônimo, e homônimo aqui é acusação contra terceiro.
+    """
+    linhas: list[dict] = []
+    metas: list[str] = []
+    indisponiveis: list[str] = []
+    for cadastro in ("tcu_inabilitados", "tcu_contas_irregulares"):
+        rows, meta = clients.baixar_tcu(cadastro)
+        if rows is None:
+            indisponiveis.append(cadastro)
+            metas.append(f"{cadastro}: sem resposta")
+            continue
+        linhas.extend(rows)
+        metas.append(f"{cadastro}: {len(rows)}")
+    out = _salvar("tcu_responsaveis", pd.DataFrame(linhas))
+    _DIAGNOSTICO[-1]["fontes"] = "; ".join(metas)
+    if indisponiveis:
+        _DIAGNOSTICO[-1]["indisponivel"] = (
+            "TCU não respondeu a nenhum caminho candidato de: "
+            + ", ".join(indisponiveis))
     return out
 
 
@@ -1727,6 +1797,7 @@ def _etapas(desde: int | None, ate: int) -> dict:
         "licitacoes_pncp": lambda: stage_licitacoes_pncp(desde, ate),
         "pncp_atas": lambda: stage_pncp_atas(desde, ate),
         "sancoes": lambda: stage_sancoes(ate),
+        "tcu_responsaveis": lambda: stage_tcu_responsaveis(ate),
         "benchmark_creas": lambda: stage_benchmark_creas(ate),
     }
 

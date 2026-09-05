@@ -169,6 +169,39 @@ SANCOES_CADASTROS = {
 }
 SANCOES_RECUO_DIAS = 10
 
+# ------------------------------------------------------- TCU (Lei 8.443/1992)
+# Quem julga as contas dos conselhos de fiscalização profissional é o TCU, não
+# a CGU: o CEIS cobre a sanção administrativa do Executivo, e a inidoneidade
+# declarada pelo TRIBUNAL (art. 46) fica de fora dele. São duas perguntas
+# distintas sobre o mesmo fornecedor, e só a primeira estava sendo feita.
+#
+# Os caminhos abaixo são CANDIDATOS: nenhum foi verificado contra a rede na
+# sessão em que isto foi escrito (o proxy bloqueia *.gov.br). O cliente tenta
+# um a um, guarda o corpo de cada 4xx em data/raw/http-4xx/ e aprende o que
+# respondeu. Enquanto nenhum responder, a fonte fica declarada indisponível —
+# nunca "não há inidôneos".
+TCU_CADASTROS: dict[str, tuple[str, ...]] = {
+    # empresas: liga por CNPJ, direto no cruzamento de fornecedores
+    "tcu_inidoneos": (
+        "https://contas.tcu.gov.br/ords/condenacao/consulta/inidoneos",
+        "https://contas.tcu.gov.br/ords/api/condenacao/consulta/inidoneos",
+        "https://contas.tcu.gov.br/ords/condenacao/consulta/licitantes-inidoneos",
+    ),
+    # pessoas: liga por CPF do sócio nas fichas cadastrais
+    "tcu_inabilitados": (
+        "https://contas.tcu.gov.br/ords/condenacao/consulta/inabilitados",
+        "https://contas.tcu.gov.br/ords/api/condenacao/consulta/inabilitados",
+    ),
+    "tcu_contas_irregulares": (
+        "https://contas.tcu.gov.br/ords/condenacao/consulta/contas-irregulares",
+        "https://contas.tcu.gov.br/ords/api/condenacao/consulta/contas-irregulares",
+        "https://contas.tcu.gov.br/ords/condenacao/consulta/responsaveis-contas-irregulares",
+    ),
+}
+# O ORDS pagina com offset; 500 por página é o teto usual.
+TCU_PAGINA = 500
+TCU_MAX_PAGINAS = 200
+
 # Comparação entre Creas: a MESMA API Implanta serve os 27 conselhos e o
 # Confea — o host segue o padrão `crea-XX.implanta.net.br` (confirmado para
 # crea-sp e confea-br pela documentação pública; os demais são CANDIDATOS que
@@ -377,7 +410,12 @@ JANELA_FRACIONAMENTO_DIAS = 90
 ADITIVO_LIMITE_PCT = 25.0        # % acumulado de aditivos sobre o contrato original
 PISO_CONTRATO_ADITIVO = 50_000.0 # contratos abaixo disso distorcem o % de aditivo
 PISO_ANALISE_FORNECEDOR = 50_000.0   # só consulta CNPJ de quem recebeu acima disso
-MAX_CONSULTAS_CNPJ = 150
+# Teto de fichas cadastrais por rodada. `None` = sem teto: consulta todo
+# fornecedor acima do piso. O teto de 150 cobria 82% do VALOR pago mas só 149
+# das ~800 empresas, e a rede de sócios só enxerga o que tem ficha — quatro
+# grupos econômicos num universo de 149. O custo é da PRIMEIRA rodada (o
+# cache fica em data/raw, no Drive); as seguintes não gastam requisição.
+MAX_CONSULTAS_CNPJ = int(os.environ.get("QUEDA_MAX_FICHAS") or 0) or None
 IDADE_MINIMA_EMPRESA_DIAS = 180  # empresa criada há menos que isso antes do 1º contrato
 
 # Anos de eleição para a presidência do Crea (mandato de 3 anos). Usados para

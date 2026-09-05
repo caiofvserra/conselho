@@ -7,6 +7,7 @@ import re
 import pandas as pd
 
 from .. import clients, config
+from ..http import RateLimited
 from .. import taxonomia as T
 from ..utils import coluna, norm_nome, so_digitos
 
@@ -151,7 +152,9 @@ def fichas_cnpj(staged) -> dict[str, dict]:
             ni = so_digitos(r.get("fornecedor_ni"))
             if len(ni) == 14:
                 candidatos[ni] = candidatos.get(ni, 0) + float(r.get("valorGlobal") or 0)
-    top = sorted(candidatos.items(), key=lambda kv: -kv[1])[: config.MAX_CONSULTAS_CNPJ]
+    ordenados = sorted(candidatos.items(), key=lambda kv: -kv[1])
+    teto = config.MAX_CONSULTAS_CNPJ
+    top = ordenados[:teto] if teto else ordenados
     # Esta é a fase mais lenta da ANÁLISE, e a única que vai à rede: o throttle
     # por host é de config.THROTTLE_SECONDS, então 150 fichas passam de seis
     # minutos na primeira vez. Sem este aviso a célula do Colab fica parada, sem
@@ -166,10 +169,21 @@ def fichas_cnpj(staged) -> dict[str, dict]:
                  config.RAW_DIR.name)
     fichas = {}
     for i, (cnpj, _) in enumerate(top, 1):
-        ficha = clients.consultar_cnpj(cnpj)
+        try:
+            ficha = clients.consultar_cnpj(cnpj)
+        except RateLimited:
+            # Sem teto de consultas, um bloqueio no meio custaria a rodada
+            # inteira em espera. Para aqui e segue com o que já veio: o que foi
+            # consultado fica em cache, e a rodada seguinte continua de onde
+            # esta parou. Toda frente que usa ficha declara a cobertura no
+            # próprio título, então parar cedo aparece no relatório.
+            log.warning("fichas de CNPJ: host bloqueou por ritmo em %d/%d — "
+                        "seguindo com as %d já obtidas (o resto vem na próxima "
+                        "rodada, do cache em diante)", i, len(top), len(fichas))
+            break
         if ficha:
             fichas[cnpj] = ficha
-        if i % 25 == 0:
+        if i % 50 == 0:
             log.info("fichas de CNPJ: %d/%d", i, len(top))
     _FICHAS = fichas
     return fichas
@@ -177,10 +191,31 @@ def fichas_cnpj(staged) -> dict[str, dict]:
 
 def qsa_nomes(ficha: dict) -> list[str]:
     """Nomes dos sócios (QSA) numa ficha BrasilAPI/minhareceita."""
+    return [nome for nome, _doc in qsa_socios(ficha)]
+
+
+def qsa_socios(ficha: dict) -> list[tuple[str, str]]:
+    """(nome normalizado, dígitos do documento) de cada sócio.
+
+    O CPF do sócio vem MASCARADO na Receita ("***123456**"): sobram os seis
+    dígitos do meio. Seis dígitos não identificam ninguém sozinhos — quem
+    cruzar por eles publica homônimo. Servem só para CONFIRMAR um casamento
+    que o nome já sugeriu, que é como `fornecedores.py` os usa.
+    """
     qsa = ficha.get("qsa") or ficha.get("socios") or []
-    nomes = []
+    out: list[tuple[str, str]] = []
     for s in qsa:
+        if not isinstance(s, dict):
+            continue
         n = s.get("nome_socio") or s.get("nome") or s.get("nome_socio_razao_social")
-        if n:
-            nomes.append(norm_nome(n))
-    return nomes
+        if not n:
+            continue
+        doc = ""
+        for chave in ("cnpj_cpf_do_socio", "cpf_cnpj_socio", "cpf_socio",
+                      "documento_socio", "cpf", "cnpj_socio"):
+            v = s.get(chave)
+            if v:
+                doc = so_digitos(v)
+                break
+        out.append((norm_nome(n), doc))
+    return out

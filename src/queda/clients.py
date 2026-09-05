@@ -1451,6 +1451,131 @@ def sondar_creas(ano: int) -> list[dict]:
 
 
 # ================================================================ CNPJ
+# ------------------------------------------------------------------- TCU
+# Colunas do TCU por TRECHO do nome normalizado. O layout não foi verificado
+# contra a rede nesta sessão; por isso nada aqui exige um nome exato, e o que
+# não for encontrado fica vazio em vez de virar palpite.
+_COLUNAS_TCU: dict[str, tuple[tuple[str, ...], ...]] = {
+    "documento": (("CPF", "CNPJ"), ("CNPJ",), ("CPF",), ("NI",)),
+    "nome": (("NOME",), ("RAZAO", "SOCIAL"), ("INTERESSADO",)),
+    "inicio": (("DATA", "INICIO"), ("DATA", "TRANSITO"), ("TRANSITO",), ("DATA", "ACORDAO")),
+    "fim": (("DATA", "FINAL"), ("DATA", "FIM"), ("DATA", "TERMINO")),
+    "processo": (("PROCESSO",), ("NUMERO", "PROCESSO")),
+    "deliberacao": (("DELIBERACAO",), ("ACORDAO",)),
+    "uf": (("UF",),),
+}
+
+
+def _resolver_colunas_tcu(colunas: list[str]) -> dict[str, str | None]:
+    """Para cada campo, a coluna de nome mais CURTO que contém todos os trechos
+    de alguma alternativa — a coluna-mãe é sempre mais curta que a derivada."""
+    norm = {c: _norm_coluna(c) for c in colunas}
+    out: dict[str, str | None] = {}
+    for campo, alternativas in _COLUNAS_TCU.items():
+        achada = None
+        for trechos in alternativas:
+            candidatas = [c for c, n in norm.items()
+                          if all(t in n for t in trechos)]
+            if candidatas:
+                achada = min(candidatas, key=lambda c: len(norm[c]))
+                break
+        out[campo] = achada
+    return out
+
+
+def _tcu_linhas(payload) -> list[dict] | None:
+    """Extrai a lista de registros de um payload do ORDS (ou de uma lista crua).
+
+    O ORDS devolve {"items": [...], "hasMore": bool}; outras rotas devolvem a
+    lista direto. Devolve None quando o payload não tem lista nenhuma — o
+    chamador trata como "este caminho não serve", não como "não há registro".
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for chave in ("items", "data", "registros", "resultado"):
+            v = payload.get(chave)
+            if isinstance(v, list):
+                return v
+    return None
+
+
+_TCU_URL_APRENDIDA: dict[str, str] = {}
+
+
+def baixar_tcu(cadastro: str) -> tuple[list[dict] | None, dict]:
+    """Uma lista de condenações do TCU → linhas normalizadas. (linhas, meta).
+
+    `linhas` é None quando NENHUM caminho candidato respondeu com uma lista: a
+    fonte fica declarada indisponível, nunca "não há ninguém na lista". O
+    caminho que funcionar fica aprendido para as páginas seguintes e para as
+    próximas chamadas da mesma execução.
+
+    Nenhum destes caminhos foi verificado contra a rede na sessão em que isto
+    foi escrito. O corpo de cada recusa fica em `data/raw/http-4xx/`, que é o
+    que permitiu descobrir, na rodada 12, que o PNCP só aceita janela de 30
+    dias — o mesmo mecanismo resolve este aqui na primeira rodada com rede.
+    """
+    candidatos = list(config.TCU_CADASTROS.get(cadastro, ()))
+    aprendida = _TCU_URL_APRENDIDA.get(cadastro)
+    if aprendida in candidatos:
+        candidatos.remove(aprendida)
+        candidatos.insert(0, aprendida)
+    meta: dict = {"cadastro": cadastro, "tentativas": []}
+    for url in candidatos:
+        meta["tentativas"].append(url)
+        linhas: list[dict] = []
+        offset, pagina = 0, 0
+        primeira = None
+        while pagina < config.TCU_MAX_PAGINAS:
+            try:
+                payload = get_json(url, {"limit": config.TCU_PAGINA, "offset": offset})
+            except RuntimeError as e:
+                log.warning("tcu/%s: %s", cadastro, e)
+                payload = None
+            if payload is None:
+                break
+            rows = _tcu_linhas(payload)
+            if rows is None:
+                log.info("tcu/%s: %s respondeu sem lista de registros — próximo caminho",
+                         cadastro, url)
+                break
+            if primeira is None:
+                primeira = rows
+            linhas.extend(rows)
+            tem_mais = bool(payload.get("hasMore")) if isinstance(payload, dict) else False
+            if not tem_mais or not rows:
+                break
+            offset += len(rows)
+            pagina += 1
+        if primeira is None:
+            continue
+        _TCU_URL_APRENDIDA[cadastro] = url
+        colunas = sorted({k for r in linhas[:50] for k in r}) if linhas else []
+        mapa = _resolver_colunas_tcu(colunas)
+        meta.update({"url": url, "registros": len(linhas), "colunas": colunas,
+                     "mapa": mapa})
+        if linhas and not mapa["documento"]:
+            log.warning("tcu/%s: nenhuma coluna de CPF/CNPJ em %s",
+                        cadastro, colunas[:8])
+            return [], meta
+        out = []
+        for r in linhas:
+            doc = re.sub(r"\D", "", str(r.get(mapa["documento"]) or ""))
+            out.append({
+                "cadastro": cadastro,
+                "documento": doc,
+                "nome": (r.get(mapa["nome"]) or "") if mapa["nome"] else "",
+                "inicio": (r.get(mapa["inicio"]) or "") if mapa["inicio"] else "",
+                "fim": (r.get(mapa["fim"]) or "") if mapa["fim"] else "",
+                "processo": (r.get(mapa["processo"]) or "") if mapa["processo"] else "",
+                "deliberacao": (r.get(mapa["deliberacao"]) or "") if mapa["deliberacao"] else "",
+                "uf": (r.get(mapa["uf"]) or "") if mapa["uf"] else "",
+            })
+        return out, meta
+    return None, meta
+
+
 def consultar_cnpj(cnpj: str) -> dict | None:
     """Ficha cadastral de um CNPJ (fornecedores PJ apenas — nunca CPFs)."""
     cnpj = re.sub(r"\D", "", cnpj or "")
