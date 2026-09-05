@@ -1738,7 +1738,10 @@ def _acordao_linha(r: dict, texto: str, citados: set[str]) -> dict:
         "tipo_processo": ci("tipoProcesso", "tipo"),
         "url": ci("urlAcordao", "url", "link"),
         "cnpjs_citados": ", ".join(sorted(citados)),
-        "trecho": texto[:600],
+        # 600 caracteres cortavam a ementa antes do dispositivo — é lá
+        # que estão multa, débito e tomada de contas especial, que é o
+        # que a análise precisa ler.
+        "trecho": texto[:1200],
     }
 
 
@@ -1833,10 +1836,14 @@ def stage_tcu_acordaos(ate=None):
         log.debug("tcu/acordaos: não foi possível gravar o progresso (%s)", e)
 
     out = _salvar("tcu_acordaos", df)
+    # "blocos de N" seria falso: o servidor às vezes devolve mais do que se
+    # pediu (dois blocos de 500 vieram com 1000 na rodada 18). O número que vale
+    # é o que ele entregou, e é esse que o relatório publica.
     _DIAGNOSTICO[-1]["fontes"] = (
         f"varridos {varridos_antes + varridos} acórdão(s) no total "
-        f"({varridos} nesta rodada, {blocos} bloco(s) de {quantidade})"
-        + ("; base percorrida até o fim" if fim_da_base else ""))
+        f"({varridos} nesta rodada, em {blocos} pedido(s) de {quantidade})"
+        + ("; base percorrida até o fim" if fim_da_base else
+           f"; a próxima rodada continua do registro {inicio}"))
     if indisponivel:
         _DIAGNOSTICO[-1]["indisponivel"] = indisponivel
     return out
@@ -2032,6 +2039,30 @@ def _secundarios_pendentes(nome: str) -> list[str]:
                 and not _checkpoint_dir(secundario).is_dir()):
             faltando.append(f"{secundario} (nunca coletado)")
     return faltando
+
+
+def _diagnostico_dos_secundarios(nome: str) -> None:
+    """Registra no diagnóstico da coleta os datasets secundários de uma etapa
+    REAPROVEITADA do disco.
+
+    Sem isto eles somem do relatório. A etapa reaproveitada grava uma linha só,
+    a do dataset principal, porque `_salvar` — que é quem escreve o diagnóstico
+    — não chega a ser chamado. `pncp_cobrancas` ficou assim: vazio desde a
+    primeira rodada, invisível para `_porque_vazio`, e o relatório em silêncio
+    sobre a ausência do cruzamento nota fiscal × contrato. Um dataset que não
+    aparece no diagnóstico não é perguntado, e o que não é perguntado nunca é
+    respondido.
+    """
+    for secundario in DATASETS_SECUNDARIOS.get(nome, ()):
+        em_disco = _ja_coletado(secundario, exigir_esquema=False)
+        _DIAGNOSTICO.append({
+            "dataset": secundario,
+            "linhas": 0 if em_disco is None else int(len(em_disco)),
+            "colunas": 0 if em_disco is None else int(em_disco.shape[1]),
+            "ano_min": None, "ano_max": None, "anos_cobertos": 0,
+            "anos_faltando": "", "retomado": True,
+            "secundario_de": nome,
+        })
 
 
 def etapa_pronta(nome: str, desde: int | None,
@@ -2234,6 +2265,7 @@ def build_staged(desde: int | None, ate: int, *,
                         "colunas": int(pronto.shape[1]),
                         "ano_min": None, "ano_max": None, "anos_cobertos": 0,
                         "anos_faltando": "", "retomado": True})
+                    _diagnostico_dos_secundarios(nome)
                     continue
             try:
                 staged[nome] = executar()

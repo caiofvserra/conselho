@@ -549,6 +549,17 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     servidor. Cobertura: só o que o próprio órgão registrou no PNCP, de
     contratos publicados lá — 2021 em diante, na prática o que a Lei 14.133
     tornou obrigatório.
+
+    `pncp_cobrancas` é um dataset **secundário**: quem o coleta é a etapa
+    `pncp_contratos`. Etapa reaproveitada do disco (`--retomar`, que é como o
+    caderno roda sempre) não chama `_salvar`, e era `_salvar` quem escrevia a
+    linha do dataset no diagnóstico da coleta — então o secundário sumia do
+    `_coleta_diagnostico.csv`, ficava fora da lista de vazios e o relatório
+    nunca perguntava por que o cruzamento nota fiscal × contrato não existia.
+    `_diagnostico_dos_secundarios` fecha isso: a etapa reaproveitada registra
+    os secundários dela lidos do disco, com a coluna `secundario_de` dizendo
+    de quem vieram. **Dataset que não aparece no diagnóstico não é
+    perguntado, e o que não é perguntado nunca é respondido.**
 20. **Fornecedores sancionados (CEIS/CNEP/CEPIM da CGU + inidôneos do TCU)**
     — pagamento com data
     dentro de uma sanção, em três perguntas: **quem a sanção alcança**
@@ -604,12 +615,27 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     A API só pagina (`inicio`, `quantidade`): não há busca por texto, então
     a varredura é sequencial e o filtro é local (nome do conselho, CNPJ do
     conselho, CNPJ de cada fornecedor). Por isso ela é **limitada por
-    rodada** (`QUEDA_TCU_ACORDAOS_BLOCOS`, 40 blocos de 500 por padrão) e
+    rodada** (`QUEDA_TCU_ACORDAOS_BLOCOS`, 40 pedidos de 500 por padrão) e
     **retomável**, com o progresso em `data/raw/tcu-acordaos/progresso.json`;
     só o que casa é guardado. Todo achado publica quantos acórdãos foram
-    lidos: **ausência de citação não é prova de que não exista**. Acórdão
-    que cita só um fornecedor, em processo de outro jurisdicionado, vai para
-    achado separado com gravidade `info` — não é decisão sobre o Crea-SP.
+    lidos e de que registro a próxima rodada continua: **ausência de citação
+    não é prova de que não exista**. Acórdão que cita só um fornecedor, em
+    processo de outro jurisdicionado, vai para achado separado com gravidade
+    `info` — não é decisão sobre o Crea-SP.
+
+    A ementa de cada acórdão é classificada (coluna `ementa_menciona`): termos
+    de matéria condenatória — multa, débito, dano ao erário, tomada de contas
+    especial, contas julgadas irregulares, inidoneidade, inabilitação — sobem
+    o achado para gravidade `alta` e vão para o título; termos de providência
+    (determinação, recomendação, descumprimento, audiência, citação, cautelar,
+    alerta) e de natureza do processo (prestação de contas, monitoramento,
+    representação, denúncia, licitação) ficam na coluna sem mexer na
+    gravidade. **A ementa diz o assunto, não o resultado:** uma que fala em
+    apuração de *eventual* dano trata de apuração em curso, e o relatório
+    repete essa distinção em vez de apagá-la. O que decide é o dispositivo, e
+    o link de cada linha vai nele. O corte do texto guardado é de 1.200
+    caracteres porque o dispositivo fica no FIM da ementa — em 600 ele era
+    decapitado, e multa e tomada de contas especial nunca apareciam.
 21. **Comparação entre Creas** (opt-in, `--comparar-creas`) — a mesma API
     serve os 27 conselhos e o Confea. Despesa por profissional ativo e parcela
     em diárias/jetons/indenizações, pelo mesmo endpoint e pela mesma taxonomia,

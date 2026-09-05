@@ -780,12 +780,22 @@ def _staged() -> dict[str, pd.DataFrame]:
     # Acórdãos do TCU já filtrados por `stage_tcu_acordaos`: um cita o próprio
     # conselho, outro cita só um fornecedor dele num processo de outro órgão —
     # e esse segundo NÃO pode virar achado contra o conselho.
+    #
+    # A ementa do primeiro tem a forma da que a rodada 18 encontrou de verdade
+    # (Acórdão 2379/2026-1ª Câmara): monitoramento com multa, tomada de contas
+    # especial e apuração de EVENTUAL dano. É ela que exercita o caminho de
+    # gravidade alta e a coluna `ementa_menciona` até o HTML — sem uma ementa
+    # com matéria condenatória, esse caminho só existiria na regressão.
     tcu_acordaos = pd.DataFrame([
         {"numero": "1234", "ano": 2022, "colegiado": "Plenário",
          "relator": "Ministro X", "data_sessao": "2022-06-15",
          "processo": "TC 010.111/2021-3", "tipo_processo": "Prestação de Contas",
          "url": "https://pesquisa.apps.tcu.gov.br/#/documento/acordao/1234/2022",
-         "cnpjs_citados": "00000000000191", "trecho": "CONTAS DO CREA SP",
+         "cnpjs_citados": "00000000000191",
+         "trecho": "CONTAS DO CREA SP. MONITORAMENTO. DETERMINACOES DO TCU. "
+                   "APURACAO DE EVENTUAL DANO AO ERARIO. INSTAURACAO DE TOMADA "
+                   "DE CONTAS ESPECIAL. DESCUMPRIMENTO REITERADO DE "
+                   "DETERMINACAO. MULTA. ALERTA.",
          "cita_o_conselho": True},
         {"numero": "5678", "ano": 2024, "colegiado": "Segunda Câmara",
          "relator": "Ministro Y", "data_sessao": "2024-03-20",
@@ -1212,6 +1222,24 @@ def _confere_metricas(achados) -> list[str]:
     # O acórdão que cita só um FORNECEDOR não pode entrar na conta do que o
     # Tribunal decidiu sobre o conselho: são processos de outro jurisdicionado.
     exige("tcu-acordaos-conselho", "acordaos", 1)
+    # A ementa condenatória sobe o achado para `alta` e o título diz quais
+    # termos apareceram: "1 acórdão cita o conselho" não faz ninguém abrir nada.
+    exige("tcu-acordaos-conselho", "ementa_com_materia_condenatoria", 1)
+    f = por_id.get("tcu-acordaos-conselho")
+    if f is not None:
+        if f.gravidade != "alta":
+            erros.append(f"tcu-acordaos-conselho: ementa com multa e tomada de "
+                         f"contas especial saiu como {f.gravidade!r} — o que o "
+                         "Tribunal já apurou é o achado mais verificável do "
+                         "relatório e não pode ficar abaixo de alta")
+        faltando = [t for t in ("multa", "tomada de contas especial",
+                                "dano ao erário") if t not in f.titulo]
+        if faltando:
+            erros.append(f"tcu-acordaos-conselho: o título não cita {faltando} — "
+                         "'1 acórdão cita o conselho' não faz ninguém abrir nada")
+        if f.evidencia is None or "ementa_menciona" not in f.evidencia.columns:
+            erros.append("tcu-acordaos-conselho: a evidência não leva a coluna "
+                         "`ementa_menciona` até o relatório")
     exige("tcu-acordaos-fornecedores", "acordaos", 1)
     exige("tcu-acordaos-fornecedores", "fornecedores_citados", 1)
     exige("fornecedores-socio-condenado-tcu", "fornecedores", 1)
@@ -1254,7 +1282,8 @@ def _confere_metricas(achados) -> list[str]:
     from .regressoes import (http_config as _reg_http, rodada11 as _reg_r11,
                             rodada12 as _reg_r12, rodada13 as _reg_r13,
                             rodada14 as _reg_r14, rodada15 as _reg_r15,
-                            rodada16 as _reg_r16, rodada17 as _reg_r17)
+                            rodada16 as _reg_r16, rodada17 as _reg_r17,
+                            rodada18 as _reg_r18)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
@@ -1263,6 +1292,7 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_reg_r15.run())
     erros.extend(_reg_r16.run())
     erros.extend(_reg_r17.run())
+    erros.extend(_reg_r18.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
