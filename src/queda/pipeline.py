@@ -236,7 +236,11 @@ def _assinatura_etapa(etapa: str, ano: int | None = None) -> str:
     base = ("vigenciaInicio,vigenciaTermino" if etapa in _ETAPAS_VIGENCIA
             else "referenciaInicio,referenciaTermino")
     if ano is not None and not _exercicio_encerrado(ano):
-        return f"{base};fim={clients._mes_final(ano)}"
+        # Mês do CALENDÁRIO, não o que `implanta_ano` aprendeu no meio da
+        # rodada: o mês aprendido vive no processo, e uma recusa assinada com
+        # ele pareceria de outra pergunta na rodada seguinte — o TTL de 12 h
+        # cairia sozinho. O recuo do mês já é tratado na hora do fetch.
+        return f"{base};fim={datetime.now().month:02d}"
     return base
 
 
@@ -1301,6 +1305,12 @@ def _resolver_orgao_tolerante(razao: str, **kw) -> dict | None:
     anterior. Falha de um órgão RELACIONADO vira aviso no diagnóstico."""
     try:
         return clients.pncp_resolver_orgao(razao, **kw)
+    except RateLimited:
+        # `RateLimited` herda de RuntimeError: sem esta cláusula, o bloqueio
+        # por ritmo virava "órgão indisponível" e a rodada seguia batendo nos
+        # outros quatro órgãos (~11 min de backoff cada) contra um host que
+        # já mandou parar. Bloqueio para tudo, como em toda a pipeline.
+        raise
     except RuntimeError as e:
         log.warning("PNCP: órgão %r não pôde ser consultado (%s) — a rodada "
                     "segue sem ele", razao, e)
@@ -1365,6 +1375,8 @@ def stage_pncp(desde, ate):
         if o["papel"] == "alvo":
             try:
                 instrumentos = clients.pncp_instrumentos_cobranca(o["cnpj"], ini, ate)
+            except RateLimited:
+                raise                     # bloqueio por ritmo: parar tudo
             except RuntimeError as e:
                 log.warning("PNCP: instrumentos de cobrança indisponíveis (%s) — "
                             "os contratos já coletados ficam", e)
@@ -1544,10 +1556,11 @@ def stage_pncp_atas(desde, ate):
     Por que existe: 6 dos 11 "contratos ausentes do PNCP" da rodada 10 eram
     ATAs do portal próprio (ATA 004/2024 etc.), e o cruzamento só consultava
     `/v1/contratos` — ata nunca ia casar, por construção. O parâmetro do órgão
-    neste endpoint não foi verificado desta sessão; `clients.pncp_atas_mes`
-    tenta `cnpj` e `cnpjOrgao`, e uma janela sem resposta vira recusa (12 h),
-    não "sem atas". Falha total grava vazio e anota `indisponivel` no
-    diagnóstico, sem derrubar a coleta.
+    é `cnpj`, CONFIRMADO na rodada 11 (o ledger registra 200/204 com ele em
+    todas as janelas); `clients.pncp_atas_mes` ainda tenta `cnpjOrgao` como
+    alternativa, e uma janela sem resposta vira recusa (12 h), não "sem atas".
+    Falha total grava vazio e anota `indisponivel` no diagnóstico, sem
+    derrubar a coleta.
     """
     buscar_atas = getattr(clients, "pncp_atas_mes", None)
     alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO,
@@ -1576,7 +1589,7 @@ def stage_pncp_atas(desde, ate):
     if not df.empty:
         df["_ano"] = pd.to_numeric(coluna(df, "anoAta", None), errors="coerce")
         # O endpoint filtra por VIGÊNCIA: uma ata vigente por 24 meses volta em
-        # 24 janelas mensais. Na rodada 11 foram 138 linhas para 10 atas.
+        # 24 janelas mensais. Na rodada 11 foram 138 linhas para 8 atas.
         antes = len(df)
         chave = coluna(df, "numeroControlePNCPAta", None)
         if chave.notna().all() and chave.astype(str).str.strip().ne("").all():
@@ -1829,7 +1842,12 @@ def inventario(desde: int | None, ate: int) -> pd.DataFrame:
         anos_recusados: list[int] = []
         for chave in chaves:
             for ano in range(desde or config.ANO_PISO, ate + 1):
-                estado = _janela_estado(chave, str(ano), ano)
+                # Com a assinatura, como no laço real (`_anos_com_sondagem`):
+                # sem ela um `.recusado` de pergunta antiga contava como
+                # "recusado" aqui e como "pendente" lá, e `faltando` se
+                # contradizia sobre o mesmo exercício.
+                estado = _janela_estado(chave, str(ano), ano,
+                                        _assinatura_etapa(chave, ano))
                 com_dado += estado == "linhas"
                 vazias += estado in ("vazio", "vazio_expirado")
                 if estado == "recusado":

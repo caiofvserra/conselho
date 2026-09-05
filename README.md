@@ -202,8 +202,10 @@ ela nunca vira `.vazio`. O marcador `.recusado` guarda `timestamp|n|assinatura`
 12 h no exercício em curso; em exercício **encerrado**, recusado em duas rodadas
 distintas com a mesma pergunta, vale 30 dias — e cai sozinho se a pergunta
 mudar. No exercício em curso a pergunta inclui o **mês final** pedido
-(`;fim=09`): a recusa de "12/2026" gravada pela rodada 10 não segura a janela
-depois de o código passar a pedir o mês corrente (rodada 11: nenhum endpoint
+(`;fim=09`, o mês do calendário — não o que o recuo aprendeu no meio da
+rodada, que vive só naquele processo): a recusa de "12/2026" gravada pela
+rodada 10 não segura a janela depois de o código passar a pedir o mês
+corrente (rodada 11: nenhum endpoint
 anual foi à rede por 2026 por causa disso). A coluna `recusados_pelo_portal`
 de `faltando` diz quais são. Medido na
 rodada 10: 87% do tempo (979 s de 1.123 s) foi rede sem uma linha nova — 56
@@ -248,7 +250,11 @@ checkpoint. Uma fonte que não precisou ir à rede (todas as janelas já em
 `.vazio` ou `.recusado`) tem o veredito lido do disco — "13 janelas 200 []
 (2013–2025), 1 recusada (2026), última consulta em …" — em vez de "sem
 registro de tentativa", que foi o que a rodada 11 publicou para licitações e
-atas com a evidência inteira gravada em `data/raw/checkpoints/`.
+atas com a evidência inteira gravada em `data/raw/checkpoints/`. A ordem de
+leitura é a mesma regra de prova do ledger, primeiro o que denuncia erro
+**nosso**: janela com DADO no checkpoint e dataset vazio no staging é o
+parser que perdeu registros, nunca "o órgão não publica"; janelas vazias
+convivendo com recusadas saem com o veredito e a ressalva no mesmo texto.
 
 **Documento é texto, sempre — e nos dois leitores.** `main.py all` relê o
 staged de toda etapa pronta por `_ja_coletado`, e esse caminho lia o CSV sem
@@ -266,11 +272,15 @@ o artefato ("….0", notação científica) e só dão zfill(14) a 12–13 dígi
 11 é CPF e fica como está. A regressão está em `regressoes/rodada12.py`.
 
 PNCP: 503 na consulta de um órgão **relacionado** (Confea, Mútua, outros
-Creas) não derruba mais `pncp_contratos` — vira aviso `indisponivel` no
-diagnóstico e a rodada segue com o alvo. O cadastro de atas (`/v1/atas`,
+Creas) não derruba mais `pncp_contratos` — vira o achado
+`diagnostico-coleta-parcial` (gravidade `erro`, que é falha da ferramenta e
+não conta como achado sobre o conselho) e a rodada segue com o alvo. **Só
+5xx**: bloqueio por ritmo (`RateLimited`, que herda de `RuntimeError`)
+continua parando tudo, como em todo o resto da pipeline — engoli-lo faria a
+rodada insistir ~11 min por órgão contra um host que já mandou parar. O cadastro de atas (`/v1/atas`,
 parâmetro `cnpj` confirmado na rodada 11) filtra por vigência, então a mesma
 ata volta em cada mês em que está vigente: a etapa deduplica por
-`numeroControlePNCPAta` (138 linhas → 10 atas na rodada 11).
+`numeroControlePNCPAta` (138 linhas → 8 atas na rodada 11).
 
 ### Camada opcional de IA — modelo **local**, via Ollama
 

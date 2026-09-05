@@ -160,6 +160,13 @@ CAUSAS: dict[str, tuple[str, str]] = {
         "resposta: em rodada anterior o servidor respondeu 200 com lista vazia "
         "para essas janelas (marcador `.vazio` em data/raw/checkpoints). "
         "Confirmar o vazio por LAI (e-SIC), pedindo a base do período."),
+    "janelas respondidas vazias em rodada anterior; outras recusadas (checkpoint)": (
+        NAO_PUBLICA,
+        "As janelas que o servidor RESPONDEU vieram com lista vazia; outras "
+        "ele recusou (4xx) e sobre essas não se pode afirmar nada. O veredito "
+        "vale para os exercícios respondidos, que a coluna ao lado nomeia — "
+        "confirmar por LAI (e-SIC) e reexecutar depois do prazo da recusa para "
+        "fechar os demais."),
     "janelas recusadas em rodada anterior (checkpoint .recusado, nenhuma vazia)": (
         NAO_COLETAMOS,
         "O portal recusou os parâmetros (4xx) em rodada anterior e a recusa "
@@ -266,7 +273,9 @@ def _sem_superados(sub: pd.DataFrame) -> pd.DataFrame:
 
 # dataset → pasta de checkpoint quando os nomes divergem
 _ETAPA_CHECKPOINT = {"comparativo_receita": "comparativo_receita",
-                     "balanco_orcamentario": "balanco_orcamentario"}
+                     "balanco_orcamentario": "balanco_orcamentario",
+                     # a pasta é `benchmark/<host>/<ano>.*` (ver stage_benchmark_creas)
+                     "benchmark_creas": "benchmark"}
 
 
 def _marcadores_checkpoint(dataset: str) -> dict | None:
@@ -302,10 +311,21 @@ def _marcadores_checkpoint(dataset: str) -> dict | None:
 
 
 def _causa_checkpoint(dataset: str) -> tuple[str, str] | None:
-    """(causa, resumo) a partir dos marcadores, ou None se não há memória."""
+    """(causa, resumo) a partir dos marcadores, ou None se não há memória.
+
+    A ordem é a mesma regra de prova de `_causa`: primeiro o que denuncia
+    erro NOSSO. Janela com DADO no checkpoint e dataset vazio no staging é o
+    caso mais grave — o servidor respondeu com registros e nós os perdemos no
+    parser; dizer "o órgão não publica" aí seria acusá-lo do nosso defeito.
+    """
     mk = _marcadores_checkpoint(dataset)
     if not mk:
         return None
+    if mk["com_dado"]:
+        return "resposta recebida e descartada no staging", mk["resumo"]
+    if mk["vazias"] and mk["recusadas"]:
+        return ("janelas respondidas vazias em rodada anterior; outras recusadas (checkpoint)",
+                mk["resumo"])
     if mk["vazias"]:
         return "janelas respondidas vazias em rodada anterior (checkpoint .vazio)", mk["resumo"]
     if mk["recusadas"]:
@@ -465,7 +485,11 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
         titulo=titulo,
         descricao=(
             "Cada fonte vazia recebe aqui a causa provável, lida do status HTTP "
-            "de todas as tentativas da coleta (arquivo `_coleta_http.csv`). A "
+            "de todas as tentativas da coleta (arquivo `_coleta_http.csv`) — ou, "
+            "quando a fonte não precisou ir à rede nesta rodada porque o "
+            "checkpoint já tinha a resposta, dos marcadores gravados em rodadas "
+            "anteriores (`data/raw/checkpoints/`), e aí a coluna "
+            "`status_observados` começa com `checkpoint:` e nomeia as janelas. A "
             "distinção que a coluna `veredito` faz é a única coisa que importa "
             "nesta tabela:\n\n"
             "* **endpoint respondeu 200 com lista vazia nos parâmetros testados** — "
@@ -598,6 +622,29 @@ def run(staged) -> list[Finding]:
                     "(5xx) costuma ser transitório: rodar de novo com "
                     "`--retomar` tenta só o que faltou."),
                 evidencia=falhas[["dataset", "linhas", "erro"]],
+            ))
+
+    # ---- etapa que VEIO, mas incompleta (um órgão do PNCP fora do ar, um
+    # cliente ausente). Sem card próprio isso ficava só como coluna de uma
+    # tabela, e a rede de influência perdia o Confea em silêncio.
+    if "indisponivel" in diag.columns:
+        parciais = diag[diag["indisponivel"].notna()
+                        & (diag["indisponivel"].astype(str).str.strip() != "")]
+        if not parciais.empty:
+            achados.append(Finding(
+                id="diagnostico-coleta-parcial", frente=FRENTE, gravidade="erro",
+                titulo=f"{len(parciais)} etapa(s) vieram incompletas — parte da fonte "
+                       "não respondeu",
+                descricao=(
+                    "A etapa terminou e gravou o que conseguiu, mas uma parte da "
+                    "consulta não foi respondida: um órgão do PNCP fora do ar, um "
+                    "endpoint que não aceitou nenhum formato de parâmetro. É falha "
+                    "da coleta, não do dado — o que faltou está nomeado na coluna "
+                    "`indisponivel`, e as análises que dependem dessa parte "
+                    "(a rede entre órgãos do sistema, por exemplo) saem menores do "
+                    "que deveriam. Reexecutar com `--retomar` costuma fechar."),
+                evidencia=parciais[["dataset", "linhas", "indisponivel"]],
+                metricas={"etapas_parciais": int(len(parciais))},
             ))
 
     vazios = diag[diag["linhas"] == 0]["dataset"].tolist()

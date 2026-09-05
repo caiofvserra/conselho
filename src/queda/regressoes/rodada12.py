@@ -7,7 +7,7 @@
   saíram como ausentes do PNCP. Leitor único + normalizador tolerante.
 * `stage_pncp` abortava inteira com 503 na consulta de um órgão RELACIONADO.
 * `stage_pncp_atas` devolvia a mesma ata uma vez por mês de vigência (138
-  linhas para 10 atas).
+  linhas para 8 atas na rodada 11).
 * recusa do exercício em curso gravada com "12/2026" segurava a janela por
   12 h depois de a pergunta já ter mudado para o mês corrente.
 * diagnóstico dizia "sem registro de tentativa" para fonte cujos checkpoints
@@ -26,6 +26,7 @@ from pathlib import Path
 import pandas as pd
 
 from .. import clients, config, pipeline
+from ..http import RateLimited
 from ..utils import cnpj14, so_digitos
 
 
@@ -70,6 +71,17 @@ def _trocar(modulo, **atributos):
     finally:
         for k, v in originais.items():
             setattr(modulo, k, v)
+
+
+@contextmanager
+def _diagnostico_limpo():
+    """`pipeline._DIAGNOSTICO` é global: uma asserção que estoure no meio do
+    teste deixaria linhas falsas para o selftest seguinte."""
+    pipeline._DIAGNOSTICO.clear()
+    try:
+        yield
+    finally:
+        pipeline._DIAGNOSTICO.clear()
 
 
 # ------------------------------------------------------------------ casos
@@ -196,8 +208,7 @@ def _pncp_tolerante(erros: list[str]) -> None:
     with _ambiente(checkpoint="0"), _trocar(
             clients, pncp_resolver_orgao=resolver, pncp_contratos_mes=contratos_mes,
             pncp_instrumentos_cobranca=cobranca,
-            pncp_meses=lambda ini, ate: [("20250101", "20250131")]):
-        pipeline._DIAGNOSTICO.clear()
+            pncp_meses=lambda ini, ate: [("20250101", "20250131")]), _diagnostico_limpo():
         try:
             df = pipeline.stage_pncp(2025, 2025)
         except Exception as e:                        # noqa: BLE001
@@ -213,7 +224,28 @@ def _pncp_tolerante(erros: list[str]) -> None:
         orgaos = pd.read_csv(config.STAGED_DIR / "pncp_orgaos.csv", dtype=str)
         _erro(erros, len(orgaos) == 1 and orgaos["papel"].iloc[0] == "alvo",
               "stage_pncp: pncp_orgaos deveria ter só o alvo")
-        pipeline._DIAGNOSTICO.clear()
+
+    # Bloqueio por ritmo é outra coisa: tem de SUBIR e parar a rodada, senão
+    # a coleta segue batendo nos outros quatro órgãos (~11 min de backoff cada)
+    # contra um host que já mandou parar. `RateLimited` herda de RuntimeError,
+    # e era exatamente por isso que o `except RuntimeError` a engolia.
+    def bloqueado(razao, **kw):
+        if "SAO PAULO" in razao:
+            return dict(alvo)
+        raise RateLimited("HTTP 429 persistente")
+
+    with _ambiente(checkpoint="0"), _trocar(
+            clients, pncp_resolver_orgao=bloqueado, pncp_contratos_mes=contratos_mes,
+            pncp_instrumentos_cobranca=cobranca,
+            pncp_meses=lambda ini, ate: [("20250101", "20250131")]), _diagnostico_limpo():
+        try:
+            pipeline.stage_pncp(2025, 2025)
+            erros.append("stage_pncp: RateLimited de um órgão relacionado foi engolida "
+                         "— o bloqueio por ritmo tem de parar a rodada")
+        except RateLimited:
+            pass
+        except Exception as e:                        # noqa: BLE001
+            erros.append(f"stage_pncp: RateLimited virou {type(e).__name__}: {e}")
 
 
 def _atas_sem_duplicata(erros: list[str]) -> None:
@@ -228,14 +260,12 @@ def _atas_sem_duplicata(erros: list[str]) -> None:
     with _ambiente(checkpoint="0"), _trocar(
             clients, pncp_resolver_orgao=lambda razao, **kw: dict(alvo),
             pncp_atas_mes=lambda cnpj, ini, fim: [dict(ata)],
-            pncp_meses=lambda ini, ate: meses):
-        pipeline._DIAGNOSTICO.clear()
+            pncp_meses=lambda ini, ate: meses), _diagnostico_limpo():
         df = pipeline.stage_pncp_atas(2024, 2024)
         _erro(erros, len(df) == 1,
               f"stage_pncp_atas: a mesma ata vigente em 3 meses saiu {len(df)} vez(es)")
         _erro(erros, not df.empty and int(df["_ano"].iloc[0]) == 2024,
               "stage_pncp_atas: _ano deveria vir de anoAta")
-        pipeline._DIAGNOSTICO.clear()
 
 
 def _assinatura_do_exercicio_corrente(erros: list[str]) -> None:
@@ -244,6 +274,18 @@ def _assinatura_do_exercicio_corrente(erros: list[str]) -> None:
     _erro(erros, ";fim=" in nova, f"assinatura do exercício em curso sem o mês final: {nova!r}")
     _erro(erros, "fim=" not in pipeline._assinatura_etapa("empenhos", 2020),
           "assinatura de exercício encerrado não deveria ter mês final")
+    # e estável entre PROCESSOS: se assinasse com o mês que `implanta_ano`
+    # aprendeu no meio da rodada, a rodada seguinte leria outra pergunta e o
+    # TTL de 12 h cairia sozinho.
+    guardado = dict(clients._FIM_CORRENTE_APRENDIDO)
+    try:
+        clients._FIM_CORRENTE_APRENDIDO["mes"] = "06"
+        _erro(erros, pipeline._assinatura_etapa("empenhos", ano) == nova,
+              "assinatura mudou porque o mês final foi aprendido no meio da rodada — "
+              "a recusa gravada agora pareceria de outra pergunta na rodada seguinte")
+    finally:
+        clients._FIM_CORRENTE_APRENDIDO.clear()
+        clients._FIM_CORRENTE_APRENDIDO.update(guardado)
     with _ambiente(checkpoint="1"):
         pipeline._marcar_recusa("empenhos", str(ano), "referenciaInicio,referenciaTermino")
         _erro(erros, not pipeline._recusa_fresca("empenhos", str(ano), ano, nova),
@@ -251,6 +293,34 @@ def _assinatura_do_exercicio_corrente(erros: list[str]) -> None:
         pipeline._marcar_recusa("empenhos", str(ano), nova)
         _erro(erros, pipeline._recusa_fresca("empenhos", str(ano), ano, nova),
               "recusa gravada com a MESMA pergunta deveria valer 12 h")
+
+
+def _inventario_coerente(erros: list[str]) -> None:
+    """`faltando` e o laço de coleta têm de dizer a MESMA coisa do mesmo ano.
+
+    Um `.recusado` gravado com a pergunta antiga ("12/2026") é pergunta
+    diferente: o laço vai à rede, e o inventário — que não passava assinatura —
+    contava a mesma janela como recusada pelo portal. A rodada 11 deixou esse
+    marcador em toda etapa anual."""
+    ano = datetime.now().year
+    with _ambiente(checkpoint="1"):
+        pipeline._marcar_recusa("empenhos", str(ano), "referenciaInicio,referenciaTermino")
+        pendentes = pipeline.janelas_pendentes("empenhos", ano, ano)
+        estado = pipeline._janela_estado("empenhos", str(ano), ano,
+                                         pipeline._assinatura_etapa("empenhos", ano))
+        _erro(erros, ano in pendentes and estado is None,
+              f"assinatura antiga: o laço deveria ir à rede ({pendentes=}, {estado=})")
+        inv = pipeline.inventario(ano, ano)          # DataFrame
+        alvo = inv[inv["etapa"] == "empenhos"]        # a coluna se chama `etapa`
+        linha = None if alvo.empty else alvo.iloc[0]
+        if linha is None:
+            erros.append("inventario: etapa empenhos sumiu do inventário")
+        else:
+            _erro(erros, not linha["janelas_recusadas"],
+                  f"inventario: contou como recusada uma janela que o laço vai buscar "
+                  f"({linha['janelas_recusadas']} recusada(s), "
+                  f"vai_a_rede={linha['vai_a_rede']}, "
+                  f"recusados_pelo_portal={linha['recusados_pelo_portal']!r})")
 
 
 def _diagnostico_com_memoria(erros: list[str]) -> None:
@@ -279,6 +349,20 @@ def _diagnostico_com_memoria(erros: list[str]) -> None:
         _erro(erros, causa2 is not None and causa2[0].startswith("janelas recusadas"),
               f"diagnóstico: só .recusado deveria dar 'janelas recusadas', saiu {causa2!r}")
 
+        # dado no checkpoint e dataset vazio: o parser é que perdeu — nunca
+        # pode sair como "o órgão não publica"
+        pasta3 = config.RAW_DIR / pipeline.CHECKPOINT_SUBDIR / "contratos"
+        pasta3.mkdir(parents=True)
+        (pasta3 / "2024.csv").write_text("NUMERO_CONTRATO\nC-001/2024\n")
+        (pasta3 / "2025.vazio").write_text("2026-09-04T22:00:00\n")
+        causa3 = diagnostico._causa_checkpoint("contratos")
+        _erro(erros, causa3 is not None
+              and causa3[0] == "resposta recebida e descartada no staging",
+              f"diagnóstico: checkpoint COM dado e staged vazio é falha nossa, saiu {causa3!r}")
+        _erro(erros, causa3 is None
+              or diagnostico.CAUSAS[causa3[0]][0] == diagnostico.NAO_COLETAMOS,
+              "diagnóstico: dado perdido no staging não pode virar veredito sobre o órgão")
+
         # integração: o achado publica veredito de falta de publicação, não "indeterminado"
         ledger = pd.DataFrame([{
             "ts": "2026-09-05T06:58:35", "host": "crea-sp.implanta.net.br",
@@ -293,13 +377,21 @@ def _diagnostico_com_memoria(erros: list[str]) -> None:
               and f.metricas.get("indeterminadas") == 0,
               "diagnóstico: licitações com 13 exercícios de 200 [] no checkpoint saiu "
               f"{None if f is None else f.metricas}")
+        if f is not None and f.evidencia is not None and not f.evidencia.empty:
+            linha = f.evidencia.iloc[0]
+            _erro(erros, str(linha["causa_provavel"]).startswith("janelas respondidas vazias")
+                  and "recusada" in str(linha["causa_provavel"]),
+                  "diagnóstico: com janelas vazias E recusadas, a causa tem de dizer as duas "
+                  f"coisas — saiu {linha['causa_provavel']!r}")
+            _erro(erros, str(linha["status_observados"]).startswith("checkpoint:"),
+                  "diagnóstico: a evidência tem de dizer que a causa veio do checkpoint")
 
 
 def run() -> list[str]:
     erros: list[str] = []
     for passo in (_normalizador, _leitor_staged, _pagamentos_pj, _pncp_tolerante,
                   _atas_sem_duplicata, _assinatura_do_exercicio_corrente,
-                  _diagnostico_com_memoria):
+                  _inventario_coerente, _diagnostico_com_memoria):
         try:
             passo(erros)
         except Exception as e:                       # noqa: BLE001

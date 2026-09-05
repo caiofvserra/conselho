@@ -85,6 +85,13 @@ def so_digitos(s) -> str:
     if m:
         return m.group(1)
     if _RX_FLOAT_CIENTIFICO.match(texto):
+        # "6.0985017000177e+13" tem os 14 dígitos e volta inteiro; "6.0985e+13"
+        # perdeu-os na impressão e voltaria "60985000000000" — um CNPJ que não
+        # existe. Fabricar documento é pior que não ter documento.
+        significativos = len(re.sub(r"\D", "", texto.split("e")[0].split("E")[0]))
+        expoente = int(texto.split("e")[-1].split("E")[-1])
+        if significativos < expoente + 1:
+            return ""
         try:
             return str(int(float(texto)))
         except (ValueError, OverflowError):
