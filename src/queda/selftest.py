@@ -1163,9 +1163,10 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_sondagem_e_orgaos())
     erros.extend(_regressao_prefixo_e_nome())
     erros.extend(_regressao_novas_fontes())
-    from .regressoes import http_config as _reg_http, rodada11 as _reg_r11
+    from .regressoes import http_config as _reg_http, rodada11 as _reg_r11, rodada12 as _reg_r12
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
+    erros.extend(_reg_r12.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa

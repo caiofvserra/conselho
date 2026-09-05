@@ -38,7 +38,7 @@ from .. import analytics as A
 from .. import config
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl, norm_nome, parse_data, so_digitos
+from ..utils import cnpj14, coluna, fmt_brl, norm_nome, parse_data, so_digitos
 from .common import df, fichas_cnpj, fornecedores_mercado
 
 FRENTE = "Fornecedores"
@@ -434,10 +434,12 @@ def _pagamentos_pj(staged) -> pd.DataFrame:
     if pg.empty or "VALOR" not in pg.columns:
         return pd.DataFrame()
     d = pg.copy()
-    cnpj = coluna(d, "FAVORECIDO_CNPJ").fillna("").astype(str)
-    if not cnpj.str.len().eq(14).any():          # staged antigo, sem a coluna
-        cnpj = coluna(d, "CPF_CNPJ").map(so_digitos)
-    d["cnpj"] = cnpj
+    # Linha a linha, não "a coluna toda ou nada": na rodada 11 a coluna
+    # derivada tinha 0,4% de valores legíveis (float de uma rodada anterior) e
+    # o `.any()` bastou para descartar a coluna-fonte — a frente ficou cega.
+    derivado = cnpj14(coluna(d, "FAVORECIDO_CNPJ", ""))
+    fonte = cnpj14(coluna(d, "CPF_CNPJ", ""))
+    d["cnpj"] = derivado.where(derivado.str.len().eq(14), fonte)
     d["valor"] = pd.to_numeric(d["VALOR"], errors="coerce").fillna(0)
     d = d[(d["cnpj"].str.len() == 14) & (d["valor"] > 0)]
     return d
@@ -1048,8 +1050,8 @@ def _ultimo_pagamento(staged) -> dict[str, pd.Timestamp]:
 
 
 def _cnpj14(serie: pd.Series) -> pd.Series:
-    d = serie.fillna("").astype(str).str.replace(r"\D", "", regex=True)
-    return d.where(d.eq(""), d.str.zfill(14))
+    """Ver `utils.cnpj14`: tolerante a float e a zero à esquerda perdido."""
+    return cnpj14(serie)
 
 
 def _instrumentos_por_cnpj(staged) -> dict[str, list[tuple[pd.Timestamp, str]]]:
@@ -1071,14 +1073,14 @@ def _instrumentos_por_cnpj(staged) -> dict[str, list[tuple[pd.Timestamp, str]]]:
     if not ctr.empty and "CONTRATADA_CNPJ" in ctr.columns:
         datas = ctr["INI"] if "INI" in ctr.columns else pd.to_datetime(
             coluna(ctr, "DATA_INICIO_VIGENCIA", None), errors="coerce")
-        add(_cnpj14(ctr["CONTRATADA_CNPJ"]), pd.to_datetime(datas, errors="coerce"),
+        add(cnpj14(ctr["CONTRATADA_CNPJ"], presumir_cnpj=True), pd.to_datetime(datas, errors="coerce"),
             coluna(ctr, "NUMERO_CONTRATO", "").fillna("").map(lambda x: f"portal {x}"))
     pn = df(staged, "pncp_contratos")
     if not pn.empty and "fornecedor_ni" in pn.columns:
         alvo = pn[coluna(pn, "orgao_papel", "alvo").eq("alvo")]
         datas = pd.to_datetime(coluna(alvo, "dataAssinatura", None), errors="coerce")
         datas = datas.fillna(pd.to_datetime(coluna(alvo, "vigenciaInicio", None), errors="coerce"))
-        add(_cnpj14(alvo["fornecedor_ni"]), datas,
+        add(cnpj14(alvo["fornecedor_ni"], presumir_cnpj=True), datas,
             coluna(alvo, "numeroContrato", "").fillna("").map(lambda x: f"PNCP {x}"))
     return out
 

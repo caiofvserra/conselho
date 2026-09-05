@@ -59,8 +59,62 @@ def parse_valor(v) -> float:
         return 0.0
 
 
+# CNPJ como o portal grava dentro de CONTRATADA: "12.345.678/0001-90 - RAZÃO"
+RX_CNPJ_FORMATADO = r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})"
+_RX_FLOAT_ARTEFATO = re.compile(r"^\s*(\d+)\.0+\s*$")
+_RX_FLOAT_CIENTIFICO = re.compile(r"^\s*\d(?:\.\d+)?[eE]\+\d+\s*$")
+
+
 def so_digitos(s) -> str:
-    return re.sub(r"\D", "", str(s or ""))
+    """Só os dígitos de um documento — reconhecendo documento que passou por float.
+
+    CSV relido sem `dtype` transforma "01816098000112" em 1816098000112.0; o
+    `str()` disso é "1816098000112.0", e tirar só o que não é dígito dava
+    "18160980001120": 14 dígitos, CNPJ ERRADO, e o cruzamento com o PNCP
+    publicou 44 contratos como "ausentes" na rodada 11 por causa disso. O
+    ".0" sai antes; notação científica ("6.0985017000177e+13") volta pelo int.
+    """
+    if s is None:
+        return ""
+    if isinstance(s, float):
+        if s != s:                       # NaN
+            return ""
+        s = int(s) if s.is_integer() else s
+    texto = str(s)
+    m = _RX_FLOAT_ARTEFATO.match(texto)
+    if m:
+        return m.group(1)
+    if _RX_FLOAT_CIENTIFICO.match(texto):
+        try:
+            return str(int(float(texto)))
+        except (ValueError, OverflowError):
+            return ""
+    return re.sub(r"\D", "", texto)
+
+
+def cnpj14(serie, *, presumir_cnpj: bool = False) -> "pd.Series":
+    """CNPJs com 14 dígitos, tolerantes a float e a zero à esquerda perdido.
+
+    12 ou 13 dígitos = CNPJ que perdeu um ou dois zeros à esquerda ao passar
+    por número: zfill(14). 11 dígitos é CPF e fica como está. Menos que isso
+    não dá para afirmar o que é — fica como veio e o chamador filtra por
+    `str.len() == 14`. (O `_cnpj14` anterior dava zfill em qualquer coisa e
+    transformou "424000156.0" em "00004240001560".)
+
+    `presumir_cnpj=True` é para coluna que SÓ tem CNPJ (CONTRATADA_CNPJ do
+    portal, `fornecedor_ni` de PJ no PNCP): aí qualquer tamanho até 13 —
+    menos 11, que é CPF — recebe zfill, porque "191" ali é o Banco do Brasil
+    (00.000.000/0001-91) que passou por int. Nunca usar em coluna que mistura
+    CPF mascarado ("***.123.456-**" → "123456"), como o CEIS: o zfill fabricaria
+    um CNPJ de raiz 00000000 — e essa raiz existe, é a do Banco do Brasil.
+    """
+    s = pd.Series(serie).map(so_digitos).astype(str)
+    n = s.str.len()
+    if presumir_cnpj:
+        completar = n.between(1, 13) & n.ne(11)
+    else:
+        completar = n.between(12, 13)
+    return s.where(~completar, s.str.zfill(14))
 
 
 RX_PJ_NOME = re.compile(

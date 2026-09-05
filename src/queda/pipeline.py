@@ -24,8 +24,8 @@ import pandas as pd
 
 from . import clients, config
 from .http import RateLimited
-from .utils import (classificar_pessoa, coluna, norm_nome, parse_data,
-                    parse_valor, so_digitos)
+from .utils import (RX_CNPJ_FORMATADO, classificar_pessoa, coluna, norm_nome,
+                    parse_data, parse_valor, so_digitos)
 
 log = logging.getLogger("queda.pipeline")
 
@@ -224,10 +224,20 @@ def _checkpoint_arquivos(etapa: str, janela: str) -> tuple[Path, Path, Path, Pat
 _ETAPAS_VIGENCIA = {"contratos", "aditivos"}
 
 
-def _assinatura_etapa(etapa: str) -> str:
-    if etapa in _ETAPAS_VIGENCIA:
-        return "vigenciaInicio,vigenciaTermino"
-    return "referenciaInicio,referenciaTermino"
+def _assinatura_etapa(etapa: str, ano: int | None = None) -> str:
+    """A PERGUNTA feita ao portal, para a recusa só valer contra a mesma pergunta.
+
+    No exercício em curso entra o mês final pedido: "12/2026" deu 400 em todo
+    endpoint anual da rodada 10 e "09/2026" é outra pergunta — sem isso a
+    recusa gravada com o mês errado segurava o exercício corrente por 12 h
+    depois de a correção já estar no código (rodada 11: nenhum endpoint
+    anual foi à rede por 2026).
+    """
+    base = ("vigenciaInicio,vigenciaTermino" if etapa in _ETAPAS_VIGENCIA
+            else "referenciaInicio,referenciaTermino")
+    if ano is not None and not _exercicio_encerrado(ano):
+        return f"{base};fim={clients._mes_final(ano)}"
+    return base
 
 
 def _ler_recusa(recusado: Path) -> tuple[int, str]:
@@ -432,7 +442,7 @@ def janelas_pendentes(etapa: str, ate: int, desde: int | None) -> list[int]:
     ano = ate
     piso = desde or config.ANO_PISO
     while ano >= piso:
-        estado = _janela_estado(etapa, str(ano), ano, _assinatura_etapa(etapa))
+        estado = _janela_estado(etapa, str(ano), ano, _assinatura_etapa(etapa, ano))
         if estado is None:
             pendentes.append(ano)
             vazios = 0
@@ -720,7 +730,7 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
         rows = _checkpoint_ler(etapa, str(ano), ano)
         if rows is not None:
             do_disco += 1
-        elif _recusa_fresca(etapa, str(ano), ano, _assinatura_etapa(etapa)):
+        elif _recusa_fresca(etapa, str(ano), ano, _assinatura_etapa(etapa, ano)):
             # O portal já recusou esta janela há pouco. Insistir agora gasta o
             # ritmo — e é o ritmo que decide até onde a rodada chega antes do
             # 403. Recusa NÃO é exercício vazio: o contador de vazios zera,
@@ -750,7 +760,7 @@ def _anos_com_sondagem(fetch_ano, ate: int, desde: int | None, *, etapa: str):
                 log.warning("%s/%d: sem resposta utilizável (%s) — não conta "
                             "como exercício vazio", etapa, ano,
                             type(rows).__name__)
-                _marcar_recusa(etapa, str(ano), _assinatura_etapa(etapa))
+                _marcar_recusa(etapa, str(ano), _assinatura_etapa(etapa, ano))
                 falhas.append(ano)
                 recusadas.append(ano)
                 vazios = 0
@@ -832,7 +842,7 @@ def stage_contratos(desde, ate):
         contratada = df["CONTRATADA"].fillna("").astype(str) if "CONTRATADA" in df else pd.Series("", index=df.index)
         # o portal grava "12.345.678/0001-90 - RAZÃO SOCIAL": separar os dois
         df["CONTRATADA_CNPJ"] = contratada.str.extract(
-            r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", expand=False).map(so_digitos)
+            RX_CNPJ_FORMATADO, expand=False).map(so_digitos)
         df["CONTRATADA_NOME"] = contratada.str.replace(
             r"^\s*[\d./-]{14,20}\s*-\s*", "", regex=True)
         df["CONTRATADA_NORM"] = df["CONTRATADA_NOME"].map(norm_nome)
@@ -1280,10 +1290,29 @@ def _pncp_ata_linha(o: dict, r: dict) -> dict:
     }
 
 
+_PNCP_ORGAOS_FALHOS: list[str] = []
+
+
+def _resolver_orgao_tolerante(razao: str, **kw) -> dict | None:
+    """`clients.pncp_resolver_orgao` que não derruba a etapa quando o PNCP
+    responde 5xx na consulta do órgão. Na rodada 11 quatro 503 em
+    `/v1/orgaos/<cnpj do Confea>` abortaram `stage_pncp` inteira — os 145
+    contratos do alvo só sobreviveram porque `build_staged` preserva o CSV
+    anterior. Falha de um órgão RELACIONADO vira aviso no diagnóstico."""
+    try:
+        return clients.pncp_resolver_orgao(razao, **kw)
+    except RuntimeError as e:
+        log.warning("PNCP: órgão %r não pôde ser consultado (%s) — a rodada "
+                    "segue sem ele", razao, e)
+        _PNCP_ORGAOS_FALHOS.append(f"{razao}: {e}")
+        return None
+
+
 def stage_pncp(desde, ate):
     """Contratos PNCP do Crea-SP e dos órgãos relacionados (rede de influência)."""
     ini = max(desde or 2021, 2021)   # PNCP só existe desde ago/2021
     orgaos = []
+    _PNCP_ORGAOS_FALHOS.clear()
     alvo = clients.pncp_resolver_orgao(config.ORGAO_ALVO_RAZAO,
                                        cnpj_fixo=config.ORGAO_ALVO_CNPJ_CANDIDATOS,
                                        uf=config.ORGAO_ALVO_UF)
@@ -1296,7 +1325,7 @@ def stage_pncp(desde, ate):
         log.warning("PNCP: órgão-alvo não resolvido — o bloco PNCP virá vazio "
                     "em vez de trazer contratos de outro conselho")
     for rel in config.ORGAOS_RELACIONADOS:
-        o = clients.pncp_resolver_orgao(
+        o = _resolver_orgao_tolerante(
             rel["razao"], cnpj_fixo=rel.get("cnpj_candidatos"),
             termo_busca=rel.get("termo_busca"))
         if o and o.get("cnpj") and o["cnpj"] != (alvo or {}).get("cnpj"):
@@ -1334,7 +1363,14 @@ def stage_pncp(desde, ate):
              for jini, jfim in clients.pncp_meses(ini, ate)),
             buscar_mes, dataset="pncp_contratos"))
         if o["papel"] == "alvo":
-            for r in clients.pncp_instrumentos_cobranca(o["cnpj"], ini, ate):
+            try:
+                instrumentos = clients.pncp_instrumentos_cobranca(o["cnpj"], ini, ate)
+            except RuntimeError as e:
+                log.warning("PNCP: instrumentos de cobrança indisponíveis (%s) — "
+                            "os contratos já coletados ficam", e)
+                _PNCP_ORGAOS_FALHOS.append(f"instrumentos de cobrança: {e}")
+                instrumentos = []
+            for r in instrumentos:
                 nfe = r.get("notaFiscalEletronica") or {}
                 contrato = r.get("recuperarContratoDTO") or {}
                 cobrancas.append({
@@ -1357,6 +1393,9 @@ def stage_pncp(desde, ate):
         for c in ("valorGlobal", "valorAcumulado"):
             df_c[c] = coluna(df_c, c, 0).map(parse_valor)
     _salvar("pncp_contratos", df_c)
+    if _PNCP_ORGAOS_FALHOS:
+        _DIAGNOSTICO[-1]["indisponivel"] = ("PNCP não respondeu à consulta de: "
+                                            + "; ".join(_PNCP_ORGAOS_FALHOS))
     _salvar("pncp_cobrancas", pd.DataFrame(cobrancas))
     return df_c
 
@@ -1407,10 +1446,10 @@ def _ja_coletado(nome: str, exigir_esquema: bool = True) -> pd.DataFrame | None:
     if not caminho.exists():
         return None
     try:
-        df = pd.read_csv(caminho, low_memory=False)
+        df = _ler_csv_staged(caminho)
     except (pd.errors.EmptyDataError, ValueError, OSError):
         return None
-    if df.empty or list(df.columns) == ["_vazio"]:
+    if df.empty:
         return None
     if exigir_esquema:
         faltam = _esquema_faltante(nome, df)
@@ -1536,6 +1575,17 @@ def stage_pncp_atas(desde, ate):
     df = pd.DataFrame(linhas)
     if not df.empty:
         df["_ano"] = pd.to_numeric(coluna(df, "anoAta", None), errors="coerce")
+        # O endpoint filtra por VIGÊNCIA: uma ata vigente por 24 meses volta em
+        # 24 janelas mensais. Na rodada 11 foram 138 linhas para 10 atas.
+        antes = len(df)
+        chave = coluna(df, "numeroControlePNCPAta", None)
+        if chave.notna().all() and chave.astype(str).str.strip().ne("").all():
+            df = df.drop_duplicates(subset=["numeroControlePNCPAta"])
+        else:
+            df = df.drop_duplicates()
+        if len(df) != antes:
+            log.info("pncp_atas: %d linha(s) de janelas mensais → %d ata(s) distinta(s)",
+                     antes, len(df))
     out = _salvar("pncp_atas", df)
     janelas = _DIAGNOSTICO[-1]
     if df.empty and janelas.get("janelas_recusadas") and not janelas.get("janelas_com_dado"):
@@ -1976,26 +2026,71 @@ def _colunas_texto(cabecalho) -> dict:
             if c in COLUNAS_TEXTO_STAGED or _PADRAO_COLUNA_TEXTO.search(str(c))}
 
 
+_RX_DOCUMENTO_SUSPEITO = re.compile(r"^\d+\.0+$|^\d(?:\.\d+)?[eE]\+\d+$")
+
+
+def _sanear_documentos(df: pd.DataFrame, nome: str) -> pd.DataFrame:
+    """Repara colunas de documento gravadas por versões anteriores que as
+    deixaram passar por float ("…141.0") e recompõe as derivadas a partir da
+    coluna-fonte quando ela existe: CPF_CNPJ → FAVORECIDO_CNPJ nos pagamentos,
+    o CNPJ formatado dentro de CONTRATADA → CONTRATADA_CNPJ nos contratos.
+    Idempotente: sobre CSV bom não muda nada."""
+    if df is None or df.empty:
+        return df
+    for c in df.columns:
+        if not (pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_string_dtype(df[c])):
+            continue
+        if not (c in COLUNAS_TEXTO_STAGED or _PADRAO_COLUNA_TEXTO.search(str(c))):
+            continue
+        s = df[c]
+        suspeitas = s.astype(str).str.match(_RX_DOCUMENTO_SUSPEITO, na=False)
+        if suspeitas.any():
+            log.info("%s: %d valor(es) de %s vieram como float de uma rodada "
+                     "anterior — reparados", nome, int(suspeitas.sum()), c)
+            df[c] = s.where(~suspeitas, s.map(so_digitos))
+    if nome == "pagamentos" and "CPF_CNPJ" in df.columns:
+        df["FAVORECIDO_CNPJ"] = df["CPF_CNPJ"].map(so_digitos)
+    if nome == "contratos" and "CONTRATADA" in df.columns:
+        extraido = (df["CONTRATADA"].fillna("").astype(str)
+                    .str.extract(RX_CNPJ_FORMATADO, expand=False).map(so_digitos))
+        atual = coluna(df, "CONTRATADA_CNPJ", "").fillna("").astype(str)
+        df["CONTRATADA_CNPJ"] = extraido.where(extraido.str.len().eq(14), atual)
+    return df
+
+
+def _ler_csv_staged(caminho: Path) -> pd.DataFrame:
+    """Leitor ÚNICO dos CSVs staged: colunas de documento como texto.
+
+    `load_staged` já lia assim; `_ja_coletado` — o caminho que `main.py all`
+    percorre para toda etapa pronta, ou seja, quase todas em toda rodada —
+    lia com `read_csv` puro, e CONTRATADA_CNPJ / FAVORECIDO_CNPJ viravam
+    float64. Na rodada 11 isso cegou a frente de fornecedores inteira (0,4%
+    do valor pago com CNPJ "legível", contra 82% na rodada 10) e publicou 44
+    contratos como ausentes do PNCP por CNPJ com um dígito a mais.
+
+    `dtype` só nas colunas de dígitos: aplicar `dtype=str` no arquivo
+    inteiro transformaria VALOR em texto e derrubaria toda soma.
+    """
+    cabecalho = pd.read_csv(caminho, nrows=0).columns
+    forcar = _colunas_texto(cabecalho)
+    df = pd.read_csv(caminho, low_memory=False, dtype=forcar,
+                     keep_default_na=False if forcar else True,
+                     na_values=[""] if forcar else None)
+    if list(df.columns) == ["_vazio"]:
+        return pd.DataFrame()
+    df = _sanear_documentos(df, caminho.stem)
+    for col in ("DATA", "INI", "FIM"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
 def load_staged() -> dict[str, pd.DataFrame]:
     """Recarrega os CSVs staged sem refazer coleta."""
     out = {}
     for path in sorted(config.STAGED_DIR.glob("*.csv")):
         try:
-            # `dtype` só nas colunas de dígitos: aplicar `dtype=str` no arquivo
-            # inteiro transformaria VALOR em texto e derrubaria toda soma.
-            cabecalho = pd.read_csv(path, nrows=0).columns
-            forcar = _colunas_texto(cabecalho)
-            df = pd.read_csv(path, low_memory=False, dtype=forcar,
-                             keep_default_na=False if forcar else True,
-                             na_values=[""] if forcar else None)
+            out[path.stem] = _ler_csv_staged(path)
         except (pd.errors.EmptyDataError, ValueError):
             out[path.stem] = pd.DataFrame()
-            continue
-        if list(df.columns) == ["_vazio"]:
-            out[path.stem] = pd.DataFrame()
-            continue
-        for col in ("DATA", "INI", "FIM"):
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-        out[path.stem] = df
     return out

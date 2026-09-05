@@ -201,7 +201,11 @@ ela nunca vira `.vazio`. O marcador `.recusado` guarda `timestamp|n|assinatura`
 (quantas rodadas recusaram a mesma pergunta e com que nomes de parâmetro): vale
 12 h no exercício em curso; em exercício **encerrado**, recusado em duas rodadas
 distintas com a mesma pergunta, vale 30 dias — e cai sozinho se a pergunta
-mudar. A coluna `recusados_pelo_portal` de `faltando` diz quais são. Medido na
+mudar. No exercício em curso a pergunta inclui o **mês final** pedido
+(`;fim=09`): a recusa de "12/2026" gravada pela rodada 10 não segura a janela
+depois de o código passar a pedir o mês corrente (rodada 11: nenhum endpoint
+anual foi à rede por 2026 por causa disso). A coluna `recusados_pelo_portal`
+de `faltando` diz quais são. Medido na
 rodada 10: 87% do tempo (979 s de 1.123 s) foi rede sem uma linha nova — 56
 requisições recusadas com 400, 374 s de esperas por 403, 297 s na sondagem
 legada de Dados Abertos.
@@ -239,6 +243,34 @@ host, caminho, status, tentativa, se veio do cache e quantos itens vieram. É
 o que permite dizer **por que** um dataset veio vazio — 403 do WAF, 404 de
 endpoint inexistente, ou 200 com lista vazia, que é o único caso em que a
 ausência é do órgão e não nossa.
+O ledger é da **rodada**; a memória entre rodadas são os marcadores de
+checkpoint. Uma fonte que não precisou ir à rede (todas as janelas já em
+`.vazio` ou `.recusado`) tem o veredito lido do disco — "13 janelas 200 []
+(2013–2025), 1 recusada (2026), última consulta em …" — em vez de "sem
+registro de tentativa", que foi o que a rodada 11 publicou para licitações e
+atas com a evidência inteira gravada em `data/raw/checkpoints/`.
+
+**Documento é texto, sempre — e nos dois leitores.** `main.py all` relê o
+staged de toda etapa pronta por `_ja_coletado`, e esse caminho lia o CSV sem
+`dtype`: CONTRATADA_CNPJ e FAVORECIDO_CNPJ viravam float64, "72843212000141.0"
+perdia o ponto e ganhava um dígito, "01816098000112" perdia o zero. Na rodada
+11 a frente de fornecedores inteira ficou cega (0,4% do valor pago com CNPJ
+"legível", contra 82% na rodada 10; geografia, porte, sanções e empresa
+recente saíram "indisponíveis") e 44 contratos foram publicados como
+ausentes do PNCP com CNPJ de 15 dígitos. Agora há um leitor único
+(`_ler_csv_staged`) que força texto nas colunas de documento, repara valor
+que veio como float de uma rodada anterior e recompõe as derivadas da
+coluna-fonte (CPF_CNPJ → FAVORECIDO_CNPJ; o CNPJ formatado dentro de
+CONTRATADA → CONTRATADA_CNPJ). `utils.so_digitos` e `utils.cnpj14` reconhecem
+o artefato ("….0", notação científica) e só dão zfill(14) a 12–13 dígitos —
+11 é CPF e fica como está. A regressão está em `regressoes/rodada12.py`.
+
+PNCP: 503 na consulta de um órgão **relacionado** (Confea, Mútua, outros
+Creas) não derruba mais `pncp_contratos` — vira aviso `indisponivel` no
+diagnóstico e a rodada segue com o alvo. O cadastro de atas (`/v1/atas`,
+parâmetro `cnpj` confirmado na rodada 11) filtra por vigência, então a mesma
+ata volta em cada mês em que está vigente: a etapa deduplica por
+`numeroControlePNCPAta` (138 linhas → 10 atas na rodada 11).
 
 ### Camada opcional de IA — modelo **local**, via Ollama
 

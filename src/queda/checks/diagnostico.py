@@ -154,6 +154,18 @@ CAUSAS: dict[str, tuple[str, str]] = {
         "documentação Stoplight) para confirmar que o endpoint não exige "
         "parâmetro que não mandamos; depois confirmar o vazio por LAI (e-SIC), "
         "pedindo a base do período em formato aberto."),
+    "janelas respondidas vazias em rodada anterior (checkpoint .vazio)": (
+        NAO_PUBLICA,
+        "Nesta rodada a etapa não foi à rede porque o checkpoint já tinha a "
+        "resposta: em rodada anterior o servidor respondeu 200 com lista vazia "
+        "para essas janelas (marcador `.vazio` em data/raw/checkpoints). "
+        "Confirmar o vazio por LAI (e-SIC), pedindo a base do período."),
+    "janelas recusadas em rodada anterior (checkpoint .recusado, nenhuma vazia)": (
+        NAO_COLETAMOS,
+        "O portal recusou os parâmetros (4xx) em rodada anterior e a recusa "
+        "ainda está no prazo, então a etapa não voltou à rede. Reexecutar "
+        "depois do prazo; se repetir, ler o corpo da recusa em "
+        "data/raw/http-4xx/ e conferir o formato na documentação."),
     "servidor respondeu 200 com lista vazia; outros formatos deram 404": (
         NAO_PUBLICA,
         "O formato aceito devolveu vazio e os demais nem existem como rota. "
@@ -250,6 +262,56 @@ def _sem_superados(sub: pd.DataFrame) -> pd.DataFrame:
             if str(grupo.at[i, "resultado"]) == H.R_BLOQUEIO:
                 superados.append(i)
     return sub.drop(index=superados) if superados else sub
+
+
+# dataset → pasta de checkpoint quando os nomes divergem
+_ETAPA_CHECKPOINT = {"comparativo_receita": "comparativo_receita",
+                     "balanco_orcamentario": "balanco_orcamentario"}
+
+
+def _marcadores_checkpoint(dataset: str) -> dict | None:
+    """O que as rodadas ANTERIORES já souberam desta fonte, lido dos
+    marcadores de checkpoint: janelas `.vazio` (o servidor respondeu 200 []),
+    `.recusado` (4xx) e `.csv/.json` (dado). O ledger é da rodada; o
+    checkpoint é a memória entre rodadas — sem ele, uma etapa que não
+    precisou ir à rede saía como "sem registro de tentativa" (licitações e
+    atas na rodada 11, com 13 exercícios de 200 [] gravados no disco)."""
+    from .. import config, pipeline
+    raiz = config.RAW_DIR / pipeline.CHECKPOINT_SUBDIR / _ETAPA_CHECKPOINT.get(dataset, dataset)
+    if not raiz.is_dir():
+        return None
+    vazias = sorted(p.stem for p in raiz.rglob("*.vazio"))
+    recusadas = sorted(p.stem for p in raiz.rglob("*.recusado"))
+    com_dado = sorted({p.stem for p in raiz.rglob("*.csv")} | {p.stem for p in raiz.rglob("*.json")})
+    if not (vazias or recusadas or com_dado):
+        return None
+    mtimes = [p.stat().st_mtime for p in raiz.rglob("*") if p.is_file()]
+    ultima = pd.Timestamp(max(mtimes), unit="s").strftime("%Y-%m-%d %H:%M") if mtimes else ""
+
+    def faixa(js):
+        return f"{js[0]}–{js[-1]}" if len(js) > 1 else (js[0] if js else "")
+    partes = []
+    if vazias:
+        partes.append(f"{len(vazias)} janela(s) 200 [] ({faixa(vazias)})")
+    if recusadas:
+        partes.append(f"{len(recusadas)} recusada(s) ({faixa(recusadas)})")
+    if com_dado:
+        partes.append(f"{len(com_dado)} com dado ({faixa(com_dado)})")
+    return {"vazias": vazias, "recusadas": recusadas, "com_dado": com_dado,
+            "resumo": "checkpoint: " + "; ".join(partes) + (f"; última consulta {ultima}" if ultima else "")}
+
+
+def _causa_checkpoint(dataset: str) -> tuple[str, str] | None:
+    """(causa, resumo) a partir dos marcadores, ou None se não há memória."""
+    mk = _marcadores_checkpoint(dataset)
+    if not mk:
+        return None
+    if mk["vazias"]:
+        return "janelas respondidas vazias em rodada anterior (checkpoint .vazio)", mk["resumo"]
+    if mk["recusadas"]:
+        return ("janelas recusadas em rodada anterior (checkpoint .recusado, nenhuma vazia)",
+                mk["resumo"])
+    return None
 
 
 def _causa(sub: pd.DataFrame, retomado: bool, tem_caminho: bool = True) -> str:
@@ -352,7 +414,12 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
         # nome de endpoint Implanta conhecido): sem caminho, não há o que
         # tentar — e o veredito tem de dizer isso, não "bloqueio".
         tem_caminho = not (dataset == "indenizacoes_endpoint" and not clients.diarias_probe())
-        causa = _causa(sub, dataset in retomados, tem_caminho)
+        status_obs = _resumo_status(sub)
+        memoria = _causa_checkpoint(dataset) if (sub is None or sub.empty) else None
+        if memoria:
+            causa, status_obs = memoria
+        else:
+            causa = _causa(sub, dataset in retomados, tem_caminho)
         veredito, o_que_fazer = CAUSAS[causa]
         analise, _grav = CRITICOS.get(dataset, ("—", "baixa"))
         itens = pd.to_numeric(sub["itens"], errors="coerce") if sub is not None else None
@@ -361,7 +428,7 @@ def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding
             "veredito": veredito,
             "causa_provavel": causa,
             "tentativas": 0 if sub is None else int(len(sub)),
-            "status_observados": _resumo_status(sub),
+            "status_observados": status_obs,
             "itens_recebidos": (0 if itens is None or itens.dropna().empty
                                 else int(itens.fillna(0).max())),
             "analise_desligada": analise,

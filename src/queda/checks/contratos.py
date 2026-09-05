@@ -39,7 +39,7 @@ from .. import analytics as A
 from .. import config
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import RX_CNPJ_FORMATADO, cnpj14, coluna, fmt_brl
 from .common import df
 
 FRENTE = "Contratos e licitações"
@@ -109,10 +109,10 @@ def _periodo_ctr(ctr: pd.DataFrame) -> str:
 
 
 def _cnpj14(serie: pd.Series) -> pd.Series:
-    """Só dígitos + zfill(14): CNPJ que passou por int perde o zero à
-    esquerda (25 dos 39 "ausentes do PNCP" da rodada de 04/09/2026)."""
-    d = serie.fillna("").astype(str).str.replace(r"\D", "", regex=True)
-    return d.where(d.eq(""), d.str.zfill(14))
+    """Ver `utils.cnpj14`: CNPJ que passou por int perde o zero à esquerda
+    (25 dos 39 "ausentes do PNCP" da rodada de 04/09/2026); CNPJ que passou
+    por float ganha ".0" e virava 15 dígitos (44 "ausentes" da rodada 11)."""
+    return cnpj14(serie, presumir_cnpj=True)   # só há CNPJ nas duas colunas cruzadas
 
 
 _RE_NUM_ANO = re.compile(r"^[A-Z\-\s\.]*?(\d+)\s*/\s*(\d{4})")
@@ -711,6 +711,12 @@ def _cruzamento_pncp(ctr: pd.DataFrame, alvo: pd.DataFrame, staged) -> list[Find
     """
     achados: list[Finding] = []
     doc_portal = _cnpj14(coluna(ctr, "CONTRATADA_CNPJ", ""))
+    if "CONTRATADA" in ctr.columns:
+        # a fonte primária é o CNPJ formatado dentro de CONTRATADA — imune a
+        # qualquer coisa que a coluna derivada tenha sofrido no CSV
+        formatado = _cnpj14(ctr["CONTRATADA"].fillna("").astype(str)
+                            .str.extract(RX_CNPJ_FORMATADO, expand=False).fillna(""))
+        doc_portal = formatado.where(formatado.str.len().eq(14), doc_portal)
     doc_pncp = _cnpj14(coluna(alvo, "fornecedor_ni", ""))
     por_cnpj = doc_portal.str.len().eq(14).any() and doc_pncp.str.len().eq(14).any()
     if por_cnpj:
