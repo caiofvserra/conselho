@@ -1374,6 +1374,38 @@ def _achados_cepim(cepim: pd.DataFrame, pg: pd.DataFrame, staged) -> list[Findin
     )]
 
 
+# CPF mascarado do jeito que os cadastros públicos publicam: `***.456.789-**`,
+# ou seja, os dígitos 4 a 9 dos 11 (índices 3:9). Quem compara "os últimos N
+# dígitos" de um mascarado com um completo compara o MEIO de um com o FIM do
+# outro — e aí tanto deixa de casar quem é a mesma pessoa quanto casa quem não é.
+_CPF_MASCARA_INICIO, _CPF_MASCARA_FIM = 3, 9
+
+
+def _mesmo_cpf(mascarado_ou_cheio: str, outro: str) -> bool:
+    """Os dois documentos são da MESMA pessoa, pelo que é visível dos dois?
+
+    Só devolve True quando dá para alinhar os dígitos com certeza:
+
+    * 11 e 11 → CPF completo dos dois lados, comparação direta;
+    * 6 e 11  → os seis visíveis do mascarado contra os dígitos 4-9 do completo;
+    * 6 e 6   → dois mascarados do mesmo formato.
+
+    Qualquer outra combinação (CNPJ, tamanho inesperado, vazio) devolve False:
+    sem alinhamento não há confirmação, e sem confirmação o par não é publicado.
+    """
+    a, b = so_digitos(mascarado_ou_cheio), so_digitos(outro)
+    if not a or not b:
+        return False
+    if len(a) == len(b) == 11:
+        return a == b
+    if len(a) == len(b) == 6:
+        return a == b
+    curto, longo = (a, b) if len(a) < len(b) else (b, a)
+    if len(curto) == 6 and len(longo) == 11:
+        return curto == longo[_CPF_MASCARA_INICIO:_CPF_MASCARA_FIM]
+    return False
+
+
 def _achados_tcu_responsaveis(staged) -> list[Finding]:
     """Sócio de fornecedor condenado pelo TCU — casado por NOME e confirmado
     pelos dígitos do documento, nunca só por um dos dois.
@@ -1408,6 +1440,11 @@ def _achados_tcu_responsaveis(staged) -> list[Finding]:
         return []
 
     linhas = []
+    # Quantos pares o NOME sugeriu e o documento não confirmou. Publicar isto é
+    # o que permite descobrir, na rodada seguinte, se a máscara do TCU tem outro
+    # formato — um número alto aqui com zero casamento é sinal de desalinhamento,
+    # não de ausência.
+    nome_sem_confirmacao = sem_documento = 0
     for cnpj, ficha in fichas.items():
         for nome_socio, doc_socio in qsa_socios(ficha):
             for cond in condenados.get(nome_socio, ()):
@@ -1415,15 +1452,16 @@ def _achados_tcu_responsaveis(staged) -> list[Finding]:
                 # a confirmação é o documento; sem dígitos dos dois lados o par
                 # não é publicado, por mais que o nome bata
                 if not doc_socio or not doc_tcu:
+                    sem_documento += 1
                     continue
-                curto = min(len(doc_socio), len(doc_tcu))
-                if curto < 6 or doc_socio[-curto:] != doc_tcu[-curto:]:
+                if not _mesmo_cpf(doc_socio, doc_tcu):
+                    nome_sem_confirmacao += 1
                     continue
                 linhas.append({
                     "cnpj_fornecedor": cnpj,
                     "fornecedor": ficha.get("razao_social") or "",
                     "socio": nome_socio,
-                    "documento_confirmado_em": f"{curto} dígitos",
+                    "documento_confirmado_em": f"{len(doc_socio)}×{len(doc_tcu)} dígitos",
                     "lista_do_tcu": cond.get("cadastro"),
                     "processo": cond.get("processo"),
                     "deliberacao": cond.get("deliberacao"),
@@ -1441,10 +1479,16 @@ def _achados_tcu_responsaveis(staged) -> list[Finding]:
                 "listas de responsáveis do TCU (inabilitados, art. 60; contas "
                 "julgadas irregulares, art. 16, III da Lei 8.443/1992). O par só é "
                 "publicado quando o nome bate E os dígitos visíveis do documento "
-                "confirmam — o CPF vem mascarado dos dois lados, e casar por nome "
-                "produziria acusação contra homônimo."),
+                "confirmam — o CPF vem mascarado (`***.456.789-**`, os dígitos 4 a "
+                "9), e casar por nome produziria acusação contra homônimo.\n\n"
+                "As métricas dizem quantos pares o nome sugeriu sem que o documento "
+                "confirmasse: se esse número for alto com zero casamento, o formato "
+                "da máscara de um dos lados mudou e é isso que precisa ser "
+                "conferido — não é sinal de ausência."),
             metricas={"pessoas_no_tcu": int(len(resp)),
-                      "fornecedores_com_ficha": len(fichas)},
+                      "fornecedores_com_ficha": len(fichas),
+                      "nome_bateu_documento_nao_confirmou": nome_sem_confirmacao,
+                      "socio_sem_documento_na_ficha": sem_documento},
             fontes=["tcu_responsaveis", "fichas_cnpj"],
         )]
     ev = pd.DataFrame(linhas).drop_duplicates()
@@ -1473,7 +1517,9 @@ def _achados_tcu_responsaveis(staged) -> list[Finding]:
                         "Receita — sócio pode ter saído da empresa depois."),
         metricas={"fornecedores": int(ev["cnpj_fornecedor"].nunique()),
                   "socios": int(ev["socio"].nunique()),
-                  "valor_pago": round(valor, 2)},
+                  "valor_pago": round(valor, 2),
+                  "nome_bateu_documento_nao_confirmou": nome_sem_confirmacao,
+                  "socio_sem_documento_na_ficha": sem_documento},
         fontes=["tcu_responsaveis", "fichas_cnpj", "pagamentos"],
     )]
 

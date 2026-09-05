@@ -373,6 +373,22 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+# Cabeçalhos extras por host. O `Accept: application/json, text/json` é o que
+# a documentação do portal do Crea-SP manda, mas não é o que um navegador
+# manda — e o WAF do TCU devolveu 499 "Acesso Bloqueado" na rodada 13. Aqui
+# cada host pode pedir o seu conjunto, sem mudar o dos demais.
+HEADERS_POR_HOST: dict[str, dict[str, str]] = {
+    "dados-abertos.apps.tcu.gov.br": {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://dados-abertos.apps.tcu.gov.br/",
+    },
+    "certidoes-apf.apps.tcu.gov.br": {
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://certidoes-apf.apps.tcu.gov.br/",
+    },
+    "contas.tcu.gov.br": {"Accept": "application/json, text/plain, */*"},
+}
+
 THROTTLE_SECONDS = 2.5   # intervalo mínimo entre requisições por host (evita WAF)
 # Ritmo depois do PRIMEIRO 403/429 de um host na execução (http._throttle).
 # Medido em 05/09/2026: a 2,5 s o portal bloqueou 6 vezes na rodada, sempre

@@ -44,7 +44,10 @@ class _Sess:
         self.respostas = list(respostas)
         self.chamadas: list[tuple[str, dict | None]] = []
 
-    def get(self, url, params=None, timeout=None):
+    # `**kw` porque `get_json` passa `headers=` desde a rodada 16: um
+    # substituto que não aceita a assinatura real derruba o teste em
+    # vez de exercitar o código.
+    def get(self, url, params=None, timeout=None, **kw):
         self.chamadas.append((url, params))
         return self.respostas.pop(0) if len(self.respostas) > 1 else self.respostas[0]
 
@@ -130,7 +133,13 @@ def _caso_400_json(erros, captura, dormidas):
 
 
 def _caso_400_html(erros, captura, dormidas):
-    """(b) 400 com HTML do IIS: arquivo gravado e log SEM tags."""
+    """(b) 400 com HTML do IIS: arquivo gravado como TEXTO e log SEM tags.
+
+    Até a rodada 15 o arquivo guardava o corpo CRU. A página de bloqueio do TCU
+    (rodada 13) começa com 8 KB de folha de estilo, e o corte de 4 KB devolvia
+    `--tcu-blue:#003A8F;` no lugar da mensagem e do número da requisição — que é
+    o que o operador usa para pedir desbloqueio. Agora HTML vai como texto.
+    """
     corpo = ("<!DOCTYPE html><html><head><title>Bad Request</title>"
              "<style>body{font:12px}</style></head><body>\n<h1>Bad   Request</h1>"
              "<p>Período  de referência\ninválido</p></body></html>")
@@ -139,8 +148,12 @@ def _caso_400_html(erros, captura, dormidas):
     if r is not None:
         erros.append("http_config: 400 HTML tem de devolver None")
     arquivos = list((config.RAW_DIR / "http-4xx").glob("*.txt"))
-    if not arquivos or "<h1>Bad" not in arquivos[0].read_text(encoding="utf-8"):
-        erros.append("http_config: arquivo do 400 HTML não guarda o corpo cru")
+    salvo = arquivos[0].read_text(encoding="utf-8") if arquivos else ""
+    if "Bad   Request" in salvo or "font:12px" in salvo or "<h1" in salvo:
+        erros.append("http_config: o arquivo do 400 HTML guardou tag ou estilo — "
+                     "tem de guardar só o texto legível")
+    if "Bad Request" not in salvo or "Período de referência inválido" not in salvo:
+        erros.append(f"http_config: o texto da página não sobreviveu: {salvo[-200:]!r}")
     avisos = [l for l in captura.linhas if "HTTP 400" in l]
     if not avisos:
         erros.append("http_config: nenhum WARNING para 400 HTML")

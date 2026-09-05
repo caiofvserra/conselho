@@ -103,6 +103,31 @@ pronta e o buraco não fechava em rodada nenhuma. Hoje ela é refeita, e refazer
 exercícios faltam em cada etapa e quais são — é o mesmo laço da coleta rodando
 em seco, para que o inventário não possa divergir do que a coleta faria.
 
+### O portal serve cada endpoint a partir de um exercício diferente
+
+Na rodada 13 (05/09/2026) o corpo das recusas do portal trouxe, em 34 HTTP
+400 de seis endpoints, sempre a mesma frase:
+
+> O período de referência informado está fora do período de liberação
+> configurado.
+
+Não é erro do nosso parâmetro: a API tem uma **janela de liberação por
+endpoint**. Medido nessa rodada: `DespesasCentroCusto` responde a partir de
+**2021**, `BalancoOrcamentario` a partir de **2012**, e `Contratos`,
+`ContratosAditivos`, `ComparativoDespesa` e `ComparativoReceita` a partir de
+**2011**. O achado `diagnostico-periodo-de-liberacao` publica a tabela e a
+frase do servidor.
+
+Isso qualifica o resto do relatório: onde um achado apoiado nesses endpoints
+diz "no período", o período começa no primeiro exercício servido — e a
+comparação com anos anteriores não deixou de ser feita por escolha nossa. E
+não é afirmação de que o dado não exista: ele está na contabilidade do
+conselho; o que a API não faz é servi-lo. O caminho para obtê-lo é o e-SIC,
+citando o endpoint e a mensagem.
+
+Sem guardar o corpo do 4xx, isto teria continuado invisível: em dez rodadas
+o relatório publicou "série curta" sem poder dizer por quê.
+
 ### Quando uma fonte vem vazia e não se sabe por quê
 
 Cinco fontes seguem em zero depois de quatro rodadas: `licitacoes`, `atas`,
@@ -239,6 +264,13 @@ não desiste da rodada: ele analisa o que já está em `data/staged`, entrega o
 relatório e sai com código **2** para dizer que a coleta ficou incompleta. Antes
 ele saía com 2 sem analisar nada, e quem operava do Colab descobria isso ao
 abrir um zip de 164 bytes.
+
+**Corpo de 4xx em HTML vai como TEXTO.** A página de bloqueio do TCU (499,
+"Acesso Bloqueado", rodada 13) começa com 8 KB de folha de estilo, e o corte
+de 4 KB guardava `--tcu-blue:#003A8F;` no lugar da mensagem e do **número da
+requisição**, que é o que se usa para pedir desbloqueio. Agora o arquivo em
+`data/raw/http-4xx/` traz o texto legível. Hosts que recusam o `Accept` da
+documentação do portal ganham cabeçalhos próprios em `HEADERS_POR_HOST`.
 
 Toda requisição da rodada é registrada em `data/staged/_coleta_http.csv`:
 host, caminho, status, tentativa, se veio do cache e quantos itens vieram. É
@@ -548,7 +580,11 @@ extração do domínio — o relatório publica `unesp.br`, nunca o endereço.
     julgadas irregulares (art. 16, III, o inciso da Ficha Limpa) — vão para
     dataset próprio e cruzam com o **quadro societário** das fichas: o par só
     é publicado quando o nome bate **e** os dígitos visíveis do documento
-    confirmam. O CPF vem mascarado dos dois lados; casar por nome publicaria
+    confirmam — e a confirmação alinha pelo MEIO: a máscara pública é
+    `***.456.789-**`, os dígitos 4 a 9, e comparar "os últimos N" compara o
+    meio de um com o fim do outro. O achado publica quantos pares o nome
+    sugeriu sem que o documento confirmasse: número alto com zero casamento é
+    máscara desalinhada, não ausência. Casar por nome publicaria
     homônimo, que é acusação contra terceiro. Nenhum caminho da API do TCU
     foi verificado contra a rede na sessão em que isto foi escrito: o cliente
     sonda candidatos em ordem, aprende o que responder, guarda o corpo de

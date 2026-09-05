@@ -21,9 +21,11 @@ se sustenta.
 """
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
-from .. import clients
+from .. import clients, config
 from .. import http as H
 from ..findings import Finding
 from .common import df
@@ -394,6 +396,115 @@ def _resumo_status(sub: pd.DataFrame, limite: int = 5) -> str:
     return "; ".join(partes[:limite]) + (f"; +{extra}" if extra > 0 else "")
 
 
+# ------------------------------------------- o que o servidor disse ao recusar
+_RE_ANO_PARAM = re.compile(r"(?:^|/)(\d{4})\b")
+# A frase exata que o portal devolve quando o exercício pedido está fora da
+# janela que ele serve. Lida do corpo do 400 na rodada 13 (05/09/2026), em 34
+# recusas de seis endpoints — foi a primeira vez que o motivo apareceu, porque
+# até a rodada 11 o corpo do 4xx era descartado.
+_RE_PERIODO_LIBERACAO = re.compile(r"PERIODO DE LIBERACAO", re.IGNORECASE)
+
+
+def _corpos_4xx() -> list[dict]:
+    """Lê `data/raw/http-4xx/`: (endpoint, ano pedido, status, mensagem).
+
+    É o único lugar onde a RAZÃO da recusa fica registrada. O ledger diz que
+    houve 400; o corpo diz que o exercício está fora do período que o portal
+    serve — e uma coisa é a nossa pergunta estar errada, outra é o dado não
+    estar disponível pela API.
+    """
+    import json as _json
+    pasta = config.RAW_DIR / "http-4xx"
+    if not pasta.is_dir():
+        return []
+    out: list[dict] = []
+    for arquivo in sorted(pasta.glob("*.txt")):
+        try:
+            texto = arquivo.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        cabecalho, _, corpo = texto.partition("\n---\n")
+        campos = {}
+        for linha in cabecalho.splitlines():
+            chave, _, valor = linha.partition(": ")
+            campos[chave.strip()] = valor.strip()
+        url = campos.get("url", "")
+        mensagem = ""
+        bruto = corpo.strip()
+        if bruto.startswith("{"):
+            try:
+                dado = _json.loads(bruto)
+                mensagem = str(dado.get("Message") or dado.get("message") or "")
+            except ValueError:
+                mensagem = ""
+        if not mensagem:
+            mensagem = re.sub(r"\s+", " ", bruto)[:200]
+        anos = _RE_ANO_PARAM.findall(campos.get("params", ""))
+        out.append({
+            "host": url.split("/")[2] if url.count("/") > 2 else "",
+            "endpoint": url.rstrip("/").split("/")[-1],
+            "ano": int(anos[0]) if anos else None,
+            "status": campos.get("status", ""),
+            "mensagem": mensagem,
+        })
+    return out
+
+
+def _recusas_do_portal(staged) -> list[Finding]:
+    """O que o servidor RESPONDEU ao recusar — por endpoint e por exercício."""
+    corpos = [c for c in _corpos_4xx()
+              if _RE_PERIODO_LIBERACAO.search(clients._norm_coluna(c["mensagem"]))
+              and c["ano"]]
+    if not corpos:
+        return []
+    ev = pd.DataFrame(corpos)
+    por_endpoint = []
+    for endpoint, grupo in ev.groupby("endpoint"):
+        anos = sorted({int(a) for a in grupo["ano"].dropna()})
+        por_endpoint.append({
+            "endpoint": endpoint,
+            "exercicios_recusados": ", ".join(map(str, anos)),
+            "recusados": len(anos),
+            "primeiro_servido": max(anos) + 1,
+            "mensagem_do_servidor": grupo["mensagem"].iloc[0],
+        })
+    tabela = pd.DataFrame(por_endpoint).sort_values("recusados", ascending=False)
+    mais_curto = tabela.iloc[0]
+    return [Finding(
+        id="diagnostico-periodo-de-liberacao", frente=FRENTE, gravidade="media",
+        titulo=(f"O portal serve cada endpoint a partir de um exercício diferente: "
+                f"{len(tabela)} endpoint(s) recusaram exercícios anteriores, e "
+                f"`{mais_curto['endpoint']}` só responde a partir de "
+                f"{mais_curto['primeiro_servido']}"),
+        descricao=(
+            "Não é erro do nosso parâmetro nem indisponibilidade passageira: ao "
+            "recusar, o servidor devolve a razão por escrito —\n\n"
+            f"> {mais_curto['mensagem_do_servidor']}\n\n"
+            "Ou seja, a API tem uma janela de liberação por endpoint, e os "
+            "exercícios anteriores a ela não são servidos. A tabela mostra, para "
+            "cada endpoint, quais exercícios foram recusados e a partir de qual "
+            "ele responde.\n\n"
+            "**Por que isto importa para o resto do relatório:** toda análise "
+            "apoiada nesses endpoints começa no primeiro exercício servido, não em "
+            "2010. Onde o texto de um achado disser 'no período', o período é esse "
+            "— e a comparação com anos anteriores não deixou de ser feita por "
+            "escolha nossa.\n\n"
+            "**O que isto não é:** afirmação de que o dado não exista. Ele existe "
+            "na contabilidade do conselho; o que a API não faz é servi-lo."),
+        evidencia=tabela,
+        base_legal="Lei 12.527/2011, art. 8º, §3º, II e III (dados em formato "
+                   "aberto e íntegros); Decreto 7.724/2012, art. 7º.",
+        como_verificar=("Pedir por e-SIC a série completa dos exercícios recusados "
+                        "em formato aberto, citando o endpoint e a mensagem acima; "
+                        "os corpos das recusas estão em `data/raw/http-4xx/`."),
+        metricas={"endpoints_com_janela": int(len(tabela)),
+                  "exercicios_recusados": int(sum(tabela["recusados"])),
+                  "endpoint_mais_curto": str(mais_curto["endpoint"]),
+                  "primeiro_exercicio_servido": int(mais_curto["primeiro_servido"])},
+        fontes=["_coleta_http"],
+    )]
+
+
 def _porque_vazio(staged, diag: pd.DataFrame, vazios: list[str]) -> list[Finding]:
     """Para cada dataset vazio, a causa provável a partir do status HTTP."""
     led = df(staged, "_coleta_http")
@@ -657,6 +768,8 @@ def run(staged) -> list[Finding]:
                 evidencia=parciais[["dataset", "linhas", "indisponivel"]],
                 metricas={"etapas_parciais": int(len(parciais))},
             ))
+
+    achados.extend(_recusas_do_portal(staged))
 
     vazios = diag[diag["linhas"] == 0]["dataset"].tolist()
     faltando = [(d, *CRITICOS[d]) for d in vazios if d in CRITICOS]

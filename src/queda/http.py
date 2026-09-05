@@ -55,6 +55,18 @@ def _verify():
     return True
 
 
+def _headers_do_host(url: str) -> dict | None:
+    """Cabeçalhos extras que ESTE host pede (`config.HEADERS_POR_HOST`).
+
+    Devolve None quando não há nada a acrescentar, para a requisição
+    seguir usando só os cabeçalhos da sessão."""
+    try:
+        host = url.split("/", 3)[2]
+    except IndexError:
+        return None
+    return getattr(config, "HEADERS_POR_HOST", {}).get(host) or None
+
+
 def session() -> requests.Session:
     global _session
     if _session is None:
@@ -302,7 +314,8 @@ def get_json(url: str, params: dict | None = None, *, use_cache: bool = True,
         tentativa = net_attempt + rate_attempt + 1
         t0 = time.monotonic()
         try:
-            r = session().get(url, params=params, timeout=config.TIMEOUT)
+            r = session().get(url, params=params, timeout=config.TIMEOUT,
+                             headers=_headers_do_host(url))
         except requests.RequestException as e:
             # O NOME da exceção é o status aqui: ConnectTimeout, SSLError e
             # ConnectionError apontam para causas diferentes (host lento, TLS
@@ -406,7 +419,8 @@ def get_text(url: str, params: dict | None = None):
     _throttle(url)
     t0 = time.monotonic()
     try:
-        r = session().get(url, params=params, timeout=config.TIMEOUT)
+        r = session().get(url, params=params, timeout=config.TIMEOUT,
+                             headers=_headers_do_host(url))
     except requests.RequestException as e:
         registrar(url, params, resultado=R_ERRO_REDE, status=type(e).__name__,
                   tentativa=1, duracao=time.monotonic() - t0)
@@ -439,7 +453,8 @@ def get_bytes(url: str, params: dict | None = None, *,
         _throttle(url)
         t0 = time.monotonic()
         try:
-            r = session().get(url, params=params, timeout=max(config.TIMEOUT, 120))
+            r = session().get(url, params=params, timeout=max(config.TIMEOUT, 120),
+                         headers=_headers_do_host(url))
         except requests.RequestException as e:
             registrar(url, params, resultado=R_ERRO_REDE, status=type(e).__name__,
                       tentativa=tentativa, duracao=time.monotonic() - t0)
@@ -509,10 +524,22 @@ def _trecho_legivel(r, limite: int = 300) -> str:
                 return re.sub(r"\s+", " ", texto).strip()[:limite]
         except ValueError:
             pass
-    trecho = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", corpo[:8000],
-                    flags=re.S | re.I)
-    trecho = re.sub(r"<[^>]+>", " ", trecho)
-    return re.sub(r"\s+", " ", trecho).strip()[:limite]
+    return _texto_de_html(corpo)[:limite]
+
+
+def _texto_de_html(corpo: str) -> str:
+    """Texto legível de uma página HTML, sem CSS nem script.
+
+    Varre o corpo INTEIRO: a página de bloqueio do TCU (rodada 13) começa
+    com 8 KB de CSS, e cortar antes de varrer devolvia
+    `--tcu-blue:#003A8F; --bg:#f3f6fb;` em vez da mensagem e do número da
+    requisição — que é justamente o que o operador precisa para pedir o
+    desbloqueio.
+    """
+    limpo = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", corpo or "",
+                   flags=re.S | re.I)
+    limpo = re.sub(r"<[^>]+>", " ", limpo)
+    return re.sub(r"\s+", " ", limpo).strip()
 
 
 def _guardar_corpo_4xx(url: str, params: dict | None, r,
@@ -537,12 +564,19 @@ def _guardar_corpo_4xx(url: str, params: dict | None, r,
         chave = url + ("?" + urlencode(sorted(params.items())) if params else "")
         nome = hashlib.sha1(chave.encode()).hexdigest()[:16]
         destino = pasta / f"{nome}.txt"
+        # HTML vai como TEXTO: 4 KB de folha de estilo não dizem nada, e foi
+        # exatamente assim que o motivo do bloqueio do TCU se perdeu.
+        bruto = r.text or ""
+        ctype = str(r.headers.get("Content-Type") or "").lower()
+        corpo_salvo = (_texto_de_html(bruto)
+                       if ("html" in ctype or bruto.lstrip()[:9].lower().startswith("<!doctype"))
+                       else bruto)
         destino.write_text(
             f"url: {url}\nparams: {json.dumps(params, ensure_ascii=False, default=str)}\n"
             f"status: {r.status_code}\n"
             f"content-type: {r.headers.get('Content-Type')}\n"
             f"data: {datetime.now().isoformat(timespec='seconds')}\n---\n"
-            f"{(r.text or '')[:4000]}", encoding="utf-8")
+            f"{corpo_salvo[:4000]}", encoding="utf-8")
         log.log(nivel, "HTTP %s em %s params=%s — corpo: \"%s\" (guardado em %s)",
                 r.status_code, url, params, trecho, destino)
         return trecho

@@ -1254,13 +1254,15 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_regressao_novas_fontes())
     from .regressoes import (http_config as _reg_http, rodada11 as _reg_r11,
                             rodada12 as _reg_r12, rodada13 as _reg_r13,
-                            rodada14 as _reg_r14, rodada15 as _reg_r15)
+                            rodada14 as _reg_r14, rodada15 as _reg_r15,
+                            rodada16 as _reg_r16)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
     erros.extend(_reg_r13.run())
     erros.extend(_reg_r14.run())
     erros.extend(_reg_r15.run())
+    erros.extend(_reg_r16.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
@@ -1939,7 +1941,10 @@ def _regressao_sondagem_e_orgaos() -> list[str]:
                     raise ValueError("não é JSON")
 
             class _Sess:
-                def get(self, url, params=None, timeout=None):
+                # `**kw` porque `get_json` passa `headers=` desde a rodada 16: um
+                # substituto que não aceita a assinatura real derruba o teste em
+                # vez de exercitar o código.
+                def get(self, url, params=None, timeout=None, **kw):
                     return _Resp()
 
             http.session = lambda: _Sess()
