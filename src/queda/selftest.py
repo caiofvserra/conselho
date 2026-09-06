@@ -1283,7 +1283,7 @@ def _confere_metricas(achados) -> list[str]:
                             rodada12 as _reg_r12, rodada13 as _reg_r13,
                             rodada14 as _reg_r14, rodada15 as _reg_r15,
                             rodada16 as _reg_r16, rodada17 as _reg_r17,
-                            rodada18 as _reg_r18)
+                            rodada18 as _reg_r18, rodada19 as _reg_r19)
     erros.extend(_reg_http.run())
     erros.extend(_reg_r11.run())
     erros.extend(_reg_r12.run())
@@ -1293,6 +1293,7 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_reg_r16.run())
     erros.extend(_reg_r17.run())
     erros.extend(_reg_r18.run())
+    erros.extend(_reg_r19.run())
 
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa

@@ -105,7 +105,7 @@ REGRAS: list[tuple[str, str]] = [
 
     # --- fiscalização (finalística) ---
     ("FISCALIZACAO",
-     r"\bfiscaliza|\bfiscal(is)?\b|\bvistoria|auto(s)? de infra|"
+     r"\bfiscaliza|\bfisca(l|is)\b|\bvistoria|auto(s)? de infra|"
      r"agente(s)? fiscal|\bdenuncia|\bpericia\b|apoio a fiscaliza"),
 
     # --- atendimento ao profissional (finalística) ---
@@ -177,6 +177,38 @@ def normalizar(texto) -> str:
     return re.sub(r"\s+", " ", t).strip().lower()
 
 
+# Textos que contêm a palavra "fiscal" e NÃO são fiscalização do exercício
+# profissional. Sem esta lista o regex de FISCALIZACAO abocanha o conselho
+# fiscal, a nota fiscal, o fiscal de contrato e a auditoria interna — e infla
+# justamente o denominador da comparação "verba × fiscalização", que é uma das
+# frases mais citadas do relatório. O erro puxava a razão para BAIXO, contra a
+# tese, e ainda assim tinha de sair: número errado a favor é número errado.
+# O plural do português é irregular para este caso: "conselhos fiscais" flexiona
+# as DUAS palavras, e uma exclusão escrita só no singular ("conselho fiscal")
+# deixa passar exatamente a linha que se queria excluir. Por isso cada termo
+# abaixo carrega os dois números.
+_NAO_E_FISCALIZACAO = re.compile(
+    # documento e órgão de controle — a palavra "fiscal" é do fisco, não do
+    # exercício profissional
+    r"conselhos? fisca(l|is)\b|notas? fisca(l|is)\b|documentos? fisca(l|is)\b|"
+    r"(cupom|cupons) fisca(l|is)\b|livros? fisca(l|is)\b|"
+    r"escritura\w* fisca(l|is)\b|obriga\w+ fisca(l|is)\b|"
+    r"responsabilidade fisca(l|is)\b|incentivos? fisca(l|is)\b|"
+    r"beneficios? fisca(l|is)\b|"
+    # gestão contratual: o "fiscal de contrato" fiscaliza o fornecedor, não o
+    # exercício profissional de ninguém
+    r"fisca(l|is) (de |do |da )?contratos?\b|"
+    r"(gestor(es)? e fisca(l|is)|fisca(l|is) e gestor(es)?)\b|"
+    r"fiscaliza\w* (de |do |da )?contratos?\b|"
+    # controle interno
+    r"fiscaliza\w* de processos?\b|fiscaliza\w* intern[ao]s?\b|auditoria")
+
+
+def _e_fiscalizacao_de_verdade(t: str) -> bool:
+    """`t` já normalizado: a palavra "fiscal" aqui é do exercício profissional?"""
+    return not _NAO_E_FISCALIZACAO.search(t)
+
+
 def classificar_texto(texto: str) -> str:
     """Categoria de finalidade de um nome de conta / centro de custo."""
     t = normalizar(texto)
@@ -184,6 +216,8 @@ def classificar_texto(texto: str) -> str:
         return "OUTROS"
     for cat, rx in _COMPILADAS:
         if rx.search(t):
+            if cat == "FISCALIZACAO" and not _e_fiscalizacao_de_verdade(t):
+                continue
             return cat
     return "OUTROS"
 
@@ -316,7 +350,7 @@ FUNCOES = {
 # Civil" contém "engenharia", que aparece em várias unidades técnicas.
 REGRAS_FUNCAO: list[tuple[str, str]] = [
     ("FISCALIZACAO",
-     r"\bfiscaliza|\bfiscal(is|izacao)?\b|\bvistoria|agente(s)? fiscal|"
+     r"\bfiscaliza|\bfisca(l|is)\b|\bvistoria|agente(s)? fiscal|"
      r"auto(s)? de infra|\bdenuncia|\bperiferia de fiscal|"
      r"unidade(s)? de fiscaliza|\bufis\b|coordenadoria de fiscaliza"),
 
@@ -396,6 +430,10 @@ def classificar_funcao(texto: str) -> str:
         return "NAO_IDENTIFICADA"
     for cat, rx in _FUNCAO_COMPILADAS:
         if rx.search(t):
+            # A mesma guarda da natureza: "Conselho Fiscal" e "Fiscal de
+            # contrato" são unidades reais e não fiscalizam exercício profissional.
+            if cat == "FISCALIZACAO" and not _e_fiscalizacao_de_verdade(t):
+                continue
             return cat
     return "NAO_IDENTIFICADA"
 
