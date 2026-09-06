@@ -1295,6 +1295,20 @@ def _confere_metricas(achados) -> list[str]:
     erros.extend(_reg_r18.run())
     erros.extend(_reg_r19.run())
 
+    # DUPLA CONTAGEM na comparação mais citada do relatório. O numerador vem do
+    # eixo NATUREZA (a despesa é diária) e o denominador do eixo FUNÇÃO (a
+    # unidade é de fiscalização): a linha "Departamento de Fiscalização /
+    # Diárias no País" (5e6 a 2% ao ano) é as DUAS coisas e estava sendo somada
+    # dos dois lados da mesma conta. Pior: é justamente a diária que financia a
+    # atividade-fim — contá-la como despesa-meio inverte o sentido do achado.
+    # A comparação publicada é disjunta; estas duas linhas prendem isso.
+    exige("finalistica-verbas-vs-fiscalizacao", "verba_dentro_da_fiscalizacao",
+          soma(5e6, 1.02))
+    # e o que sobra no numerador é só a verba FORA da fiscalização:
+    # Gabinete/Diárias (3e6 a 9%) + Câmaras/Jetons (4e6 a 9%)
+    exige("finalistica-verbas-vs-fiscalizacao", "total_verbas",
+          soma(3e6, 1.09) + soma(4e6, 1.09))
+
     # obra da nova sede: R$ 48 mi pagos contra R$ 5 mi contratados. O achado
     # publica o denominador do TETO — se alguém trocar de volta pela estimativa
     # central, o valor muda e o teste pega.

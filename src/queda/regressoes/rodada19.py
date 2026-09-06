@@ -21,6 +21,14 @@ sai daí. Denominador inflado empurra a razão para BAIXO, ou seja, o erro
 trabalhava CONTRA a tese. Não importa: número errado a favor continua sendo
 número errado, e num contraditório é ele que derruba a peça inteira.
 
+A rodada cobre ainda as duas consequências disso:
+
+* o DENOMINADOR ABERTO — a medida de fiscalização deixa de ser um total
+  fechado e passa a sair rótulo a rótulo, com o peso de cada um. Sem isso,
+  nem quem publica nem quem contesta consegue ver o que está lá dentro;
+* a TRIAGEM POR LLM não inventa — resposta sem trecho literal conferível no
+  próprio rótulo é descartada, e com o modelo desligado a lista sai vazia.
+
 Tudo offline: não há rede aqui, só a taxonomia.
 """
 from __future__ import annotations
@@ -110,10 +118,70 @@ def _a_guarda_nao_e_generica(erros: list[str]) -> None:
           "a guarda deixou passar 'conselho fiscal'")
 
 
+def _o_denominador_abre(erros: list[str]) -> None:
+    """A medida de fiscalização tem de sair aberta, e a abertura tem de somar
+    exatamente o total — nem rótulo perdido, nem rótulo de fora."""
+    import pandas as pd
+
+    from ..checks import finalistica as F
+
+    base = pd.DataFrame({
+        "_ano": [2024, 2024, 2024, 2024],
+        "valor": [100.0, 50.0, 25.0, 900.0],
+        "categoria": ["VERBAS_PESSOAIS", "REMUNERACAO", "FISCALIZACAO",
+                      "CUSTEIO_ADMIN"],
+        "funcao": ["FISCALIZACAO", "FISCALIZACAO", "FISCALIZACAO",
+                   "ADMINISTRACAO"],
+        "unidade": ["Depto de Fiscalizacao"] * 3 + ["Superintendencia"],
+        "rotulo": ["Depto de Fiscalizacao / Diarias no Pais",
+                   "Depto de Fiscalizacao / Vencimentos",
+                   "Depto de Fiscalizacao / Acoes de Fiscalizacao",
+                   "Superintendencia / Aluguel"],
+    })
+    achados = F._abrir_a_fiscalizacao(base, "funcao")
+    comp = [a for a in achados if a.id == "finalistica-fiscalizacao-composicao"]
+    _erro(erros, len(comp) == 1,
+          "a composição da fiscalização não foi publicada — o denominador "
+          "voltou a ser um total fechado, que ninguém consegue conferir")
+    if not comp:
+        return
+    ev = comp[0].evidencia
+    _erro(erros, abs(float(ev["valor"].sum()) - 175.0) < 0.01,
+          f"a abertura somou {float(ev['valor'].sum())}, e a medida é 175 — "
+          "abertura que não fecha com o total publicado é pior que não abrir")
+    _erro(erros, not ev["rótulo"].str.contains("Aluguel").any(),
+          "a abertura trouxe um rótulo que não está na medida de fiscalização")
+    # e o achado mais citável: metade do que se chama fiscalização é diária
+    linha = ev[ev["rótulo"].str.contains("Diarias")]
+    _erro(erros, not linha.empty and abs(float(linha["% da fiscalização"].iloc[0]) - 57.1) < 0.2,
+          "o percentual por rótulo saiu errado — é ele que mostra o peso de "
+          "cada coisa dentro da medida")
+
+
+def _o_modelo_nao_inventa(erros: list[str]) -> None:
+    """A triagem por LLM não pode produzir linha sem lastro no texto auditado, e
+    com o modelo desligado não pode produzir linha nenhuma."""
+    from .. import llm
+
+    _erro(erros, llm._trecho_confere("Colegio de Inspetores",
+                                     "Evento — Colégio de Inspetores 2024"),
+          "o trecho literal existe no rótulo e foi rejeitado (a comparação tem "
+          "de ser frouxa em acento e caixa)")
+    _erro(erros, not llm._trecho_confere("vistoria de obra",
+                                         "Evento — Colégio de Inspetores 2024"),
+          "trecho que NÃO está no rótulo passou na conferência — é a única "
+          "barreira contra o modelo escrever motivo sobre coisa nenhuma")
+    _erro(erros, not llm._trecho_confere("", "qualquer coisa"),
+          "trecho vazio passou na conferência")
+    _erro(erros, llm.auditar_enquadramento({}) == [],
+          "a auditoria devolveu algo sem rubrica nenhuma para auditar")
+
+
 def run() -> list[str]:
     erros: list[str] = []
     for passo in (_a_palavra_fiscal_nao_basta, _plural_e_singular_no_mesmo_lado,
-                  _a_guarda_nao_e_generica):
+                  _a_guarda_nao_e_generica, _o_denominador_abre,
+                  _o_modelo_nao_inventa):
         try:
             passo(erros)
         except Exception as e:                       # noqa: BLE001

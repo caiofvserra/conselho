@@ -194,6 +194,10 @@ def run(staged) -> list[Finding]:
     ))
 
     # ------------------------------------------------ 4. verbas pessoais x fim
+    # Qual eixo mede a fiscalização — o bloco 4 decide, e o 4a reusa a MESMA
+    # escolha: abrir um denominador diferente do publicado seria pior que não
+    # abrir nenhum.
+    medida_fiscal = "funcao"
     if {"VERBAS_PESSOAIS"} <= set(serie_cat.columns):
         verbas = serie_cat["VERBAS_PESSOAIS"]
         fiscal_cat = serie_cat.get("FISCALIZACAO", pd.Series(0, index=serie_cat.index))
@@ -205,30 +209,58 @@ def run(staged) -> list[Finding]:
         fiscal_func = (base[base["funcao"] == "FISCALIZACAO"].groupby("_ano")["valor"].sum()
                        if "funcao" in base.columns else pd.Series(dtype=float))
         usa_funcao = not fiscal_func.empty and float(fiscal_func.sum()) > float(fiscal_cat.sum())
+        medida_fiscal = "funcao" if usa_funcao else "categoria"
         fiscal = fiscal_func.reindex(verbas.index).fillna(0) if usa_funcao else fiscal_cat
         medida = ("despesa alocada a centros de custo de fiscalização" if usa_funcao
                   else "contas contábeis rotuladas como fiscalização")
-        comp = pd.DataFrame({"Verbas pessoais (diárias, km, jetons)": verbas,
-                             "Fiscalização": fiscal})
+
+        # DUPLA CONTAGEM — o defeito que derrubaria a comparação inteira num
+        # contraditório. O numerador vem do eixo NATUREZA (a despesa é diária)
+        # e o denominador, quando usa_funcao, vem do eixo FUNÇÃO (a unidade é
+        # de fiscalização). A diária paga ao agente fiscal em diligência é as
+        # DUAS coisas: ela estava sendo somada dos dois lados da mesma conta.
+        # E é justamente a diária que financia a atividade-fim — contá-la como
+        # despesa-meio é o oposto do que se quer mostrar.
+        # A comparação publicada passa a ser disjunta: verba paga a pessoas
+        # FORA dos centros de fiscalização × tudo o que a fiscalização custou.
+        # O valor retirado vai declarado, nunca escondido.
+        if usa_funcao:
+            sobreposta = (base[(base["categoria"] == "VERBAS_PESSOAIS") &
+                               (base["funcao"] == "FISCALIZACAO")]
+                          .groupby("_ano")["valor"].sum()
+                          .reindex(verbas.index).fillna(0))
+        else:
+            sobreposta = pd.Series(0.0, index=verbas.index)
+        verbas_fora = (verbas - sobreposta).clip(lower=0)
+
+        rotulo_verba = ("Verbas pessoais fora da fiscalização" if usa_funcao
+                        else "Verbas pessoais (diárias, km, jetons)")
+        comp = pd.DataFrame({rotulo_verba: verbas_fora, "Fiscalização": fiscal})
         if usa_funcao:
             comp = comp[comp["Fiscalização"] > 0]      # só exercícios com centro de custo
-        maior = comp[comp["Verbas pessoais (diárias, km, jetons)"] >
-                     comp["Fiscalização"]]
+        maior = comp[comp[rotulo_verba] > comp["Fiscalização"]]
         anos_c = [int(a) for a in comp.index]
         periodo = (f"{min(anos_c)}–{max(anos_c)}" if len(anos_c) > 1
                    else (str(anos_c[0]) if anos_c else "—"))
         zerados = [int(a) for a, v in comp["Fiscalização"].items() if v <= 0]
+        total_sobreposto = float(sobreposta.reindex(comp.index).fillna(0).sum())
         achados.append(Finding(
             id="finalistica-verbas-vs-fiscalizacao", frente=FRENTE,
             gravidade="alta" if len(maior) >= max(len(comp) // 2, 1) and not zerados else "media",
             titulo=(f"Em {len(maior)} de {len(comp)} exercícios ({periodo}), o gasto com "
-                    f"diárias/km/jetons superou o gasto com fiscalização — medido por {medida}"),
+                    f"diárias/km/jetons{' fora dos centros de fiscalização' if usa_funcao else ''} "
+                    f"superou o gasto com fiscalização — medido por {medida}"),
             descricao=(
                 "Comparação direta entre a verba paga a pessoas para se deslocar e "
                 "o custo da atividade que justifica a existência do conselho. "
                 "Fiscalizar o exercício profissional é a competência legal "
                 "primária (Lei 5.194/1966, art. 34); verba indenizatória é meio, "
                 f"não fim. Medida de fiscalização: {medida}."
+                + (f" **Sem dupla contagem**: {fmt_brl(total_sobreposto)} de verba "
+                   "a pessoas foram pagos DENTRO de centros de custo de "
+                   "fiscalização e saíram do numerador — essa diária é custo da "
+                   "atividade-fim, e somá-la dos dois lados inflaria a "
+                   "comparação." if total_sobreposto > 0 else "")
                 + (f" Nos exercícios {zerados} a medida devolveu zero — isso é "
                    "limite de classificação da ferramenta (nenhuma conta ou centro "
                    "de custo reconhecido como fiscalização naquele ano), não gasto "
@@ -238,11 +270,27 @@ def run(staged) -> list[Finding]:
             base_legal="Lei 5.194/1966, arts. 24 e 34 (finalidade dos Creas); "
                        "Lei 4.320/1964, art. 63 (liquidação da despesa).",
             metricas={"anos_verba_supera_fiscalizacao": int(len(maior)),
-                      "total_verbas": round(float(comp["Verbas pessoais (diárias, km, jetons)"].sum()), 2),
+                      "total_verbas": round(float(comp[rotulo_verba].sum()), 2),
                       "total_fiscalizacao": round(float(comp["Fiscalização"].sum()), 2),
+                      "verba_dentro_da_fiscalizacao": round(total_sobreposto, 2),
                       "medida": medida, "periodo": periodo,
                       "exercicios_sem_medida": zerados},
         ))
+
+    # ------------------------------------------- 4a. o que É a "fiscalização"
+    #
+    # A pergunta do operador: "aumentou o valor com fiscalização porque tentam
+    # enquadrar tudo na conta contábil de fiscalização, mesmo quando não
+    # deveria — um evento de colégio de inspetores, altamente político, foi
+    # pago com dinheiro de fiscalização".
+    #
+    # Não dá para responder isso com um total. Enquanto a fiscalização for um
+    # número só, ninguém — nem o conselho, nem quem contesta — consegue ver o
+    # que está dentro dele. Este achado ABRE O DENOMINADOR: cada rótulo que
+    # compõe a medida, com o valor que carrega, ordenado por peso. É a linha
+    # que a pessoa confere na fonte, uma a uma, sem depender da nossa palavra
+    # nem da de um modelo de linguagem.
+    achados.extend(_abrir_a_fiscalizacao(base, medida_fiscal))
 
     # ------------------------------------------------ 4b. matriz natureza × função
     mede_funcao = float(base.loc[base["funcao"] != "NAO_IDENTIFICADA",
@@ -348,4 +396,109 @@ def run(staged) -> list[Finding]:
                 tabela_anual=A.ranking_anual(d, "NOME_CENTRO_CUSTO", "valor", top=10),
             ))
 
+    return achados
+
+
+def _abrir_a_fiscalizacao(base: pd.DataFrame, eixo: str) -> list[Finding]:
+    """Publica a COMPOSIÇÃO do que a ferramenta chamou de fiscalização.
+
+    Um total não é auditável. "R$ 43 mi em fiscalização" pode conter diligência
+    de agente fiscal e pode conter evento de colegiado — e quem lê não tem como
+    saber, porque o número não abre. Este achado abre: cada rótulo que entrou na
+    medida, com o valor que carrega, ordenado por peso.
+
+    A abertura é deterministica e vale por si. Em cima dela, quando há um modelo
+    local no ar, roda uma TRIAGEM que sinaliza rótulos cujo enquadramento merece
+    conferência — nos dois sentidos, e sem mexer em número nenhum.
+    """
+    from .. import llm
+
+    if eixo not in base.columns or "rotulo" not in base.columns:
+        return []
+    dentro = base[base[eixo] == "FISCALIZACAO"]
+    if dentro.empty:
+        return []
+
+    total = float(dentro["valor"].sum())
+    total_geral = float(base["valor"].sum())
+    composicao = (dentro.groupby("rotulo")["valor"].sum()
+                  .sort_values(ascending=False))
+    tabela = composicao.reset_index()
+    tabela.columns = ["rótulo", "valor"]
+    tabela["% da fiscalização"] = (100 * tabela["valor"] / total).round(1)
+
+    nome_eixo = ("centro de custo (função)" if eixo == "funcao"
+                 else "conta contábil (natureza)")
+    achados = [Finding(
+        id="finalistica-fiscalizacao-composicao", frente=FRENTE,
+        gravidade="info",
+        titulo=(f"O que está dentro da “fiscalização”: {len(composicao)} rótulos "
+                f"somam {fmt_brl(total)}"),
+        descricao=(
+            "A medida de fiscalização usada no relatório aberta rótulo a rótulo, "
+            f"pelo eixo {nome_eixo}. Serve para duas leituras opostas e ambas "
+            "legítimas: conferir se algo que não é fiscalização do exercício "
+            "profissional entrou na conta, e conferir se a medida está deixando "
+            "atividade real de fora.\n\n"
+            "**Este achado não acusa nada.** É o denominador aberto para quem "
+            "quiser conferir na fonte — a classificação é NOSSA, por nome de "
+            "rótulo, não do órgão."),
+        evidencia=tabela,
+        base_legal="Lei 4.320/1964, art. 63; NBC TSP 11 (segregação por função).",
+        como_verificar=("Cada rótulo pode ser conferido no portal da "
+                        "transparência do conselho pelo nome do centro de custo "
+                        "ou da conta contábil."),
+        cobertura={"base": total, "universo": total_geral,
+                   "o_que": "despesa reconhecida como fiscalização pela "
+                            "classificação do projeto"},
+    )]
+
+    # --------------------------------------------------- triagem (opcional)
+    fora = (base[base[eixo] != "FISCALIZACAO"].groupby("rotulo")["valor"].sum()
+            .sort_values(ascending=False).head(300))
+    classe = base.groupby("rotulo")[eixo].first()
+    valores = base.groupby("rotulo")["valor"].sum()
+    alvo = list(composicao.head(300).index) + [r for r in fora.index
+                                               if r not in set(composicao.index)]
+    rubricas = {r: str(classe.get(r, "OUTROS")) for r in alvo}
+
+    divergencias = llm.auditar_enquadramento(rubricas)
+    if not divergencias:
+        return achados
+
+    for d in divergencias:
+        d["valor"] = round(float(valores.get(d["rubrica"], 0.0)), 2)
+    div = pd.DataFrame(divergencias).sort_values("valor", ascending=False)
+    dentro_sinalizado = div[div["categoria_da_regra"] == "FISCALIZACAO"]
+    valor_dentro = float(dentro_sinalizado["valor"].sum())
+
+    achados.append(Finding(
+        id="finalistica-enquadramento-conferir", frente=FRENTE,
+        gravidade="info",
+        titulo=(f"{len(div)} rótulos sinalizados para conferência de "
+                f"enquadramento — {len(dentro_sinalizado)} deles dentro da "
+                f"fiscalização ({fmt_brl(valor_dentro)})"),
+        descricao=(
+            "Triagem feita por um modelo de linguagem LOCAL sobre os rótulos "
+            "que compõem a despesa, nos DOIS sentidos: rótulos contados como "
+            "fiscalização cujo texto não sustenta o enquadramento, e rótulos "
+            "fora dela cujo texto sugere que deveriam entrar.\n\n"
+            "**O que este achado NÃO é.** Não é conclusão, não é imputação e "
+            "não mexe em número algum do relatório: nenhuma soma, razão ou "
+            "denominador foi alterado por ele. Um modelo pequeno erra, e por "
+            "isso cada linha só entra na lista com o TRECHO LITERAL do rótulo "
+            "que sustenta a resposta — resposta sem trecho conferível é "
+            "descartada antes de chegar aqui.\n\n"
+            "**Como usar.** Como fila de conferência: leia o rótulo, leia o "
+            "trecho e decida na fonte. O nome de um rótulo é evidência fraca "
+            "de finalidade — a forte é o empenho e o processo que o originou."),
+        evidencia=div,
+        como_verificar=("Puxar, para os rótulos sinalizados, o empenho e o "
+                        "processo administrativo correspondentes: é o documento "
+                        "que diz a finalidade, não o nome da conta."),
+        metricas={"rubricas_auditadas": len(rubricas),
+                  "sinalizadas": int(len(div)),
+                  "sinalizadas_dentro_da_fiscalizacao": int(len(dentro_sinalizado)),
+                  "valor_sinalizado_dentro": round(valor_dentro, 2)},
+    ))
     return achados

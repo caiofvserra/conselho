@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 
 import requests
 
@@ -514,3 +515,167 @@ def resumo_executivo(achados_resumo: list[dict], *,
         "Achados (JSON):\n" + payload + "\n\nEscreva o resumo executivo.",
         modelo=modelo, max_tokens=2048)
     return (texto or "").strip()
+
+
+# ------------------------------------------------- auditoria de enquadramento
+#
+# O operador levantou a suspeita: "aumentou o valor com fiscalização porque
+# tentam enquadrar tudo na conta contábil de fiscalização, mesmo quando não
+# deveria — um evento de colégio de inspetores, altamente político, foi pago
+# com dinheiro de fiscalização".
+#
+# A suspeita é legítima e o dado para testá-la existe. O que NÃO existe é
+# licença para publicar o veredito de um modelo de 7B como achado. Por isso
+# esta camada é de TRIAGEM, e o desenho inteiro deriva disso:
+#
+# 1. NÃO MEXE NO NÚMERO. A medida de fiscalização continua saindo da regra
+#    determinística. O modelo não reclassifica nada, não entra em soma alguma
+#    e não muda denominador: ele produz uma LISTA PARA CONFERIR na fonte.
+# 2. OS DOIS SENTIDOS. Varrer só o que está rotulado como fiscalização é
+#    procurar erro num lado só — e a lista sairia sempre acusatória, por
+#    construção. Varre-se também o que NÃO está rotulado e talvez devesse
+#    estar. Achado que só pode dar num sentido não é achado, é viés.
+# 3. TRECHO LITERAL OBRIGATÓRIO. O modelo tem de apontar o pedaço do texto que
+#    sustenta a resposta, e o trecho é conferido como substring do original.
+#    Não conferiu, o item cai. É a barreira contra alucinação: sem ela, "motivo"
+#    é prosa plausível sobre coisa nenhuma.
+# 4. DÚVIDA NÃO É SINAL. Só "sim" e "não" contam; "não dá para dizer" sai.
+# 5. CACHE PRÓPRIO E VERSIONADO. Mudou o prompt, muda a chave — senão a rodada
+#    seguinte mistura resposta de dois critérios diferentes e ninguém percebe.
+VERSAO_AUDITORIA = "v1"
+
+_SISTEMA_AUDITORIA = (
+    "Você audita o ENQUADRAMENTO de rubricas de despesa de um conselho de "
+    "fiscalização profissional brasileiro (Crea-SP, autarquia federal).\n\n"
+    "Para cada rubrica recebida, responda uma única pergunta: o texto descreve "
+    "FISCALIZAÇÃO DO EXERCÍCIO PROFISSIONAL — isto é, verificar se quem exerce "
+    "engenharia, agronomia ou geociências tem registro e responsabilidade "
+    "técnica (diligência, vistoria de obra, auto de infração, agente fiscal em "
+    "campo, apoio direto a essa atividade)?\n\n"
+    "NÃO é fiscalização do exercício profissional, ainda que a palavra "
+    "'fiscal' apareça: conselho fiscal, nota/cupom/livro fiscal, fiscal de "
+    "contrato, auditoria interna, responsabilidade fiscal, incentivo fiscal. "
+    "Também NÃO é: evento, congresso, plenária, reunião de colegiado, "
+    "premiação, homenagem, publicidade, capacitação, patrocínio — mesmo quando "
+    "o público do evento for de inspetores ou agentes fiscais.\n\n"
+    "Regras de resposta:\n"
+    "- 'trecho' deve ser copiado LITERALMENTE do texto recebido, sem alterar "
+    "uma letra. Se não houver trecho que sustente a resposta, use 'sim'/'nao' "
+    "apenas quando for evidente, senão responda 'nao_da_para_dizer'.\n"
+    "- Na dúvida, responda 'nao_da_para_dizer'. Errar para o lado da dúvida "
+    "não custa nada; afirmar sem base destrói o trabalho.\n"
+    "- 'motivo' em uma frase curta, sem adjetivo e sem juízo de valor.\n"
+    "- Um item para CADA rubrica recebida, repetindo o texto como veio.\n"
+    "- Responda APENAS o JSON pedido."
+)
+
+_SCHEMA_AUDITORIA = {
+    "type": "object",
+    "properties": {
+        "itens": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "texto": {"type": "string"},
+                    "e_fiscalizacao_do_exercicio": {
+                        "type": "string",
+                        "enum": ["sim", "nao", "nao_da_para_dizer"]},
+                    "trecho": {"type": "string"},
+                    "motivo": {"type": "string"},
+                },
+                "required": ["texto", "e_fiscalizacao_do_exercicio", "trecho",
+                             "motivo"],
+            },
+        }
+    },
+    "required": ["itens"],
+}
+
+
+def _trecho_confere(trecho: str, texto: str) -> bool:
+    """O trecho tem de existir DENTRO do texto auditado.
+
+    Comparação frouxa em espaço, acento e caixa — o modelo reescreve "Diárias"
+    como "diarias" e isso não é alucinação. O que não se aceita é trecho que
+    não está lá: aí o "motivo" é prosa sobre coisa nenhuma, e o item cai.
+    """
+    def achatar(s: str) -> str:
+        s = unicodedata.normalize("NFD", s or "")
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+        return re.sub(r"\W+", "", s).lower()
+
+    t, alvo = achatar(trecho), achatar(texto)
+    return bool(t) and t in alvo
+
+
+def auditar_enquadramento(rubricas: dict[str, str], *,
+                          modelo: str = MODELO_PADRAO,
+                          limite: int = 600) -> list[dict]:
+    """Sinaliza rubricas cujo enquadramento determinístico merece conferência.
+
+    `rubricas` é {texto: categoria que a REGRA deu}. Devolve a lista de
+    DIVERGÊNCIAS nos dois sentidos, cada uma com o trecho literal que a
+    sustenta. Lista vazia quando o modelo não está no ar — e aí nada muda no
+    relatório, que é o comportamento correto: a triagem é um extra.
+
+    O chamador NÃO deve usar isto para reclassificar coisa alguma.
+    """
+    if not rubricas:
+        return []
+    cache = _carregar(f"enquadramento_{VERSAO_AUDITORIA}")
+    unicos = [t for t in dict.fromkeys(x for x in rubricas
+                                       if isinstance(x, str) and x.strip())][:limite]
+    pendentes = [t for t in unicos if _chave(t) not in cache]
+
+    if pendentes and disponivel():
+        log.info("LLM local (%s): auditando o enquadramento de %d rubricas "
+                 "em lotes de %d", modelo, len(pendentes), LOTE)
+        for i in range(0, len(pendentes), LOTE):
+            lote = pendentes[i:i + LOTE]
+            bruto = _gerar(
+                _SISTEMA_AUDITORIA,
+                "Audite cada rubrica abaixo:\n\n" + "\n".join(f"- {t}" for t in lote),
+                schema=_SCHEMA_AUDITORIA, modelo=modelo, max_tokens=4096)
+            dados = _extrair_json(bruto)
+            if not dados:
+                log.warning("LLM: lote %d da auditoria sem JSON aproveitável",
+                            i // LOTE + 1)
+                continue
+            for item in dados.get("itens", []):
+                t = _casar_texto(item.get("texto", ""), lote)
+                resposta = item.get("e_fiscalizacao_do_exercicio")
+                if not t or resposta not in ("sim", "nao", "nao_da_para_dizer"):
+                    continue
+                trecho = (item.get("trecho") or "").strip()
+                # sem trecho literal a resposta não é auditável — vira dúvida
+                if resposta != "nao_da_para_dizer" and not _trecho_confere(trecho, t):
+                    resposta, trecho = "nao_da_para_dizer", ""
+                cache[_chave(t)] = {
+                    "resposta": resposta, "trecho": trecho,
+                    "motivo": (item.get("motivo") or "").strip()[:240]}
+            _gravar(f"enquadramento_{VERSAO_AUDITORIA}", cache)
+    elif pendentes:
+        log.info("LLM indisponível — a auditoria de enquadramento não roda "
+                 "e o relatório sai sem ela")
+
+    divergencias: list[dict] = []
+    for texto in unicos:
+        lido = cache.get(_chave(texto))
+        if not lido or lido.get("resposta") not in ("sim", "nao"):
+            continue
+        regra = rubricas.get(texto)
+        e_fisc_regra = regra == "FISCALIZACAO"
+        e_fisc_modelo = lido["resposta"] == "sim"
+        if e_fisc_regra == e_fisc_modelo:
+            continue
+        divergencias.append({
+            "rubrica": texto,
+            "categoria_da_regra": regra,
+            "sentido": ("rotulado como fiscalização, o texto não sustenta"
+                        if e_fisc_regra else
+                        "não rotulado como fiscalização, o texto sugere que é"),
+            "trecho": lido.get("trecho", ""),
+            "motivo": lido.get("motivo", ""),
+        })
+    return divergencias
