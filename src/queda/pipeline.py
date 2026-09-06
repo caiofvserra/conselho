@@ -2065,6 +2065,35 @@ def _diagnostico_dos_secundarios(nome: str) -> None:
         })
 
 
+# Etapas que varrem uma base PAGINADA em fatias, uma fatia por rodada, e
+# guardam o ponto de parada num progresso.json próprio.
+VARREDURA_PAGINADA = {"tcu_acordaos": ("tcu-acordaos", "acórdãos do TCU")}
+
+
+def _varredura_paginada_pendente(nome: str) -> list[str]:
+    """Fatia de base paginada que ainda falta varrer.
+
+    `--retomar` decide pela existência de linhas em `data/staged`, e para estas
+    etapas essa é a pergunta errada: a PRIMEIRA fatia já grava linhas, e a
+    partir daí a etapa é pulada para sempre — o `proximo_inicio` do progresso
+    aponta para um registro que nunca mais será lido e a varredura congela sem
+    nenhum aviso, parecendo concluída. A etapa só está pronta quando a base foi
+    percorrida ATÉ O FIM.
+    """
+    pasta = VARREDURA_PAGINADA.get(nome)
+    if pasta is None:
+        return []
+    try:
+        p = json.loads((config.RAW_DIR / pasta[0] / "progresso.json")
+                       .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []                       # nunca rodou: a regra normal decide
+    if p.get("fim_da_base"):
+        return []
+    return [f"varredura de {pasta[1]} parou no registro "
+            f"{int(p.get('proximo_inicio') or 0)}"]
+
+
 def etapa_pronta(nome: str, desde: int | None,
                  ate: int) -> tuple[pd.DataFrame | None, list]:
     """(DataFrame pronto ou None, exercícios pendentes).
@@ -2083,6 +2112,7 @@ def etapa_pronta(nome: str, desde: int | None,
     if nome in ETAPAS_JANELA_MENSAL:
         pendentes += janelas_pendentes_mensais(ETAPAS_JANELA_MENSAL[nome], ate, desde)
     pendentes += _secundarios_pendentes(nome)
+    pendentes += _varredura_paginada_pendente(nome)
     return (pronto if pronto is not None and not pendentes else None), pendentes
 
 

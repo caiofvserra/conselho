@@ -177,11 +177,54 @@ def _o_modelo_nao_inventa(erros: list[str]) -> None:
           "a auditoria devolveu algo sem rubrica nenhuma para auditar")
 
 
+def _a_varredura_paginada_nao_congela(erros: list[str]) -> None:
+    """`--retomar` decide por "tem linhas em staged", e a varredura de acórdãos
+    do TCU grava linhas já na primeira fatia. Sem uma regra própria, a segunda
+    rodada pula a etapa para sempre e a varredura congela parecendo concluída —
+    no caderno do operador, que roda `all --retomar` em toda reconexão, isso é
+    invisível."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from .. import config, pipeline
+
+    raw_real = config.RAW_DIR
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            config.RAW_DIR = Path(tmp)
+            pasta = config.RAW_DIR / "tcu-acordaos"
+            pasta.mkdir(parents=True)
+            arquivo = pasta / "progresso.json"
+
+            arquivo.write_text(json.dumps(
+                {"proximo_inicio": 1500, "varridos": 1500, "fim_da_base": False}),
+                encoding="utf-8")
+            _erro(erros, bool(pipeline._varredura_paginada_pendente("tcu_acordaos")),
+                  "varredura do TCU parada no registro 1500 foi dada como pronta "
+                  "— a etapa seria pulada para sempre e nunca chegaria ao fim")
+
+            arquivo.write_text(json.dumps(
+                {"proximo_inicio": 0, "varridos": 90000, "fim_da_base": True}),
+                encoding="utf-8")
+            _erro(erros, not pipeline._varredura_paginada_pendente("tcu_acordaos"),
+                  "base percorrida até o fim e a etapa continua pendente — "
+                  "toda rodada voltaria à rede sem ter o que buscar")
+
+            arquivo.unlink()
+            _erro(erros, not pipeline._varredura_paginada_pendente("tcu_acordaos"),
+                  "sem progresso.json a regra normal do --retomar é que decide")
+            _erro(erros, not pipeline._varredura_paginada_pendente("pagamentos"),
+                  "a regra vazou para uma etapa que não é varredura paginada")
+    finally:
+        config.RAW_DIR = raw_real
+
+
 def run() -> list[str]:
     erros: list[str] = []
     for passo in (_a_palavra_fiscal_nao_basta, _plural_e_singular_no_mesmo_lado,
                   _a_guarda_nao_e_generica, _o_denominador_abre,
-                  _o_modelo_nao_inventa):
+                  _o_modelo_nao_inventa, _a_varredura_paginada_nao_congela):
         try:
             passo(erros)
         except Exception as e:                       # noqa: BLE001
