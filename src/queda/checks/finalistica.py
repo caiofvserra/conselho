@@ -13,15 +13,20 @@ Fontes, em ordem de preferência:
 """
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from .. import analytics as A
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import coluna, fmt_brl, so_analiticas, topo
 from .common import df
+from .superintendencias import normalizar_unidade
 
 FRENTE = "Para onde vai o dinheiro"
+
+log = logging.getLogger("queda.checks.finalistica")
 
 
 COLS = ["_ano", "valor", "categoria", "funcao", "unidade", "rotulo"]
@@ -37,10 +42,26 @@ def _base_despesa(staged) -> tuple[pd.DataFrame, str]:
     if not cc.empty and "VALOR_TOTAL" in cc:
         d = cc.copy()
         d["valor"] = pd.to_numeric(d["VALOR_TOTAL"], errors="coerce").fillna(0)
-        if "ANALITICO" in d:                       # evita somar totalizadores
-            d = d[d["ANALITICO"].astype(bool)]
-        d["unidade"] = coluna(d, "NOME_CENTRO_CUSTO").fillna("").astype(str)
-        d["categoria"] = T.classificar_series(coluna(d, "NOME_CONTA"), d["unidade"])
+        d = so_analiticas(d)                       # evita somar totalizadores
+        bruta = coluna(d, "NOME_CENTRO_CUSTO").fillna("").astype(str)
+        # Fundir "Não utilizar - X" com "X" e dobrar acento ANTES de agrupar.
+        # Sem isso "FISCALIZAÇÃO" e "FISCALIZAÇAO" são duas unidades diferentes:
+        # na rodada real eram 8 pares, R$ 8,58 mi partidos em duas linhas, e a
+        # contagem de "109 rótulos" não era contagem de centro de custo nenhum.
+        d["unidade"] = bruta.map(normalizar_unidade)
+        # NATUREZA SÓ DA CONTA. A versão anterior passava também a unidade como
+        # segundo texto, e classificar_series usa o seguinte quando o primeiro
+        # devolve OUTROS — de modo que o resíduo da natureza era decidido pelo
+        # MESMO texto que decide a função. Os dois eixos deixavam de ser
+        # independentes exatamente onde a independência importa.
+        #
+        # O efeito era literal: a linha de natureza "Fiscalização (finalística)"
+        # da matriz valia R$ 212.502,80 e era composta por "Serviço de
+        # Divulgação Institucional" e "Uniformes" — nenhum dos dois casa a regra
+        # de fiscalização; entraram porque o centro de custo se chama SUPFIS e
+        # UFAT. Ou seja: a ferramenta fazia, por construção, o mesmo
+        # enquadramento que ela se propõe a auditar.
+        d["categoria"] = T.classificar_series(coluna(d, "NOME_CONTA"))
         d["funcao"] = T.classificar_funcao_series(d["unidade"], d["categoria"])
         d["rotulo"] = d["unidade"] + " / " + coluna(d, "NOME_CONTA").fillna("")
         return d[COLS], "centro de custo"
@@ -51,8 +72,7 @@ def _base_despesa(staged) -> tuple[pd.DataFrame, str]:
                      else "TOTAL_EXERCICIO")
         if valor_col in comp:
             d = comp.copy()
-            if "ANALITICA" in d:
-                d = d[d["ANALITICA"].astype(bool)]
+            d = so_analiticas(d)
             d["valor"] = pd.to_numeric(d[valor_col], errors="coerce").fillna(0)
             d["categoria"] = T.classificar_series(coluna(d, "NOME"))
             # sem centro de custo esta fonte não mede função: só o sinal fraco
@@ -349,7 +369,8 @@ def run(staged) -> list[Finding]:
                     "e não aparecem no contracheque publicado."),
                 evidencia=(verbas_pol.groupby(["_ano", "unidade"])["valor"]
                            .sum().reset_index()
-                           .sort_values("valor", ascending=False).head(100)),
+                           .sort_values("valor", ascending=False)
+                           .pipe(topo, 100, "valor")),
                 serie=s, grafico="bar_stacked", tabela_anual=s.reset_index(),
                 base_legal="CF, art. 37, caput (impessoalidade e moralidade); "
                            "Lei 4.320/1964, art. 63 (liquidação: comprovação do "
@@ -454,23 +475,49 @@ def _abrir_a_fiscalizacao(base: pd.DataFrame, eixo: str) -> list[Finding]:
     )]
 
     # --------------------------------------------------- triagem (opcional)
-    fora = (base[base[eixo] != "FISCALIZACAO"].groupby("rotulo")["valor"].sum()
-            .sort_values(ascending=False).head(300))
+    fora_todos = (base[base[eixo] != "FISCALIZACAO"].groupby("rotulo")["valor"].sum()
+                  .sort_values(ascending=False))
+    TETO = 300
+    fora = fora_todos.head(TETO)
     classe = base.groupby("rotulo")[eixo].first()
-    valores = base.groupby("rotulo")["valor"].sum()
-    alvo = list(composicao.head(300).index) + [r for r in fora.index
-                                               if r not in set(composicao.index)]
-    rubricas = {r: str(classe.get(r, "OUTROS")) for r in alvo}
+    dentro = set(composicao.index)
+    alvo = list(composicao.head(TETO).index) + [r for r in fora.index
+                                               if r not in dentro]
+    # "OUTROS" não é código de função — um rótulo ausente do mapa entraria com
+    # rótulo inválido na tabela publicada.
+    rubricas = {r: str(classe.get(r, "NAO_IDENTIFICADA")) for r in alvo}
+
+    # Corte silencioso lê-se como "varremos tudo". Ele vai dito.
+    cortados = max(len(composicao) - TETO, 0) + max(len(fora_todos) - TETO, 0)
+    if cortados:
+        log.info("triagem de enquadramento: %d rótulo(s) de menor valor ficaram "
+                 "fora da varredura (teto de %d por sentido)", cortados, TETO)
 
     divergencias = llm.auditar_enquadramento(rubricas)
     if not divergencias:
         return achados
 
+    # O valor de um rótulo DENTRO da medida é o que ele pesa na medida, não a
+    # soma dele em toda a base: a tabela fala em "dentro da fiscalização" e o
+    # número tem de ser o mesmo que a composição publica.
+    fora_valor = fora_todos.to_dict()
     for d in divergencias:
-        d["valor"] = round(float(valores.get(d["rubrica"], 0.0)), 2)
+        r = d["rubrica"]
+        d["valor"] = round(float(composicao.get(r, fora_valor.get(r, 0.0))), 2)
     div = pd.DataFrame(divergencias).sort_values("valor", ascending=False)
-    dentro_sinalizado = div[div["categoria_da_regra"] == "FISCALIZACAO"]
+    dentro_sinalizado = div[div["funcao_da_regra"] == "FISCALIZACAO"]
     valor_dentro = float(dentro_sinalizado["valor"].sum())
+
+    # Quanto do que foi sinalizado DENTRO é folha e verba a pessoa. Na primeira
+    # rodada real isso era 85,5% do valor, e a tabela não dizia: o modelo estava
+    # respondendo que "Salários" não descreve fiscalizar, o que é verdade sobre
+    # a palavra e irrelevante para uma medida que classifica pela UNIDADE.
+    pessoal = base[base["categoria"].isin(("REMUNERACAO", "VERBAS_PESSOAIS"))]
+    rot_pessoal = set(pessoal["rotulo"].unique())
+    valor_dentro_pessoal = float(
+        dentro_sinalizado.loc[dentro_sinalizado["rubrica"].isin(rot_pessoal),
+                              "valor"].sum())
+    pct_pessoal = (100 * valor_dentro_pessoal / valor_dentro) if valor_dentro else 0.0
 
     achados.append(Finding(
         id="finalistica-enquadramento-conferir", frente=FRENTE,
@@ -480,23 +527,35 @@ def _abrir_a_fiscalizacao(base: pd.DataFrame, eixo: str) -> list[Finding]:
                 f"fiscalização ({fmt_brl(valor_dentro)})"),
         descricao=(
             "Triagem feita por um modelo de linguagem LOCAL sobre os rótulos "
-            "que compõem a despesa, nos DOIS sentidos: rótulos contados como "
-            "fiscalização cujo texto não sustenta o enquadramento, e rótulos "
-            "fora dela cujo texto sugere que deveriam entrar.\n\n"
+            "que compõem a despesa, nos DOIS sentidos: unidades contadas como "
+            "de fiscalização que o modelo não lê assim, e unidades fora da "
+            "medida que ele leria dentro.\n\n"
             "**O que este achado NÃO é.** Não é conclusão, não é imputação e "
             "não mexe em número algum do relatório: nenhuma soma, razão ou "
-            "denominador foi alterado por ele. Um modelo pequeno erra, e por "
-            "isso cada linha só entra na lista com o TRECHO LITERAL do rótulo "
-            "que sustenta a resposta — resposta sem trecho conferível é "
-            "descartada antes de chegar aqui.\n\n"
-            "**Como usar.** Como fila de conferência: leia o rótulo, leia o "
-            "trecho e decida na fonte. O nome de um rótulo é evidência fraca "
-            "de finalidade — a forte é o empenho e o processo que o originou."),
+            "denominador foi alterado por ele. Um modelo pequeno erra, e a "
+            "lista só é útil como fila de conferência.\n\n"
+            "**O que já foi descartado antes de chegar aqui.** Resposta cujo "
+            "trecho não seleciona um pedaço do rótulo (repetir a rubrica "
+            "inteira não aponta nada) e resposta cujo motivo repete a "
+            "definição dada no enunciado em vez de falar da rubrica.\n\n"
+            + (f"**Leia com esta ressalva.** {pct_pessoal:.0f}% do valor "
+               "sinalizado dentro da medida é folha e verba a pessoas de "
+               "unidades de fiscalização. Pelo eixo que o relatório publica — a "
+               "FUNÇÃO, lida do centro de custo — salário e diária de unidade "
+               "de fiscalização SÃO custo da atividade-fim: agente fiscal em "
+               "campo custa salário e diária. Sinalização nessas linhas é, "
+               "quase sempre, o modelo respondendo sobre a palavra da conta e "
+               "não sobre a unidade.\n\n" if pct_pessoal >= 25 else "")
+            + "**Como usar.** Leia o rótulo, leia o trecho e decida na fonte. "
+            "O nome de um rótulo é evidência fraca de finalidade — a forte é o "
+            "empenho e o processo que o originou."),
         evidencia=div,
         como_verificar=("Puxar, para os rótulos sinalizados, o empenho e o "
                         "processo administrativo correspondentes: é o documento "
                         "que diz a finalidade, não o nome da conta."),
         metricas={"rubricas_auditadas": len(rubricas),
+                  "rotulos_fora_da_varredura": int(cortados),
+                  "valor_sinalizado_dentro_que_e_pessoal": round(valor_dentro_pessoal, 2),
                   "sinalizadas": int(len(div)),
                   "sinalizadas_dentro_da_fiscalizacao": int(len(dentro_sinalizado)),
                   "valor_sinalizado_dentro": round(valor_dentro, 2)},

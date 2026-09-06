@@ -25,7 +25,7 @@ import pandas as pd
 
 from .. import analytics as A
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import coluna, fmt_brl, so_analiticas
 from .common import df
 
 FRENTE = "Receita e cobertura"
@@ -141,8 +141,7 @@ def _receita(staged) -> pd.DataFrame:
     if col not in rec or "_ano" not in rec:
         return pd.DataFrame()
     d = rec.copy()
-    if "ANALITICA" in d:                       # não somar totalizadores
-        d = d[d["ANALITICA"].astype(bool)]
+    d = so_analiticas(d)                       # não somar totalizadores
     d["valor"] = pd.to_numeric(d[col], errors="coerce").fillna(0)
     d = d[d["valor"] > 0]
     if d.empty:

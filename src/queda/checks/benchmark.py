@@ -16,7 +16,7 @@ import pandas as pd
 from .. import config
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import coluna, fmt_brl, so_analiticas
 from .common import df
 
 FRENTE = "Comparação entre Creas"
@@ -45,16 +45,9 @@ def _rotulo(d: pd.DataFrame) -> pd.Series:
     return pd.Series("", index=d.index)
 
 
-def _so_analiticas(d: pd.DataFrame) -> pd.DataFrame:
-    """Só contas analíticas somam: as sintéticas totalizam as filhas, e somar
-    as duas dobra (ou triplica) a despesa de cada conselho. É o mesmo filtro
-    que finalistica/orcamento/pessoal aplicam ao comparativo do alvo."""
-    if "ANALITICA" not in d.columns:
-        return d
-    a = d["ANALITICA"]
-    if a.dtype == bool:
-        return d[a]
-    return d[a.astype(str).str.strip().str.lower().isin(("true", "1", "sim", "s"))]
+# A regra mora em utils.so_analiticas: era daqui que ela vinha, e as outras
+# frentes tinham a sua própria cópia escrita de forma frágil.
+_so_analiticas = so_analiticas
 
 
 def _indisponivel(motivo: str, bench: pd.DataFrame) -> Finding:

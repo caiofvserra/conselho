@@ -29,7 +29,7 @@ import pandas as pd
 from .. import analytics as A
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import coluna, fmt_brl, so_analiticas, topo
 from .common import df
 
 FRENTE = "Superintendências e fiscalização"
@@ -111,8 +111,7 @@ def _base(staged) -> pd.DataFrame:
         return pd.DataFrame()
     d = cc.copy()
     d["valor"] = pd.to_numeric(d["VALOR_TOTAL"], errors="coerce").fillna(0)
-    if "ANALITICO" in d:                       # não somar totalizadores
-        d = d[d["ANALITICO"].astype(bool)]
+    d = so_analiticas(d)                       # não somar totalizadores
     d = d[d["valor"] > 0]
     if d.empty:
         return d
@@ -253,22 +252,58 @@ def run(staged) -> list[Finding]:
                            "é o que fecha o intervalo num número só. Pedir "
                            "também o relatório anual de fiscalização.",
         ))
-        if salarios > 0 and verbas > salarios:
+        # A razão verba/folha só é interpretável se a FOLHA existir em todos os
+        # exercícios comparados. Na rodada real, 2021 trazia R$ 0,00 de
+        # remuneração contra R$ 3,53 mi de verba no mesmo conjunto: isso não é
+        # "a verba supera", é a folha não estar escriturada nesses centros de
+        # custo — buraco de alocação, e o achado somava esse buraco ao numerador
+        # do período inteiro. Com 2021 dentro a razão dava 1,36; sem ele, 1,20.
+        #
+        # E a gravidade era fixa em "alta" mesmo quando os exercícios mais
+        # recentes contrariavam a tese (2025 deu 0,83 e 2026, 0,92).
+        por_ano_nat = fiscal.groupby(["_ano", "natureza"])["valor"].sum().unstack(fill_value=0.0)
+        rem_ano = por_ano_nat.get("REMUNERACAO", pd.Series(dtype=float))
+        vp_ano = por_ano_nat.get("VERBAS_PESSOAIS", pd.Series(dtype=float))
+        anos_sem_folha = [int(a) for a, v in rem_ano.items() if float(v) <= 0]
+        anos_completos = [a for a in por_ano_nat.index if a not in anos_sem_folha]
+        rem_ok = float(rem_ano.reindex(anos_completos).fillna(0).sum())
+        vp_ok = float(vp_ano.reindex(anos_completos).fillna(0).sum())
+        recentes = sorted(anos_completos)[-2:]
+        contraria = [int(a) for a in recentes
+                     if float(vp_ano.get(a, 0)) <= float(rem_ano.get(a, 0))]
+
+        if rem_ok > 0 and vp_ok > rem_ok:
             achados.append(Finding(
-                id="super-verba-supera-salario", frente=FRENTE, gravidade="alta",
+                id="super-verba-supera-salario", frente=FRENTE,
+                gravidade="media" if contraria else "alta",
                 titulo=(f"Nas unidades de fiscalização, a verba indenizatória "
-                        f"({fmt_brl(verbas)}) supera a remuneração "
-                        f"({fmt_brl(salarios)})"),
+                        f"({fmt_brl(vp_ok)}) supera a remuneração "
+                        f"({fmt_brl(rem_ok)}) — {vp_ok / rem_ok:.2f}×"),
                 descricao=(
                     "Fiscalizar exige quadro permanente. Quando o pagamento "
                     "eventual — diária, quilometragem, ajuda de custo — supera "
                     "a folha da própria atividade, a fiscalização passou a ser "
                     "remunerada em grande parte por evento, fora da folha — e o "
-                    "que é pago por evento não aparece no contracheque publicado."),
-                evidencia=(fiscal.groupby(["_ano", "natureza"])["valor"].sum()
-                           .reset_index()),
+                    "que é pago por evento não aparece no contracheque publicado."
+                    + (f"\n\nExercícios {anos_sem_folha} ficaram FORA da conta: "
+                       "não há folha alocada a esses centros de custo neles, o "
+                       "que indica buraco de alocação e não ausência de "
+                       "salário. Somá-los inflaria a razão."
+                       if anos_sem_folha else "")
+                    + (f"\n\nNos exercícios mais recentes ({contraria}) a "
+                       "relação está INVERTIDA — a folha supera a verba. A "
+                       "afirmação vale para o período acumulado, não para a "
+                       "tendência." if contraria else "")),
+                evidencia=por_ano_nat.reset_index(),
                 serie=comp, grafico="bar_stacked",
                 base_legal="CF, art. 37, II e XI; Lei 4.320/1964, art. 63.",
+                metricas={"verba_sobre_salario": round(vp_ok / rem_ok, 2),
+                          "exercicios_sem_folha_alocada": anos_sem_folha,
+                          "exercicios_que_contrariam": contraria},
+                como_verificar="Pedir em que centros de custo está a folha do "
+                               "quadro que fiscaliza, e por que ela não aparece "
+                               "nas unidades de fiscalização em todos os "
+                               "exercícios.",
             ))
 
     # ------------------------------------------------ 3. ranking por unidade
@@ -285,30 +320,80 @@ def run(staged) -> list[Finding]:
         descricao="Ranking completo das unidades, com a camada territorial de "
                   "cada uma. O gráfico acompanha as oito maiores ao longo do "
                   "período: mostra qual unidade cresceu, qual encolheu e quando.",
-        evidencia=por_unidade.head(120),
+        evidencia=topo(por_unidade, 120, "total"),
         serie=A.serie_anual(d[d["unidade"].isin(lideres)], "valor", by="unidade"),
         grafico="bar_stacked",
         tabela_anual=A.ranking_anual(d, "unidade", "valor", top=10),
     ))
 
     # ---- unidade territorial que quase não gasta com a atividade-fim
+    #
+    # ACHADO QUE SE ACUSAVA SOZINHO. A versão anterior publicava "N unidades
+    # territoriais com menos de 5% da despesa em contas de fiscalização" e
+    # oferecia duas hipóteses, uma delas sobre o órgão ("a unidade opera como
+    # posto administrativo"). Só que o resultado era 0,0% para TODAS elas, em
+    # qualquer conselho e em qualquer exercício, por construção das NOSSAS
+    # regras: a camada CAMPO casa "UGI", e a regra de função manda "UGI" para
+    # ATENDIMENTO antes de qualquer coisa. A interseção CAMPO ∩ FISCALIZAÇÃO é
+    # vazia por desenho, e um número que só pode dar um valor não mede nada.
+    #
+    # A guarda abaixo pergunta isso à própria taxonomia, com os nomes reais das
+    # unidades desta rodada: alguma unidade territorial PODERIA ser lida como de
+    # fiscalização? Se não, o que se publica é o limite da ferramenta — que é um
+    # ponto de transparência legítimo e sobrevive ao contraditório — e nunca uma
+    # hipótese sobre a unidade.
     terr = d[d["camada"].isin(TERRITORIAIS)]
     if not terr.empty:
         perfil = terr.pivot_table(index="unidade", columns="funcao",
                                   values="valor", aggfunc="sum", fill_value=0.0)
         perfil["total"] = perfil.sum(axis=1)
         perfil = perfil[perfil["total"] >= 100_000]
+        alcanca = any(T.classificar_funcao(u) == "FISCALIZACAO"
+                      for u in perfil.index)
         if not perfil.empty:
             perfil["pct_fiscalizacao"] = (
                 100 * perfil.get("FISCALIZACAO", 0) / perfil["total"]).round(1)
             secas = perfil[perfil["pct_fiscalizacao"] < 5].sort_values(
                 "total", ascending=False)
-            if not secas.empty:
+            if not secas.empty and not alcanca:
+                achados.append(Finding(
+                    id="super-territorio-nao-separavel", frente=FRENTE,
+                    gravidade="info",
+                    titulo=(f"A despesa das {len(perfil)} unidades territoriais "
+                            f"({fmt_brl(float(perfil['total'].sum()))}) não "
+                            "permite separar vistoria de atendimento"),
+                    descricao=(
+                        "As unidades de campo do conselho aparecem na "
+                        "contabilidade publicada identificadas pela CIDADE, não "
+                        "pela função. Por isso não é possível, de fora, saber "
+                        "quanto do gasto de uma UGI sustenta a vistoria e "
+                        "quanto sustenta o atendimento no balcão.\n\n"
+                        "**Este achado não diz que essas unidades não "
+                        "fiscalizam, e não poderia dizer.** A nossa "
+                        "classificação lê a função no NOME do centro de custo e "
+                        "trata 'UGI' como atendimento: nenhuma unidade "
+                        "territorial poderia ser lida como de fiscalização, em "
+                        "conselho nenhum e em exercício nenhum. O que se "
+                        "publica aqui é o limite do dado publicado, não uma "
+                        "medida sobre a atividade."),
+                    evidencia=perfil.reset_index().head(60),
+                    base_legal="Lei 4.320/1964, art. 15 (despesa discriminada "
+                               "por elemento).",
+                    como_verificar="Pedir, por unidade territorial, o número de "
+                                   "agentes fiscais lotados e o total de "
+                                   "vistorias e autos por exercício — é o dado "
+                                   "que fecha esta lacuna.",
+                    cobertura={"base": float(perfil["total"].sum()),
+                               "universo": total,
+                               "o_que": "despesa das unidades territoriais"},
+                ))
+            elif not secas.empty:
                 achados.append(Finding(
                     id="super-unidade-sem-fiscalizacao", frente=FRENTE,
                     gravidade="media",
-                    titulo=(f"{len(secas)} unidade(s) territorial(is) com menos de "
-                            "5% da despesa em contas de fiscalização"),
+                    titulo=(f"{len(secas)} de {len(perfil)} unidade(s) "
+                            "territorial(is) com menos de 5% da despesa em "
+                            "contas de fiscalização"),
                     descricao=(
                         "Unidades regionais e locais existem para levar a "
                         "fiscalização ao interior. Quando a despesa de uma "
@@ -316,7 +401,11 @@ def run(staged) -> list[Finding]:
                         "sem rubrica ligada à atividade, ou a classificação "
                         "contábil não distingue a atividade-fim — o que já é "
                         "falha de transparência — ou a unidade opera como posto "
-                        "administrativo. As duas hipóteses merecem resposta."),
+                        "administrativo. As duas hipóteses merecem resposta.\n\n"
+                        "A comparação só é publicada porque OUTRAS unidades "
+                        "territoriais desta mesma rodada foram lidas como de "
+                        "fiscalização: sem esse contraste, o percentual seria "
+                        "zero por construção da nossa regra e não mediria nada."),
                     evidencia=secas.reset_index().head(60),
                     base_legal="Lei 5.194/1966, art. 34; Lei 4.320/1964, art. 15 "
                                "(despesa discriminada por elemento).",

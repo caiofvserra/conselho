@@ -15,7 +15,7 @@ import pandas as pd
 from .. import analytics as A
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import fmt_brl
+from ..utils import fmt_brl, topo
 from .common import df
 
 FRENTE = "Opacidade e transparência"
@@ -29,14 +29,47 @@ RX_AGREGADOR = re.compile(
     re.IGNORECASE)
 
 
+# Caracteres com que um portal público oculta parte de um CPF. Documento
+# MASCARADO não é documento ausente: é o formato que o art. 7º, §3º, VI do
+# Decreto 7.724/2012 e a LGPD prescrevem para dado pessoal.
+RX_MASCARA = re.compile(r"[*xX#]")
+
+
+def _documento(pg: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """(documento ausente, documento mascarado) — e a distinção é decisiva.
+
+    A regra anterior era `len(dígitos) < 11` e chamava de opaco tudo o que não
+    fosse um CPF inteiro. Só que o portal publica o CPF PARCIAL, como manda a
+    lei: "***456789**" tem seis dígitos e cai na regra. O relatório passou a
+    afirmar que R$ 256 milhões em diárias estavam "sem beneficiário
+    identificado" quando ao menos 97% daqueles pagamentos trazem NOME, e o
+    documento está publicado — só que protegido.
+
+    Era o achado mais fácil de derrubar de todo o relatório: basta abrir uma
+    linha do portal para ver o nome. O que o mascaramento de fato impede é
+    outra coisa, menor e verdadeira: reconstituir a série de um beneficiário ao
+    longo dos exercícios, porque máscaras diferentes colidem e homônimos não se
+    resolvem. Isso justifica PEDIR a série nominal consolidada; não é indício
+    de ocultação, e não vai publicado como tal.
+    """
+    doc = pg.get("CPF_CNPJ", pd.Series("", index=pg.index)).fillna("").astype(str)
+    digitos = doc.str.replace(r"\D", "", regex=True)
+    mascarado = doc.str.contains(RX_MASCARA, regex=True, na=False) & (digitos.str.len() > 0)
+    ausente = (digitos.str.len() == 0) & ~mascarado
+    return ausente, mascarado
+
+
 def _agregadores(pg: pd.DataFrame) -> pd.Series:
-    """Máscara dos pagamentos feitos a rótulos agregadores."""
+    """Máscara dos pagamentos em que NÃO se sabe quem recebeu.
+
+    Duas formas, e só duas: o favorecido é um rótulo coletivo ("DIVERSOS
+    FUNCIONARIOS"), ou não há documento nenhum publicado. CPF mascarado NÃO
+    entra — ver `_documento`.
+    """
     nomes = pg.get("FAVORECIDO_NORM", pd.Series(dtype=str)).fillna("")
     por_nome = nomes.str.contains(RX_AGREGADOR, regex=True, na=False)
-    # documento ausente também impede identificar o beneficiário
-    doc = pg.get("CPF_CNPJ", pd.Series(dtype=str)).fillna("").astype(str)
-    sem_doc = doc.str.replace(r"\D", "", regex=True).str.len() < 11
-    return por_nome | (sem_doc & (nomes.str.len() > 0))
+    ausente, _ = _documento(pg)
+    return por_nome | (ausente & (nomes.str.len() > 0))
 
 
 def run(staged) -> list[Finding]:
@@ -147,7 +180,7 @@ def run(staged) -> list[Finding]:
     # ------------------------------------- 4. quem são os rótulos
     rotulos = (agr.groupby("FAVORECIDO_NORM")["VALOR"]
                .agg(total="sum", pagamentos="size").reset_index()
-               .sort_values("total", ascending=False).head(30))
+               .sort_values("total", ascending=False).pipe(topo, 30, "total"))
     achados.append(Finding(
         id="opacidade-rotulos", frente=FRENTE, gravidade="info",
         titulo=f"Rótulos agregadores identificados ({len(rotulos)} principais)",

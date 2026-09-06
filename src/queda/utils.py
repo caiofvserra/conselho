@@ -164,3 +164,57 @@ def parse_data(v):
 def fmt_brl(v: float) -> str:
     s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
+
+
+def so_analiticas(d: pd.DataFrame) -> pd.DataFrame:
+    """Só as contas ANALÍTICAS somam — as sintéticas totalizam as filhas.
+
+    Somar as duas dobra ou triplica a despesa, e o defeito é invisível: o total
+    fica plausível. Cada frente tinha a sua cópia da regra, escrita como
+    `d[d["ANALITICA"].astype(bool)]`, e essa forma tem uma armadilha: em coluna
+    de TEXTO, `astype(bool)` devolve True para a string "False" — todo
+    totalizador voltaria para a soma, em silêncio. Hoje o leitor de staged
+    devolve a coluna já como booleano e a forma antiga funciona; basta o portal
+    passar a gravar "S"/"N", ou alguém ler o CSV por outro caminho, para o bug
+    voltar sem aviso.
+
+    Uma regra só, tolerante ao texto, nas duas grafias que o portal usa
+    (ANALITICA para conta contábil, ANALITICO para centro de custo).
+    """
+    for col in ("ANALITICA", "ANALITICO"):
+        if col not in d.columns:
+            continue
+        a = d[col]
+        if a.dtype == bool:
+            d = d[a]
+        else:
+            d = d[a.astype(str).str.strip().str.lower()
+                   .isin(("true", "1", "sim", "s", "t"))]
+    return d
+
+
+def topo(d: pd.DataFrame, n: int, coluna_valor: str | None = None) -> pd.DataFrame:
+    """As `n` primeiras linhas, REGISTRANDO o que ficou de fora.
+
+    Tabela truncada publicada sem aviso lê-se como "é isto tudo": quem soma o
+    arquivo obtém número diferente do título do achado e conclui que um dos
+    dois está errado. Foi assim que três achados caíram na conferência da
+    rodada — o CSV tinha exatamente 100 linhas, o título somava o conjunto
+    inteiro, e nada no arquivo dizia que havia corte.
+
+    O corte fica em `attrs['_corte']`, e o relatório o publica nas métricas do
+    achado. Truncar continua sendo legítimo; truncar em silêncio, não.
+    """
+    total = len(d)
+    saida = d.head(n).copy()
+    if total <= n:
+        return saida
+    corte = {"linhas_totais": int(total), "linhas_publicadas": int(len(saida))}
+    if coluna_valor and coluna_valor in d.columns:
+        v_total = float(pd.to_numeric(d[coluna_valor], errors="coerce").fillna(0).sum())
+        v_pub = float(pd.to_numeric(saida[coluna_valor], errors="coerce").fillna(0).sum())
+        corte.update(valor_total=round(v_total, 2),
+                     valor_publicado=round(v_pub, 2),
+                     valor_omitido=round(v_total - v_pub, 2))
+    saida.attrs["_corte"] = corte
+    return saida

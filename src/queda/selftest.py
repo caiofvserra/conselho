@@ -977,7 +977,12 @@ ESPERADOS = [
     "super-fiscalizacao-efetiva",
     "super-verba-supera-salario",      # verba > folha na própria fiscalização
     "super-ranking-unidades",
-    "super-unidade-sem-fiscalizacao",
+    # A fixture reproduz o caso REAL: nenhuma unidade territorial pode ser
+    # lida como de fiscalização pela nossa regra de função (ela manda "UGI"
+    # para atendimento), então o que sai é o achado de LIMITE, não o de
+    # comparação. O ramo oposto — territorial que a regra alcança — é
+    # exercitado em regressoes/rodada19, com os dois lados.
+    "super-territorio-nao-separavel",
     "super-tendencia-divergente",      # total cresce mais que a atividade-fim
     "super-quadro-por-camada",
     # representação: quem ocupa o plenário e para onde vai o repasse

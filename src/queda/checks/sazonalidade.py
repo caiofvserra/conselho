@@ -42,7 +42,7 @@ import pandas as pd
 
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import coluna, fmt_brl, so_analiticas
 from .common import df
 
 FRENTE = "Sazonalidade mensal da despesa"
@@ -149,8 +149,7 @@ def _mensal(staged) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     # filtro o mesmo real entra três ou quatro vezes e a concentração mensal
     # sai multiplicada — com os percentuais intactos, o que torna o erro
     # indetectável na leitura.
-    if "ANALITICO" in d:
-        d = d[d["ANALITICO"].astype(bool)]
+    d = so_analiticas(d)
     if d.empty:
         diag["motivo"] = ("nenhuma linha analítica sobrou após descartar os "
                           "totalizadores da árvore contábil")

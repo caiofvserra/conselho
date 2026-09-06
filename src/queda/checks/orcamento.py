@@ -22,7 +22,7 @@ import pandas as pd
 from .. import analytics as A
 from .. import taxonomia as T
 from ..findings import Finding
-from ..utils import coluna, fmt_brl
+from ..utils import coluna, fmt_brl, so_analiticas
 from .common import df
 
 FRENTE = "Orçamento"
@@ -45,8 +45,7 @@ def _receita_anual(staged) -> pd.Series:
                else "TOTAL_EXERCICIO")
         if col in rec:
             d = rec.copy()
-            if "ANALITICA" in d:
-                d = d[d["ANALITICA"].astype(bool)]
+            d = so_analiticas(d)
             s = d.groupby("_ano")[col].sum()
             if float(s.sum()) > 0:
                 return s
@@ -173,8 +172,7 @@ def run(staged) -> list[Finding]:
     comp = df(staged, "comparativo_despesa")
     if not comp.empty and "VALOR_ORCADO" in comp and "REALIZADO_EXERCICIO" in comp:
         d = comp.copy()
-        if "ANALITICA" in d:
-            d = d[d["ANALITICA"].astype(bool)]
+        d = so_analiticas(d)
         d["orcado"] = _num(d, "VALOR_ORCADO")
         d["realizado"] = _num(d, "REALIZADO_EXERCICIO")
         d["conta"] = coluna(d, "NOME").fillna("").astype(str)

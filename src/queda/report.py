@@ -139,7 +139,13 @@ def gerar(achados: list[Finding], staged: dict, *, resumo_llm: str = "") -> None
     payload_findings = []
     for f in achados:
         if f.evidencia is not None and not f.evidencia.empty:
-            # CSV COMPLETO em disco — a tabela do HTML é recortada, o arquivo não
+            # O CSV traz a evidência COMO O CHECK A MONTOU. O HTML recorta a
+            # tabela; o arquivo não recorta de novo — mas se o próprio check já
+            # truncou (utils.topo), o corte vai para as métricas do achado, e
+            # não fica um arquivo de 100 linhas parecendo o conjunto inteiro.
+            corte = f.evidencia.attrs.get("_corte")
+            if corte:
+                f.metricas.setdefault("corte_da_evidencia", corte)
             _formatar_datas(f.evidencia.copy()).to_csv(
                 csv_dir / f"{f.id}.csv", index=False)
         anual = None

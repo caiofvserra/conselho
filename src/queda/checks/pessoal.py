@@ -10,7 +10,7 @@ import pandas as pd
 
 from .. import config
 from ..findings import Finding
-from ..utils import fmt_brl
+from ..utils import fmt_brl, so_analiticas
 from .common import classificar_beneficiario, df, pagamentos_indenizacao
 
 FRENTE = "Custo real por categoria"
@@ -113,7 +113,7 @@ def run(staged) -> list[Finding]:
         }
         linhas = []
         valor_col = "REALIZADO_EXERCICIO" if "REALIZADO_EXERCICIO" in comp else "TOTAL_EXERCICIO"
-        analitica = comp[comp.get("ANALITICA", True).astype(bool)] if "ANALITICA" in comp else comp
+        analitica = so_analiticas(comp)
         for grupo, rx in grupos.items():
             m = analitica[analitica["nome_lower"].str.contains(rx, regex=True)]
             if m.empty:
