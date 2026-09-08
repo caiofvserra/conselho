@@ -386,6 +386,171 @@ def _tabela_truncada_declara_o_corte(erros: list[str]) -> None:
           "tabela que coube inteira foi marcada como truncada")
 
 
+def _o_texto_livre_nao_casa_consigo_mesmo(erros: list[str]) -> None:
+    """A frente que lê o histórico do pagamento — e a armadilha dela.
+
+    O histórico costuma repetir a razão social do favorecido. Sem conferir o
+    termo contra o nome de quem recebeu, um pagamento a uma associação com
+    "congresso" no nome entra pelo NOME e não pelo objeto — o filtro casa
+    consigo mesmo e não seleciona nada, exatamente como a triagem por modelo
+    fazia quando aceitava a rubrica inteira como trecho.
+    """
+    import pandas as pd
+
+    from ..checks import objeto as O
+
+    staged = {"pagamentos": pd.DataFrame({
+        "_ano": [2024, 2024, 2024, 2024],
+        "VALOR": [10_000.0, 20_000.0, 30_000.0, 40_000.0],
+        "CONTA_EMPENHO": ["Diarias com Inspetores", "Diarias com Inspetores",
+                          "Diarias com Inspetores", "Material de Consumo"],
+        "HISTORICO": ["confraternizacao de fim de ano do colegio de inspetores",
+                      "diligencia em obra - vistoria",
+                      "pagamento ao congresso brasileiro de engenharia ltda",
+                      "confraternizacao"],
+        "NOME_RAZAO_SOCIAL": ["BUFFET X", "FULANO", "CONGRESSO BRASILEIRO DE "
+                              "ENGENHARIA LTDA", "BUFFET Y"],
+    })}
+    achados = {a.id: a for a in O.run(staged)}
+
+    _erro(erros, "objeto-cobertura-do-historico" in achados,
+          "a frente não publicou o denominador — numerador sem denominador não "
+          "é medida")
+    cer = achados.get("objeto-cerimonial-em-fiscalizacao")
+    _erro(erros, cer is not None,
+          "a confraternização em conta de diária de inspetores não foi "
+          "detectada — é o caso que abriu a frente")
+    if cer is None:
+        return
+
+    valor = float(cer.metricas.get("valor", 0))
+    _erro(erros, abs(valor - 10_000.0) < 0.01,
+          f"a frente somou {valor} e devia somar 10.000,00: a diligência não é "
+          "cerimonial, o pagamento ao 'CONGRESSO ... LTDA' casou pelo NOME do "
+          "favorecido e não pelo objeto, e a última linha está fora do universo")
+
+    # a guarda, isolada — e ela é TERMO A TERMO
+    d = O._base(staged)
+    termo = O._termo_que_sustenta(d, O.RX_CERIMONIAL)
+    _erro(erros, termo.iloc[2] == "",
+          "o termo veio da razão social do favorecido e o filtro aceitou")
+    _erro(erros, termo.iloc[0] == "colegio de inspetor",
+          f"o termo que sustenta a linha saiu {termo.iloc[0]!r} e devia ser "
+          "'colegio de inspetor' — é o mais longo e o mais específico dos que "
+          "casaram, e 'buffet' está no nome do favorecido, então não pode "
+          "sustentar a linha nem derrubá-la junto")
+
+
+# Históricos plausíveis de conselho, escritos para ATACAR a lista de termos.
+# Os quatro primeiros do bloco negativo quebravam a versão original:
+#   "imissao na posse"  casava \bposse\b        (imóvel, não solenidade)
+#   "rua do forum"      casava \bforum\b        (endereço)
+#   "semana de ferias"  casava semana d[ae]
+#   "concurso de"       casava curso de          (faltava \b)
+_CERIMONIAL_SIM = (
+    "confraternizacao de fim de ano do colegio de inspetores",
+    "placa comemorativa dos 90 anos",
+    "comemoracao do dia do engenheiro",
+    "premiacao do concurso de projetos",
+    "posse de novos conselheiros",
+    "cerimonia de posse da diretoria",
+    "coquetel de encerramento",
+    "buffet para o encontro de inspetores",
+    "sessao plenaria - coffee break",
+    "ornamentacao do salao",
+    "forum de integracao dos inspetores",
+)
+_CERIMONIAL_NAO = (
+    "imissao na posse do imovel",
+    "posse do imovel alugado",
+    "rua do forum, 120 - locacao",
+    "semana de ferias do servidor",
+    "placa de identificacao de veiculo",
+    "premio de seguro predial",
+    "diaria para vistoria em obra",
+    "diligencia de fiscalizacao em canteiro",
+    "auto de infracao - notificacao",
+)
+
+
+def _os_termos_nao_pegam_o_que_nao_devem(erros: list[str]) -> None:
+    """A lista de termos, atacada nos dois sentidos, com históricos plausíveis."""
+    from .. import taxonomia as Tx
+    from ..checks import objeto as O
+
+    for t in _CERIMONIAL_SIM:
+        _erro(erros, bool(O.RX_CERIMONIAL.findall(Tx.normalizar(t))),
+              f"falso negativo: {t!r} descreve cerimônia e não foi detectado")
+    for t in _CERIMONIAL_NAO:
+        casou = O.RX_CERIMONIAL.findall(Tx.normalizar(t))
+        _erro(erros, not casou,
+              f"falso positivo: {t!r} não é cerimônia e casou {casou} — cada um "
+              "destes vira uma linha errada numa tabela que vai ao Tribunal")
+    _erro(erros, not O.RX_CAPACITACAO.findall(Tx.normalizar("premiacao do concurso de projetos")),
+          "'curso de' casou dentro de 'conCURSO DE' — falta a borda de palavra")
+    _erro(erros, bool(O.RX_CAPACITACAO.findall(Tx.normalizar("curso de formacao de agente fiscal"))),
+          "o curso legítimo deixou de ser detectado")
+    # Acento: o padrão é escrito sem acento e o texto passa por normalizar.
+    for t in ("Confraternização", "Troféu", "Aniversário", "Seminário",
+              "Plenária", "Câmara Especializada", "Premiação", "Ornamentação"):
+        _erro(erros, bool(O.RX_CERIMONIAL.findall(Tx.normalizar(t))),
+              f"termo acentuado inalcançável depois da normalização: {t!r}")
+    # Grupos de captura quebram findall (devolve tuplas) e a subtração vira lixo.
+    for nome, rx in (("RX_CERIMONIAL", O.RX_CERIMONIAL),
+                     ("RX_CAPACITACAO", O.RX_CAPACITACAO),
+                     ("RX_CONTA_INSPETOR", O.RX_CONTA_INSPETOR),
+                     ("RX_CONTA_CONSELHEIRO", O.RX_CONTA_CONSELHEIRO)):
+        _erro(erros, rx.groups == 0,
+              f"{nome} tem {rx.groups} grupo(s) de captura — findall passaria a "
+              "devolver tuplas e a guarda termo a termo viraria lixo")
+
+
+def _o_universo_e_o_estorno_vao_declarados(erros: list[str]) -> None:
+    """Escolha de universo não declarada é a que derruba a peça, e estorno
+    descartado conta o pagamento revertido pelo valor cheio."""
+    import pandas as pd
+
+    from ..checks import objeto as O
+
+    staged = {"pagamentos": pd.DataFrame({
+        "_ano": [2019, 2024, 2024, 2024],
+        "VALOR": [5_000.0, 10_000.0, -4_000.0, 7_000.0],
+        "CONTA_EMPENHO": ["Diarias com Inspetores", "Diarias com Inspetores",
+                          "Diarias com Inspetores", "Diarias com Conselheiros"],
+        "HISTORICO": ["diligencia", "confraternizacao anual",
+                      "estorno de confraternizacao anual", "coquetel"],
+        "NOME_RAZAO_SOCIAL": ["FULANO", "BUFFET X", "BUFFET X", "BUFFET X"],
+    })}
+    ach = {a.id: a for a in O.run(staged)}
+    cob = ach.get("objeto-cobertura-do-historico")
+    _erro(erros, cob is not None, "a frente não publicou o universo")
+    if cob is None:
+        return
+    m = cob.metricas
+    _erro(erros, m.get("periodo") == "2019–2024",
+          f"o período saiu {m.get('periodo')!r} e é o dos PAGAMENTOS (2019–2024) "
+          "— chamá-lo do período da medida de fiscalização compararia datasets "
+          "diferentes")
+    _erro(erros, m.get("estornos") == 1 and abs(float(m.get("valor_estornado", 0)) + 4000) < 0.01,
+          f"o estorno não foi declarado: estornos={m.get('estornos')} "
+          f"valor={m.get('valor_estornado')}")
+    _erro(erros, abs(float(m.get("conta_de_conselheiro_no_universo", 0)) - 7000.0) < 0.01,
+          "a fatia que entrou por conta de conselheiro não foi declarada — é a "
+          "escolha discutível do universo e não pode ficar implícita")
+    _erro(erros, cob.evidencia is not None and "regra de entrada" in cob.evidencia.columns,
+          "a tabela não diz por que cada linha entrou no universo")
+    # O estorno abate o cerimonial: 10.000 - 4.000 = 6.000, mais o coquetel 7.000
+    cer = ach.get("objeto-cerimonial-em-fiscalizacao")
+    _erro(erros, cer is not None, "o cerimonial não foi detectado")
+    if cer is not None:
+        v = float(cer.metricas.get("valor", 0))
+        _erro(erros, abs(v - 13_000.0) < 0.01,
+              f"o cerimonial somou {v} e devia somar 13.000,00 (10.000 de "
+              "confraternização menos 4.000 de estorno, mais 7.000 de coquetel) "
+              "— descartar a linha negativa contaria o pagamento revertido "
+              "pelo valor cheio")
+
+
 def run() -> list[str]:
     erros: list[str] = []
     for passo in (_a_palavra_fiscal_nao_basta, _plural_e_singular_no_mesmo_lado,
@@ -394,7 +559,10 @@ def run() -> list[str]:
                   _o_achado_nao_pode_se_acusar_sozinho,
                   _cpf_mascarado_nao_e_cpf_ausente,
                   _totalizador_nunca_entra_na_soma,
-                  _tabela_truncada_declara_o_corte):
+                  _tabela_truncada_declara_o_corte,
+                  _o_texto_livre_nao_casa_consigo_mesmo,
+                  _os_termos_nao_pegam_o_que_nao_devem,
+                  _o_universo_e_o_estorno_vao_declarados):
         try:
             passo(erros)
         except Exception as e:                       # noqa: BLE001

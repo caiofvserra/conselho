@@ -8,14 +8,14 @@ from ..findings import Finding
 import traceback
 
 from . import (atas, benchmark, casos, contratos, diagnostico, diarias, empenhos,
-               finalistica, forense, fornecedores, opacidade, orcamento,
+               finalistica, forense, fornecedores, objeto, opacidade, orcamento,
                pessoal, plano, receita, rede, representacao, sazonalidade,
                superintendencias, tcu)
 
 log = logging.getLogger("queda.checks")
 
 # ordem = ordem das abas no relatório
-MODULOS = [finalistica, superintendencias, receita, orcamento, plano,
+MODULOS = [finalistica, objeto, superintendencias, receita, orcamento, plano,
            opacidade, diarias, pessoal, sazonalidade, representacao, casos,
            empenhos, contratos, rede, atas, forense, fornecedores, tcu,
            benchmark, diagnostico]

@@ -966,6 +966,10 @@ ESPERADOS = [
     # pessoal e finalidade
     "pessoal-renda-invisivel",         # indenização >30% do salário
     "pessoal-serie-historica",
+    # A frente que lê o TEXTO LIVRE do pagamento — a única que responde "o
+    # que o dinheiro comprou", e não "em que conta ele caiu".
+    "objeto-cobertura-do-historico",   # o denominador, sempre primeiro
+    "objeto-cerimonial-em-fiscalizacao",
     "finalistica-panorama",            # meio × fim
     "finalistica-categorias",
     "finalistica-matriz",              # natureza × função (dois eixos)
